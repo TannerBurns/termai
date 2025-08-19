@@ -50,7 +50,9 @@ struct ContentView: View {
                     Group {
                         if let currentTab = tabsStore.selected {
                             TerminalPane(onAddToChat: { text, meta in
-                                currentTab.selectedChat.setPendingTerminalContext(text, meta: meta)
+                                var enriched = meta
+                                enriched?.cwd = currentTab.ptyModel.currentWorkingDirectory
+                                currentTab.selectedChat.setPendingTerminalContext(text, meta: enriched)
                             }, onToggleChat: { showChat.toggle() })
                             .environmentObject(currentTab.ptyModel)
                         } else {

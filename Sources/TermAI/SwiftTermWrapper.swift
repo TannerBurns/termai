@@ -14,6 +14,7 @@ final class PTYModel: ObservableObject {
     @Published var lastOutputStartViewportRow: Int? = nil
     @Published var visibleRows: Int = 0
     @Published var lastOutputLineRange: (start: Int, end: Int)? = nil
+    @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
 }
 
 #if canImport(SwiftTerm)
@@ -128,7 +129,12 @@ struct SwiftTermView: NSViewRepresentable {
         // TerminalViewDelegate (unused here, but kept for future use)
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: TerminalView, title: String) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
+            guard let dir = directory, !dir.isEmpty else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.model.currentWorkingDirectory = dir
+            }
+        }
         func send(source: TerminalView, data: ArraySlice<UInt8>) {}
         func scrolled(source: TerminalView, position: Double) {}
         func requestOpenLink(source: TerminalView, link: String, params: [String : String]) {}

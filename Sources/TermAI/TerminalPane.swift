@@ -65,13 +65,17 @@ struct TerminalPane: View {
     private func addSelectionToChat() {
         let sel = ptyModel.getSelectionText?() ?? ""
         guard !sel.isEmpty else { return }
-        onAddToChat(sel, nil)
+        var meta = TerminalContextMeta(startRow: -1, endRow: -1)
+        meta.cwd = ptyModel.currentWorkingDirectory
+        onAddToChat(sel, meta)
     }
 
     private func addLastOutputToChat() {
         let chunk = ptyModel.lastOutputChunk.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !chunk.isEmpty else { return }
-        let meta = ptyModel.lastOutputLineRange.map { TerminalContextMeta(startRow: $0.start, endRow: $0.end) }
+        var meta = ptyModel.lastOutputLineRange.map { TerminalContextMeta(startRow: $0.start, endRow: $0.end) }
+        if meta == nil { meta = TerminalContextMeta(startRow: -1, endRow: -1) }
+        meta?.cwd = ptyModel.currentWorkingDirectory
         onAddToChat(chunk, meta)
     }
 }
