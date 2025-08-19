@@ -29,8 +29,13 @@ final class ChatViewModel: ObservableObject {
 
     init() {}
 
+    deinit {
+        streamingTask?.cancel()
+    }
+
     func appendUserMessage(_ text: String) {
         messages.append(ChatMessage(role: "user", content: text))
+        messages = messages
         persistMessages()
     }
 
@@ -41,6 +46,12 @@ final class ChatViewModel: ObservableObject {
         streamingMessageId = nil
         messages = [ChatMessage(role: "system", content: "You are a helpful terminal assistant. When given pasted terminal outputs, analyze them and provide guidance.")]
         persistMessages()
+    }
+
+    func cancelStreaming() {
+        streamingTask?.cancel()
+        streamingTask = nil
+        streamingMessageId = nil
     }
 
     func replaceMessages(_ newMessages: [ChatMessage]) {
@@ -84,6 +95,8 @@ final class ChatViewModel: ObservableObject {
         let assistantIndex = messages.count
         messages.append(ChatMessage(role: "assistant", content: ""))
         streamingMessageId = messages[assistantIndex].id
+        // Publish the new placeholder message immediately
+        messages = messages
         // Cancel any previous stream for this chat
         streamingTask?.cancel()
         streamingTask = Task { [weak self] in
@@ -274,16 +287,22 @@ final class ChatViewModel: ObservableObject {
                     accumulated += delta
                     if Task.isCancelled { break streamLoop }
                     messages[index].content = accumulated
+                    // Re-assign to trigger @Published change notifications during streaming
+                    messages = messages
                 } else if let content = chunk.choices.first?.message?.content, !content.isEmpty {
                     accumulated += content
                     if Task.isCancelled { break streamLoop }
                     messages[index].content = accumulated
+                    // Re-assign to trigger @Published change notifications during streaming
+                    messages = messages
                 }
             } else if let ollama = try? JSONDecoder().decode(OllamaStreamChunk.self, from: data) {
                 if let content = ollama.message?.content ?? ollama.response { // various shapes
                     accumulated += content
                     if Task.isCancelled { break streamLoop }
                     messages[index].content = accumulated
+                    // Re-assign to trigger @Published change notifications during streaming
+                    messages = messages
                 }
             }
         }

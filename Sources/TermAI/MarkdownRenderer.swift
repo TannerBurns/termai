@@ -129,21 +129,39 @@ private struct CodeBlockView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
         .overlay(alignment: .topTrailing) {
             if isClosed && isShell {
-                Button("Add to terminal") {
-                    let sanitized = code
-                        .components(separatedBy: .newlines)
-                        .map { line in
-                            let trimmed = line.trimmingCharacters(in: .whitespaces)
-                            if trimmed.hasPrefix("$ ") { return String(trimmed.dropFirst(2)) }
-                            if trimmed.hasPrefix("# ") { return String(trimmed.dropFirst(2)) }
-                            if trimmed.hasPrefix("% ") { return String(trimmed.dropFirst(2)) }
-                            return trimmed
-                        }
-                        .joined(separator: " ")
-                    ptyModel.sendInput?(sanitized)
+                HStack(spacing: 6) {
+                    Button("Add to terminal") {
+                        let sanitized = code
+                            .components(separatedBy: .newlines)
+                            .map { line in
+                                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                                if trimmed.hasPrefix("$ ") { return String(trimmed.dropFirst(2)) }
+                                if trimmed.hasPrefix("# ") { return String(trimmed.dropFirst(2)) }
+                                if trimmed.hasPrefix("% ") { return String(trimmed.dropFirst(2)) }
+                                return trimmed
+                            }
+                            .joined(separator: " ")
+                        ptyModel.sendInput?(sanitized)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
+
+                    Button("▶️ Run in terminal") {
+                        let sanitized = code
+                            .components(separatedBy: .newlines)
+                            .map { line in
+                                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                                if trimmed.hasPrefix("$ ") { return String(trimmed.dropFirst(2)) }
+                                if trimmed.hasPrefix("# ") { return String(trimmed.dropFirst(2)) }
+                                if trimmed.hasPrefix("% ") { return String(trimmed.dropFirst(2)) }
+                                return trimmed
+                            }
+                            .joined(separator: " ")
+                        ptyModel.sendInput?(sanitized + "\n")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.mini)
                 .padding(6)
             }
         }
