@@ -164,7 +164,14 @@ final class ChatViewModel: ObservableObject {
 
         let userMessages = messages.filter { $0.role != "system" }
         let allMessages: [RequestBody.Message] = [RequestBody.Message(role: "system", content: systemPrompt)] + userMessages.map {
-            let prefix = ($0.terminalContext?.isEmpty == false) ? "Terminal Context:\n```\n\($0.terminalContext!)\n```\n\n" : ""
+            var prefix = ""
+            if let ctx = $0.terminalContext, !ctx.isEmpty {
+                var header = "Terminal Context:"
+                if let meta = $0.terminalContextMeta, let cwd = meta.cwd, !cwd.isEmpty {
+                    header += "\nCurrent Working Directory - \(cwd)"
+                }
+                prefix = "\(header)\n```\n\(ctx)\n```\n\n"
+            }
             return RequestBody.Message(role: $0.role, content: prefix + $0.content)
         }
         let req = RequestBody(
@@ -220,7 +227,14 @@ final class ChatViewModel: ObservableObject {
 
         let userMessages = messages.filter { $0.role != "system" }
         let allMessages: [RequestBody.Message] = [RequestBody.Message(role: "system", content: systemPrompt)] + userMessages.map {
-            let prefix = ($0.terminalContext?.isEmpty == false) ? "Terminal Context:\n```\n\($0.terminalContext!)\n```\n\n" : ""
+            var prefix = ""
+            if let ctx = $0.terminalContext, !ctx.isEmpty {
+                var header = "Terminal Context:"
+                if let meta = $0.terminalContextMeta, let cwd = meta.cwd, !cwd.isEmpty {
+                    header += "\nCurrent Working Directory - \(cwd)"
+                }
+                prefix = "\(header)\n```\n\(ctx)\n```\n\n"
+            }
             return RequestBody.Message(role: $0.role, content: prefix + $0.content)
         }
         let req = RequestBody(

@@ -92,6 +92,11 @@ struct ChatPane: View {
                         Button("Remove") { model.clearPendingTerminalContext() }
                             .buttonStyle(.borderless)
                     }
+                    if let meta = model.pendingTerminalMeta, let cwd = meta.cwd, !cwd.isEmpty {
+                        Text("Current Working Directory - \(cwd)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                     Text(ctx)
                         .font(.system(.footnote, design: .monospaced))
                         .lineLimit(8)
@@ -255,6 +260,13 @@ private struct MarkdownMessageBubble: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Color.orange.opacity(0.2)))
+                    if let cwd = meta.cwd, !cwd.isEmpty {
+                        Label("cwd: \(cwd)", systemImage: "folder")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.blue.opacity(0.15)))
+                    }
                 }
             }
             // Hide terminalContext for user messages to save space, but still included in request
