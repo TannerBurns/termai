@@ -8,6 +8,7 @@ struct TerminalPane: View {
     @State private var buttonHovering: Bool = false
 
     let onAddToChat: (String, TerminalContextMeta?) -> Void
+    let onToggleChat: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,18 +16,10 @@ struct TerminalPane: View {
                 Text("Terminal")
                     .font(.headline)
                 Spacer()
-                Button(action: copyAll) {
-                    Label("Copy All", systemImage: "doc.on.doc")
+                Button(action: onToggleChat) {
+                    Image(systemName: "bubble.right")
                 }
-                .disabled(ptyModel.collectedOutput.isEmpty)
-                Button(action: addSelectionToChat) {
-                    Label("Add Selection", systemImage: "text.badge.plus")
-                }
-                .disabled(!hasSelection)
-                Button(action: addAllToChat) {
-                    Label("Add to Chat", systemImage: "arrow.turn.right.up")
-                }
-                .disabled(ptyModel.collectedOutput.isEmpty)
+                .help("Toggle Chat")
             }
             .padding(8)
 
@@ -34,19 +27,26 @@ struct TerminalPane: View {
                 .background(Color(NSColor.textBackgroundColor))
                 .overlay(alignment: .bottomTrailing) {
                     let hasChunk = !ptyModel.lastOutputChunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    if (hovering || buttonHovering) && hasChunk {
-                        Button(action: {
-                            let chunk = ptyModel.lastOutputChunk.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !chunk.isEmpty else { return }
-                            let meta = ptyModel.lastOutputLineRange.map { TerminalContextMeta(startRow: $0.start, endRow: $0.end) }
-                            onAddToChat(chunk, meta)
-                        }) {
-                            Label("Add Last Output", systemImage: "plus.circle.fill")
+                    if (hovering || buttonHovering) && (hasSelection || hasChunk) {
+                        VStack(alignment: .trailing, spacing: 8) {
+                            if hasSelection {
+                                Button(action: addSelectionToChat) {
+                                    Label("Add Selection", systemImage: "text.badge.plus")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .onHover { buttonHovering = $0 }
+                            }
+                            if hasChunk {
+                                Button(action: addLastOutputToChat) {
+                                    Label("Add Last Output", systemImage: "plus.circle.fill")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                                .onHover { buttonHovering = $0 }
+                            }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
                         .padding(12)
-                        .onHover { buttonHovering = $0 }
                     }
                 }
                 .onHover { hovering = $0 }
@@ -62,20 +62,17 @@ struct TerminalPane: View {
         }
     }
 
-    private func copyAll() {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(ptyModel.collectedOutput, forType: .string)
-    }
-
-    private func addAllToChat() {
-        onAddToChat(ptyModel.collectedOutput, nil)
-    }
-
     private func addSelectionToChat() {
         let sel = ptyModel.getSelectionText?() ?? ""
         guard !sel.isEmpty else { return }
         onAddToChat(sel, nil)
+    }
+
+    private func addLastOutputToChat() {
+        let chunk = ptyModel.lastOutputChunk.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !chunk.isEmpty else { return }
+        let meta = ptyModel.lastOutputLineRange.map { TerminalContextMeta(startRow: $0.start, endRow: $0.end) }
+        onAddToChat(chunk, meta)
     }
 }
 

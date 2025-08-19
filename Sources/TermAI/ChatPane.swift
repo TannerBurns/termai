@@ -2,16 +2,19 @@ import SwiftUI
 
 struct ChatPane: View {
     @EnvironmentObject private var model: ChatViewModel
+    @EnvironmentObject private var currentTab: AppTab
+    @EnvironmentObject private var tabsStore: TabsStore
     @State private var messageText: String = ""
     @State private var sending: Bool = false
     @State private var showSystemPrompt: Bool = false
+    @State private var scrollViewHeight: CGFloat = 0
+    @State private var contentBottomY: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("Chat")
                     .font(.headline)
-                Spacer()
                 // Provider/model chips (view-only)
                 Label(model.providerName, systemImage: "network")
                     .font(.caption)
@@ -23,23 +26,83 @@ struct ChatPane: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(Capsule().fill(Color.gray.opacity(0.15)))
-                if let ctx = model.pendingTerminalContext, !ctx.isEmpty {
-                    HStack(spacing: 6) {
-                        Label("Terminal Context ready", systemImage: "paperclip")
-                            .font(.caption)
-                        Button("Remove") { model.clearPendingTerminalContext() }
-                            .buttonStyle(.borderless)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Color.orange.opacity(0.15)))
-                }
+                    .overlay(
+                        Group {
+                            if let err = model.modelFetchError {
+                                Text(err)
+                                    .font(.caption2)
+                                    .foregroundColor(.red)
+                                    .padding(.leading, 6)
+                            }
+                        }, alignment: .trailing
+                    )
+                // Context chip moved below tabs
+                Spacer()
                 Button(action: { showSystemPrompt.toggle() }) {
                     Label("System Prompt", systemImage: showSystemPrompt ? "chevron.down" : "chevron.right")
                 }
                 .buttonStyle(.borderless)
             }
             .padding(8)
+
+            // Tabs row under Chat header
+            if let selectedTab = tabsStore.selected {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(selectedTab.chats.indices, id: \.self) { idx in
+                            let isSelected = idx == selectedTab.selectedChatIndex
+                            HStack(spacing: 6) {
+                                Button(action: { currentTab.selectedChatIndex = idx }) {
+                                    Text(selectedTab.chats[idx].sessionTitle.isEmpty ? "Chat \(idx+1)" : selectedTab.chats[idx].sessionTitle)
+                                        .lineLimit(1)
+                                }
+                                .buttonStyle(.plain)
+                                Button(action: { tabsStore.closeChatInSelectedTab(at: idx) }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Close Chat")
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(isSelected ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.15)))
+                        }
+                        Button(action: {
+                            let source = currentTab.selectedChat
+                            tabsStore.addChatToSelectedTab(copyFrom: source)
+                        }) {
+                            Image(systemName: "plus")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("New Chat Tab")
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.bottom, 6)
+                }
+            }
+
+            // Show terminal context chip below the tabs for more space
+            if let ctx = model.pendingTerminalContext, !ctx.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Label("Terminal Context ready", systemImage: "paperclip")
+                            .font(.caption)
+                        Spacer()
+                        Button("Remove") { model.clearPendingTerminalContext() }
+                            .buttonStyle(.borderless)
+                    }
+                    Text(ctx)
+                        .font(.system(.footnote, design: .monospaced))
+                        .lineLimit(8)
+                        .textSelection(.enabled)
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.25)))
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
+            }
 
             if showSystemPrompt {
                 VStack(alignment: .leading, spacing: 8) {
@@ -67,12 +130,32 @@ struct ChatPane: View {
                             MarkdownMessageBubble(message: msg, isStreaming: msg.id == model.streamingMessageId)
                                 .id(msg.id)
                         }
+                        // Bottom sentinel to detect proximity to bottom
+                        BottomSentinel()
                     }
                     .padding(8)
                 }
+                .coordinateSpace(name: "chatScroll")
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: ScrollViewHeightKey.self, value: geo.size.height)
+                    }
+                )
+                .onPreferenceChange(ScrollViewHeightKey.self) { h in
+                    scrollViewHeight = h
+                }
+                .onPreferenceChange(BottomOffsetKey.self) { bottomY in
+                    contentBottomY = bottomY
+                }
                 .onChange(of: model.messages) { _ in
+                    let distanceFromBottom = contentBottomY - scrollViewHeight
+                    guard distanceFromBottom <= 40 else { return }
                     guard let lastId = model.messages.last?.id else { return }
-                    withAnimation { proxy.scrollTo(lastId, anchor: .bottom) }
+                    var txn = Transaction()
+                    txn.disablesAnimations = true
+                    withTransaction(txn) {
+                        proxy.scrollTo(lastId, anchor: .bottom)
+                    }
                 }
             }
 
@@ -108,6 +191,31 @@ struct ChatPane: View {
                 sending = false
             }
         }
+    }
+}
+
+// Preference keys and helper views for non-intrusive auto-scroll detection
+private struct ScrollViewHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct BottomOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct BottomSentinel: View {
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .preference(key: BottomOffsetKey.self, value: proxy.frame(in: .named("chatScroll")).maxY)
+        }
+        .frame(height: 0)
     }
 }
 

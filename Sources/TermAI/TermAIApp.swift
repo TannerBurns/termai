@@ -15,9 +15,10 @@ struct TermAIApp: App {
                 .focusedSceneValue(\.newTabAction, { tabsStore.addTab(copyFrom: tabsStore.selected) })
                 
                 .onAppear {
-                    tabsStore.selected?.chatViewModel.loadSettings()
-                    tabsStore.selected?.chatViewModel.loadMessages()
-                    appDelegate.chat = tabsStore.selected?.chatViewModel
+                    tabsStore.selected?.selectedChat.loadSettings()
+                    tabsStore.selected?.selectedChat.loadMessages()
+                    Task { await tabsStore.selected?.selectedChat.initializeModelsOnStartup() }
+                    appDelegate.chat = tabsStore.selected?.selectedChat
                 }
         }
         .windowStyle(.titleBar)
@@ -25,9 +26,9 @@ struct TermAIApp: App {
 
         Settings {
             SettingsView(showAdvanced: false)
-                .environmentObject(tabsStore.selected?.chatViewModel ?? ChatViewModel())
+                .environmentObject(tabsStore.selected?.selectedChat ?? ChatViewModel())
                 .onDisappear {
-                    tabsStore.selected?.chatViewModel.persistSettings()
+                    tabsStore.selected?.selectedChat.persistSettings()
                 }
         }
     }
@@ -39,58 +40,49 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Tab strip removed from content; global tabs handled by Cmd+T + app menu
+            GeometryReader { geometry in
+                let totalWidth = geometry.size.width
+                let desiredChatWidth = totalWidth / 3.0
+                let chatWidth = showChat ? max(desiredChatWidth, 420) : 0
+                let terminalWidth = showChat ? max(totalWidth - chatWidth, 0) : totalWidth
 
-            HStack {
-                Button(action: toggleChat) {
-                    Label(showChat ? "Hide Chat" : "Show Chat", systemImage: showChat ? "sidebar.trailing" : "sidebar.leading")
-                }
-                Spacer()
-                if showChat {
-                    Button(action: newChat) { Label("New Chat", systemImage: "plus") }
-                    Button(role: .destructive, action: clearChat) { Label("Clear Chat", systemImage: "trash") }
-                }
-            }
-            .padding(8)
-
-            Divider()
-
-            HStack(spacing: 0) {
-                Group {
-                    if let currentTab = tabsStore.selected {
-                        TerminalPane(onAddToChat: { text, meta in
-                            currentTab.chatViewModel.setPendingTerminalContext(text, meta: meta)
-                        })
-                        .environmentObject(currentTab.ptyModel)
-                    } else {
-                        Color.clear
+                HStack(spacing: 0) {
+                    Group {
+                        if let currentTab = tabsStore.selected {
+                            TerminalPane(onAddToChat: { text, meta in
+                                currentTab.selectedChat.setPendingTerminalContext(text, meta: meta)
+                            }, onToggleChat: { showChat.toggle() })
+                            .environmentObject(currentTab.ptyModel)
+                        } else {
+                            Color.clear
+                        }
                     }
-                }
-                .frame(minWidth: 420)
+                    .frame(width: terminalWidth)
 
-                if showChat, let currentTab = tabsStore.selected {
-                    Divider()
-                    VStack(spacing: 0) {
-                        ChatPane()
-                            .environmentObject(currentTab.chatViewModel)
+                    if showChat, let currentTab = tabsStore.selected {
+                        Divider()
+                        VStack(spacing: 0) {
+                            ChatPane()
+                                .id(currentTab.selectedChat.id)
+                                .environmentObject(currentTab.selectedChat)
+                                .environmentObject(currentTab)
+                                .environmentObject(tabsStore)
+                        }
+                        .frame(width: chatWidth)
                     }
-                    .frame(minWidth: 420)
                 }
             }
         }
         .frame(minWidth: 980, minHeight: 640)
         .onChange(of: tabsStore.selectedId) { _ in
             // Keep status menu in sync with current tab
-            NSApp.delegate.flatMap { $0 as? AppDelegate }?.chat = tabsStore.selected?.chatViewModel
+            NSApp.delegate.flatMap { $0 as? AppDelegate }?.chat = tabsStore.selected?.selectedChat
         }
         // No-op: keyboard shortcut calls tabsStore.addTab directly via menu command
     }
-
-    private func toggleChat() { showChat.toggle() }
-
-    private func newChat() { tabsStore.addTab(copyFrom: tabsStore.selected) }
-    private func clearChat() { tabsStore.selected?.chatViewModel.clearChat() }
 }
+
+// Chat sessions strip is now rendered inside ChatPane
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     weak var chat: ChatViewModel?
@@ -99,6 +91,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         // Remove automatic window tabbing adjustments (conflicting API on this SDK)
+        // Set Dock/app icon to dedicated Dock asset if available
+        if let dockURL = Bundle.main.url(forResource: "termAIDock", withExtension: "icns"),
+           let dockIcon = NSImage(contentsOf: dockURL) {
+            NSApp.applicationIconImage = dockIcon
+        }
         setupStatusItem()
     }
 
@@ -108,10 +105,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let btn = item.button {
             btn.title = ""
-            // Prefer bundled icns, then png, then app icon
+            // Prefer dedicated toolbar icns, then dock/app icon, then legacy assets
             var iconImage: NSImage? = nil
-            if let url = Bundle.main.url(forResource: "TermAI", withExtension: "icns"),
+            if let url = Bundle.main.url(forResource: "termAIToolbar", withExtension: "icns"),
                let img = NSImage(contentsOf: url) {
+                iconImage = img
+            } else if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "icns"),
+                      let img = NSImage(contentsOf: url) {
+                iconImage = img
+            } else if let url = Bundle.main.url(forResource: "TermAI", withExtension: "icns"),
+                      let img = NSImage(contentsOf: url) {
                 iconImage = img
             } else if let url = Bundle.main.url(forResource: "termai", withExtension: "png"),
                       let img = NSImage(contentsOf: url) {

@@ -4,14 +4,18 @@ import Foundation
 final class AppTab: Identifiable, ObservableObject {
     let id: UUID = UUID()
     @Published var title: String
-    let chatViewModel: ChatViewModel
+    // Multiple chat sessions per global tab
+    @Published var chats: [ChatViewModel]
+    @Published var selectedChatIndex: Int = 0
     let ptyModel: PTYModel
 
     init(title: String = "Tab", chatViewModel: ChatViewModel, ptyModel: PTYModel = PTYModel()) {
         self.title = title
-        self.chatViewModel = chatViewModel
+        self.chats = [chatViewModel]
         self.ptyModel = ptyModel
     }
+
+    var selectedChat: ChatViewModel { chats[max(0, min(selectedChatIndex, chats.count - 1))] }
 }
 
 @MainActor
@@ -30,11 +34,12 @@ final class TabsStore: ObservableObject {
     func addTab(copyFrom current: AppTab?) {
         let newVM = ChatViewModel()
         if let current {
-            newVM.apiBaseURL = current.chatViewModel.apiBaseURL
-            newVM.apiKey = current.chatViewModel.apiKey
-            newVM.model = current.chatViewModel.model
-            newVM.providerName = current.chatViewModel.providerName
-            newVM.systemPrompt = current.chatViewModel.systemPrompt
+            let source = current.selectedChat
+            newVM.apiBaseURL = source.apiBaseURL
+            newVM.apiKey = source.apiKey
+            newVM.model = source.model
+            newVM.providerName = source.providerName
+            newVM.systemPrompt = source.systemPrompt
         }
         let tab = AppTab(title: "Tab \(tabs.count+1)", chatViewModel: newVM)
         tabs.append(tab)
@@ -48,6 +53,79 @@ final class TabsStore: ObservableObject {
             addTab(copyFrom: nil)
         } else if selectedId == id {
             selectedId = tabs[min(idx, tabs.count-1)].id
+        }
+    }
+
+    // MARK: - Per-tab chat management
+    func addChatToSelectedTab(copyFrom currentChat: ChatViewModel?) {
+        guard let currentTab = selected else { return }
+        let newVM = ChatViewModel()
+        // Copy only provider configuration; do not copy messages
+        if let currentChat {
+            newVM.apiBaseURL = currentChat.apiBaseURL
+            newVM.apiKey = currentChat.apiKey
+            newVM.model = currentChat.model
+            newVM.providerName = currentChat.providerName
+            newVM.systemPrompt = currentChat.systemPrompt
+            // Do not reuse availableModels/modelFetchError references; fetch fresh on demand
+        }
+        currentTab.chats.append(newVM)
+        currentTab.selectedChatIndex = currentTab.chats.count - 1
+        // Optionally, initialize with a system message similar to clearChat()
+    }
+    func closeSelectedChat() {
+        guard let currentTab = selected else { return }
+        guard !currentTab.chats.isEmpty else { return }
+        let idx = currentTab.selectedChatIndex
+        let removed = currentTab.chats[idx]
+        currentTab.chats.remove(at: idx)
+        currentTab.selectedChatIndex = max(0, min(idx, currentTab.chats.count - 1))
+        if currentTab.chats.isEmpty {
+            // Preserve provider/model settings when recreating the baseline chat
+            let newVM = ChatViewModel()
+            newVM.apiBaseURL = removed.apiBaseURL
+            newVM.apiKey = removed.apiKey
+            newVM.model = removed.model
+            newVM.providerName = removed.providerName
+            newVM.systemPrompt = removed.systemPrompt
+            newVM.availableModels = removed.availableModels
+            newVM.modelFetchError = removed.modelFetchError
+            currentTab.chats = [newVM]
+            currentTab.selectedChatIndex = 0
+        }
+    }
+
+    func closeChatInSelectedTab(at index: Int) {
+        guard let currentTab = selected else { return }
+        guard index >= 0 && index < currentTab.chats.count else { return }
+        // If this is the only chat, just clear its content instead of removing
+        if currentTab.chats.count == 1 {
+            currentTab.chats[index].clearChat()
+            currentTab.selectedChatIndex = 0
+            return
+        }
+        let removed = currentTab.chats[index]
+        currentTab.chats.remove(at: index)
+        if currentTab.chats.isEmpty {
+            // Recreate a fresh chat with the same provider/model configuration
+            let newVM = ChatViewModel()
+            newVM.apiBaseURL = removed.apiBaseURL
+            newVM.apiKey = removed.apiKey
+            newVM.model = removed.model
+            newVM.providerName = removed.providerName
+            newVM.systemPrompt = removed.systemPrompt
+            newVM.availableModels = removed.availableModels
+            newVM.modelFetchError = removed.modelFetchError
+            currentTab.chats = [newVM]
+            currentTab.selectedChatIndex = 0
+        } else {
+            if currentTab.selectedChatIndex >= currentTab.chats.count {
+                currentTab.selectedChatIndex = currentTab.chats.count - 1
+            }
+            // If we closed the currently selected one, move selection to the next valid index
+            if currentTab.selectedChatIndex == index {
+                currentTab.selectedChatIndex = min(index, currentTab.chats.count - 1)
+            }
         }
     }
 }

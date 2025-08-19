@@ -5,6 +5,8 @@ final class PTYModel: ObservableObject {
     // Closures set by the SwiftTerm wrapper to provide selection and screen text
     var getSelectionText: (() -> String?)?
     var getScreenText: (() -> String)?
+    // Closure set by the SwiftTerm wrapper to allow programmatic input from UI
+    var sendInput: ((String) -> Void)?
     @Published var hasSelection: Bool = false
     @Published var lastOutputChunk: String = ""
     fileprivate var previousBuffer: String = ""
@@ -97,6 +99,10 @@ struct SwiftTermView: NSViewRepresentable {
             guard let term else { return "" }
             let data = term.getTerminal().getBufferAsData()
             return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+        }
+        // Wire programmatic input sender
+        model.sendInput = { [weak term] text in
+            term?.send(txt: text)
         }
         // Start shell in user's home directory by injecting cd via login shell
         let home = FileManager.default.homeDirectoryForCurrentUser.path
