@@ -233,11 +233,19 @@ public class LocalProcess {
             return
         }
         
-        #if canImport(Subprocess)
-        startProcessWithSubprocess(executable: executable, args: args, environment: environment, execName: execName, currentDirectory: currentDirectory)
-        #else
-        startProcessWithForkpty(executable: executable, args: args, environment: environment, execName: execName, currentDirectory: currentDirectory)
-        #endif
+        // Prefer forkpty on macOS to ensure the child process is attached to a
+        // controlling TTY. This guarantees terminal line discipline generates
+        // signals (e.g., Ctrl-C -> SIGINT) for the foreground process group.
+        // The swift-subprocess implementation with openpty does not currently
+        // call login_tty/TIOCSCTTY in the child, so control characters may not
+        // be delivered as signals. Using forkpty restores expected behavior.
+        startProcessWithForkpty(
+            executable: executable,
+            args: args,
+            environment: environment,
+            execName: execName,
+            currentDirectory: currentDirectory
+        )
     }
     
     #if canImport(Subprocess)
