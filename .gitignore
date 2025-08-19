@@ -1,0 +1,72 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode
+DerivedData/
+build/
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.xcuserstate
+*.xcscmblueprint
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+# Swift Package Manager
+.swiftpm/
+.build/
+# Keep Package.resolved committed for apps; don't ignore it.
+
+# Swift Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# CocoaPods / Carthage (not used here, but safe to ignore if present)
+Pods/
+Carthage/Build/
+Carthage/Checkouts/
+*.xcworkspace
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# Archives and symbols
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+
+# Generated documentation
+.docc/
+
+# App bundles and specific artifacts
+*.app
+TermAI.app/
+TermAI.zip
+
+# Editor/IDE settings
+.vscode/
+.idea/
+
+# Misc
+*.orig
+*.rej
+*.swp
+*.lock
+*~
+

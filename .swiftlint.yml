@@ -1,0 +1,9 @@
+disabled_rules:
+  - trailing_whitespace
+  - identifier_name
+  - line_length
+  - nesting
+  - function_body_length
+  - type_body_length
+  - file_length
+

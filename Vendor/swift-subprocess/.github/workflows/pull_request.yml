@@ -1,0 +1,62 @@
+name: Pull request
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  tests:
+    name: Test
+    uses: swiftlang/github-workflows/.github/workflows/swift_package_test.yml@main
+    with:
+      linux_os_versions: '["amazonlinux2", "bookworm", "noble", "jammy", "focal", "rhel-ubi9"]'
+      linux_swift_versions: '["6.1", "nightly-main"]'
+      linux_pre_build_command: |
+        if command -v apt-get >/dev/null 2>&1 ; then # bookworm, noble, jammy, focal
+          apt-get update -y
+
+          # Test dependencies
+          apt-get install -y procps
+        elif command -v dnf >/dev/null 2>&1 ; then # rhel-ubi9
+          dnf update -y
+
+          # Test dependencies
+          dnf install -y procps
+        elif command -v yum >/dev/null 2>&1 ; then # amazonlinux2
+          yum update -y
+
+          # Test dependencies
+          yum install -y procps
+        fi
+      windows_swift_versions: '["6.1", "nightly-main"]'
+      enable_macos_checks: true
+      macos_xcode_versions: '["16.3"]'
+      enable_linux_static_sdk_build: true
+      linux_static_sdk_versions: '["6.1", "nightly-6.2"]'
+
+  soundness:
+    name: Soundness
+    uses: swiftlang/github-workflows/.github/workflows/soundness.yml@main
+    with:
+      license_header_check_project_name: "Swift.org"
+      docs_check_enabled: false
+      format_check_enabled: false
+      unacceptable_language_check_enabled: false
+      api_breakage_check_enabled: false
+
+  cmake_build:
+    name: CMake Build
+    runs-on: ubuntu-latest
+    container: swift:6.1-noble
+    steps:
+      - name: checkout sources
+        uses: actions/checkout@v1
+      - name: Install dependencies
+        shell: bash
+        run: apt update && apt install -y cmake ninja-build
+      - name: Configure Project
+        shell: bash
+        run: cmake -G 'Ninja' -B build -S . -DCMAKE_C_COMPILER=clang -DCMAKE_Swift_COMPILER=swiftc -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=YES
+      - name: Build Project
+        shell: bash
+        run: cmake --build build
