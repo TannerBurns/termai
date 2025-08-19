@@ -10,8 +10,8 @@ struct MarkdownRenderer: View {
                 switch block {
                 case .paragraph(let p):
                     ParagraphView(text: p)
-                case .code(let lang, let code):
-                    CodeBlockView(language: lang, code: code)
+                case .code(let lang, let code, let isClosed):
+                    CodeBlockView(language: lang, code: code, isClosed: isClosed)
                 case .table(let headers, let rows):
                     TableView(headers: headers, rows: rows)
                 }
@@ -21,7 +21,7 @@ struct MarkdownRenderer: View {
 
     private enum Block: Hashable {
         case paragraph(String)
-        case code(language: String?, content: String)
+        case code(language: String?, content: String, isClosed: Bool)
         case table(headers: [String], rows: [[String]])
     }
 
@@ -33,6 +33,7 @@ struct MarkdownRenderer: View {
         var inCode = false
         var codeLang: String? = nil
         var codeLines: [String] = []
+        var codeIsClosed: Bool = false
 
         func flushParagraph() {
             if !paragraph.isEmpty {
@@ -66,10 +67,12 @@ struct MarkdownRenderer: View {
             if line.hasPrefix("```") {
                 if inCode {
                     // end code block
-                    result.append(.code(language: codeLang, content: codeLines.joined(separator: "\n")))
+                    codeIsClosed = true
+                    result.append(.code(language: codeLang, content: codeLines.joined(separator: "\n"), isClosed: codeIsClosed))
                     inCode = false
                     codeLang = nil
                     codeLines.removeAll()
+                    codeIsClosed = false
                 } else {
                     // start code block
                     flushParagraph()
@@ -77,6 +80,7 @@ struct MarkdownRenderer: View {
                     let lang = afterTicks.trimmingCharacters(in: .whitespaces)
                     codeLang = lang.isEmpty ? nil : lang
                     inCode = true
+                    codeIsClosed = false
                 }
             } else if inCode {
                 codeLines.append(line)
@@ -92,7 +96,8 @@ struct MarkdownRenderer: View {
         }
 
         if inCode {
-            result.append(.code(language: codeLang, content: codeLines.joined(separator: "\n")))
+            // Unclosed code block (still streaming)
+            result.append(.code(language: codeLang, content: codeLines.joined(separator: "\n"), isClosed: false))
         } else {
             flushParagraph()
         }
@@ -108,9 +113,12 @@ private struct ParagraphView: View {
 }
 
 private struct CodeBlockView: View {
+    @EnvironmentObject private var ptyModel: PTYModel
     let language: String?
     let code: String
+    let isClosed: Bool
     var body: some View {
+        let isShell = language?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).matchesAny(["bash", "sh", "shell", "zsh"]) == true
         ScrollView(.horizontal, showsIndicators: true) {
             Text(code)
                 .font(.system(.body, design: .monospaced))
@@ -119,7 +127,52 @@ private struct CodeBlockView: View {
         }
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.12)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
+        .overlay(alignment: .topTrailing) {
+            if isClosed && isShell {
+                HStack(spacing: 6) {
+                    Button("Add to terminal") {
+                        let sanitized = code
+                            .components(separatedBy: .newlines)
+                            .map { line in
+                                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                                if trimmed.hasPrefix("$ ") { return String(trimmed.dropFirst(2)) }
+                                if trimmed.hasPrefix("# ") { return String(trimmed.dropFirst(2)) }
+                                if trimmed.hasPrefix("% ") { return String(trimmed.dropFirst(2)) }
+                                return trimmed
+                            }
+                            .joined(separator: " ")
+                        ptyModel.sendInput?(sanitized)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
+
+                    Button("▶️ Run in terminal") {
+                        let sanitized = code
+                            .components(separatedBy: .newlines)
+                            .map { line in
+                                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                                if trimmed.hasPrefix("$ ") { return String(trimmed.dropFirst(2)) }
+                                if trimmed.hasPrefix("# ") { return String(trimmed.dropFirst(2)) }
+                                if trimmed.hasPrefix("% ") { return String(trimmed.dropFirst(2)) }
+                                return trimmed
+                            }
+                            .joined(separator: " ")
+                        ptyModel.sendInput?(sanitized + "\n")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
+                }
+                .padding(6)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private extension String {
+    func matchesAny(_ options: [String]) -> Bool {
+        let lowerSelf = self.lowercased()
+        return options.contains(where: { lowerSelf == $0 })
     }
 }
 

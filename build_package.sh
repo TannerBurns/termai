@@ -7,7 +7,9 @@ BUILD_DIR="$ROOT/.build/release"
 APP_DIR="$ROOT/$APP_NAME.app"
 ZIP_PATH="$ROOT/$APP_NAME.zip"
 ICON_PNG="$ROOT/termai.png"
-ICON_ICNS="$ROOT/Icons/TermAI.icns"
+ICON_ICNS="$ROOT/Icons/TermAI.icns"               # legacy fallback
+DOCK_ICNS="$ROOT/Icons/termAIDock.icns"          # preferred app/dock icon
+TOOLBAR_ICNS="$ROOT/Icons/termAIToolbar.icns"    # preferred toolbar/status icon
 ICONSET_DIR="$ROOT/Icon.iconset"
 ICNS_GEN="$ROOT/$APP_NAME.icns"
 
@@ -22,14 +24,18 @@ step() { echo; echo "[$1] $2"; }
 step 1 "Building Release…"
 swift build -c release
 
-step 2 "Preparing icon…"
-ICNS_SRC=""
+step 2 "Preparing icons…"
+ICNS_SRC=""     # final chosen app/dock icon to embed
+TBAR_SRC=""     # final chosen toolbar icon to embed
 rm -f "$ICNS_GEN"; rm -rf "$ICONSET_DIR"
-if [[ -f "$ICON_ICNS" ]]; then
-  echo "Using existing Icons/TermAI.icns"
+if [[ -f "$DOCK_ICNS" ]]; then
+  echo "Using Dock icon: Icons/termAIDock.icns"
+  ICNS_SRC="$DOCK_ICNS"
+elif [[ -f "$ICON_ICNS" ]]; then
+  echo "Using legacy app icon: Icons/TermAI.icns"
   ICNS_SRC="$ICON_ICNS"
 elif [[ -f "$ICON_PNG" ]]; then
-  echo "Generating icns from termai.png"
+  echo "Generating icns from termai.png (fallback)"
   mkdir -p "$ICONSET_DIR"
   sips -z 16 16     "$ICON_PNG" --out "$ICONSET_DIR/icon_16x16.png" >/dev/null
   sips -z 32 32     "$ICON_PNG" --out "$ICONSET_DIR/icon_16x16@2x.png" >/dev/null
@@ -45,6 +51,13 @@ elif [[ -f "$ICON_PNG" ]]; then
   ICNS_SRC="$ICNS_GEN"
 else
   echo "No icon found; using default system app icon."
+fi
+
+# Toolbar icon source: prefer dedicated, otherwise reuse chosen app icon
+if [[ -f "$TOOLBAR_ICNS" ]]; then
+  TBAR_SRC="$TOOLBAR_ICNS"
+else
+  TBAR_SRC="$ICNS_SRC"
 fi
 
 step 3 "Creating app bundle…"
@@ -75,7 +88,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
   <key>CFBundleIconFile</key>
-  <string>TermAI</string>
+  <string>termAIDock</string>
 </dict>
 </plist>
 PLIST
@@ -83,7 +96,10 @@ PLIST
 cp "$BUILD_DIR/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 if [[ -n "$ICNS_SRC" && -f "$ICNS_SRC" ]]; then
-  cp "$ICNS_SRC" "$APP_DIR/Contents/Resources/TermAI.icns"
+  cp "$ICNS_SRC" "$APP_DIR/Contents/Resources/termAIDock.icns"
+fi
+if [[ -n "$TBAR_SRC" && -f "$TBAR_SRC" ]]; then
+  cp "$TBAR_SRC" "$APP_DIR/Contents/Resources/termAIToolbar.icns"
 fi
 
 if [[ -n "$DEVELOPER_ID" ]]; then
