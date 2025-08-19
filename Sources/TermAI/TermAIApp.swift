@@ -4,29 +4,28 @@ import AppKit
 @main
 struct TermAIApp: App {
     @StateObject private var globalTabsManager = ChatTabsManager()
+    @StateObject private var ptyModel = PTYModel()
     @State private var showSettings: Bool = false
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
         WindowGroup {
             SimplifiedContentView(globalTabsManager: globalTabsManager)
+                .environmentObject(ptyModel)
         }
         .windowStyle(.titleBar)
 
         Settings {
-            if let selectedSession = globalTabsManager.selectedSession {
-                SessionSettingsView(session: selectedSession)
-            } else {
-                Text("No chat session selected")
-                    .padding()
-                    .frame(width: 400, height: 200)
-            }
+            SettingsRootView(
+                selectedSession: globalTabsManager.selectedSession,
+                ptyModel: ptyModel
+            )
         }
     }
 }
 
 struct SimplifiedContentView: View {
-    @StateObject private var ptyModel = PTYModel()
+    @EnvironmentObject var ptyModel: PTYModel
     @ObservedObject var globalTabsManager: ChatTabsManager
     @State private var showChat: Bool = false
 

@@ -15,6 +15,8 @@ final class PTYModel: ObservableObject {
     @Published var visibleRows: Int = 0
     @Published var lastOutputLineRange: (start: Int, end: Int)? = nil
     @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    // Theme selection id, used to apply a preset theme to the terminal view
+    @Published var themeId: String = "system"
 }
 
 #if canImport(SwiftTerm)
@@ -110,10 +112,18 @@ struct SwiftTermView: NSViewRepresentable {
         let escaped = home.replacingOccurrences(of: "\"", with: "\\\"")
         let cmd = "cd \"\(escaped)\"; exec /bin/zsh -l"
         term.startProcess(executable: "/bin/zsh", args: ["-lc", cmd])
+        // Apply initial theme
+        if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {
+            term.apply(theme: theme)
+        }
         return term
     }
 
-    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {}
+    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
+        if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {
+            nsView.apply(theme: theme)
+        }
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
