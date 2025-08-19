@@ -48,6 +48,8 @@ final class TabsStore: ObservableObject {
 
     func closeTab(id: UUID) {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
+        // Cancel any in-flight chat streams in the tab being closed
+        tabs[idx].chats.forEach { $0.cancelStreaming() }
         tabs.remove(at: idx)
         if tabs.isEmpty {
             addTab(copyFrom: nil)
@@ -78,6 +80,7 @@ final class TabsStore: ObservableObject {
         guard !currentTab.chats.isEmpty else { return }
         let idx = currentTab.selectedChatIndex
         let removed = currentTab.chats[idx]
+        removed.cancelStreaming()
         currentTab.chats.remove(at: idx)
         currentTab.selectedChatIndex = max(0, min(idx, currentTab.chats.count - 1))
         if currentTab.chats.isEmpty {
@@ -105,6 +108,7 @@ final class TabsStore: ObservableObject {
             return
         }
         let removed = currentTab.chats[index]
+        removed.cancelStreaming()
         currentTab.chats.remove(at: index)
         if currentTab.chats.isEmpty {
             // Recreate a fresh chat with the same provider/model configuration

@@ -3,39 +3,31 @@ import AppKit
 
 @main
 struct TermAIApp: App {
-    @StateObject private var tabsStore = TabsStore()
-    // PTY now used; CommandRunner retained for reference but not injected
+    @StateObject private var globalTabsManager = ChatTabsManager()
     @State private var showSettings: Bool = false
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(tabsStore)
-                .focusedSceneValue(\.newTabAction, { tabsStore.addTab(copyFrom: tabsStore.selected) })
-                
-                .onAppear {
-                    tabsStore.selected?.selectedChat.loadSettings()
-                    tabsStore.selected?.selectedChat.loadMessages()
-                    Task { await tabsStore.selected?.selectedChat.initializeModelsOnStartup() }
-                    appDelegate.chat = tabsStore.selected?.selectedChat
-                }
+            SimplifiedContentView(globalTabsManager: globalTabsManager)
         }
         .windowStyle(.titleBar)
-        .commands { AppCommands(addNewTab: { tabsStore.addTab(copyFrom: tabsStore.selected) }) }
 
         Settings {
-            SettingsView(showAdvanced: false)
-                .environmentObject(tabsStore.selected?.selectedChat ?? ChatViewModel())
-                .onDisappear {
-                    tabsStore.selected?.selectedChat.persistSettings()
-                }
+            if let selectedSession = globalTabsManager.selectedSession {
+                SessionSettingsView(session: selectedSession)
+            } else {
+                Text("No chat session selected")
+                    .padding()
+                    .frame(width: 400, height: 200)
+            }
         }
     }
 }
 
-struct ContentView: View {
-    @EnvironmentObject private var tabsStore: TabsStore
+struct SimplifiedContentView: View {
+    @StateObject private var ptyModel = PTYModel()
+    @ObservedObject var globalTabsManager: ChatTabsManager
     @State private var showChat: Bool = false
 
     var body: some View {
@@ -47,47 +39,35 @@ struct ContentView: View {
                 let terminalWidth = showChat ? max(totalWidth - chatWidth, 0) : totalWidth
 
                 HStack(spacing: 0) {
-                    Group {
-                        if let currentTab = tabsStore.selected {
-                            TerminalPane(onAddToChat: { text, meta in
-                                var enriched = meta
-                                enriched?.cwd = currentTab.ptyModel.currentWorkingDirectory
-                                currentTab.selectedChat.setPendingTerminalContext(text, meta: enriched)
-                            }, onToggleChat: { showChat.toggle() })
-                            .environmentObject(currentTab.ptyModel)
-                        } else {
-                            Color.clear
-                        }
-                    }
+                    // Terminal pane
+                    TerminalPane(
+                        onAddToChat: { text, meta in
+                            var enriched = meta
+                            enriched?.cwd = ptyModel.currentWorkingDirectory
+                            globalTabsManager.selectedSession?.setPendingTerminalContext(text, meta: enriched)
+                        },
+                        onToggleChat: { showChat.toggle() }
+                    )
+                    .environmentObject(ptyModel)
                     .frame(width: terminalWidth)
 
-                    if showChat, let currentTab = tabsStore.selected {
+                    // Chat pane
+                    if showChat {
                         Divider()
-                        VStack(spacing: 0) {
-                            ChatPane()
-                                .id(currentTab.selectedChat.id)
-                                .environmentObject(currentTab.selectedChat)
-                                .environmentObject(currentTab)
-                                .environmentObject(tabsStore)
-                        }
-                        .frame(width: chatWidth)
+                        ChatContainerView(ptyModel: ptyModel)
+                            .environmentObject(globalTabsManager)
+                            .frame(width: chatWidth)
                     }
                 }
             }
         }
         .frame(minWidth: 980, minHeight: 640)
-        .onChange(of: tabsStore.selectedId) { _ in
-            // Keep status menu in sync with current tab
-            NSApp.delegate.flatMap { $0 as? AppDelegate }?.chat = tabsStore.selected?.selectedChat
-        }
-        // No-op: keyboard shortcut calls tabsStore.addTab directly via menu command
     }
 }
 
 // Chat sessions strip is now rendered inside ChatPane
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    weak var chat: ChatViewModel?
     @objc func newGlobalTab(_ sender: Any?) { }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -154,13 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard let chat else { return }
-        if let providerItem = menu.items.first(where: { $0.tag == 1001 }) {
-            providerItem.title = "Provider: \(chat.providerName)"
-        }
-        if let modelItem = menu.items.first(where: { $0.tag == 1002 }) {
-            modelItem.title = "Model: \(chat.model)"
-        }
+        // Provider and model info now managed per chat session
     }
 
     @objc private func showApp() {
