@@ -189,10 +189,10 @@ struct ChatPane: View {
         let text = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         sending = true
+        messageText = ""  // Clear immediately for better UX
         Task {
             await model.sendUserMessage(text)
             await MainActor.run {
-                messageText = ""
                 sending = false
             }
         }
