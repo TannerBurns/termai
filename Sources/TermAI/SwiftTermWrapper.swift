@@ -17,6 +17,18 @@ final class PTYModel: ObservableObject {
     @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     // Theme selection id, used to apply a preset theme to the terminal view
     @Published var themeId: String = "system"
+    
+    // Keep a reference to the terminal view for cleanup
+    fileprivate weak var terminalView: BridgedLocalProcessTerminalView?
+    
+    deinit {
+        // Send exit command to the shell process when PTYModel is deallocated
+        terminalView?.terminateShell()
+    }
+    
+    func terminateProcess() {
+        terminalView?.terminateShell()
+    }
 }
 
 #if canImport(SwiftTerm)
@@ -24,6 +36,17 @@ import SwiftTerm
 
 private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     weak var bridgeModel: PTYModel?
+    
+    func terminateShell() {
+        // Send exit command to the shell
+        self.send(txt: "exit\n")
+        // Give it a moment to process, then force terminate if needed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // If process is still running after exit command, we can't force it
+            // since we don't have access to the internal process variable
+            // The exit command should handle most cases
+        }
+    }
 
     override func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
         super.rangeChanged(source: source, startY: startY, endY: endY)
@@ -93,6 +116,8 @@ struct SwiftTermView: NSViewRepresentable {
         term.bridgeModel = model
         term.processDelegate = context.coordinator
         term.notifyUpdateChanges = true
+        // Store terminal reference for cleanup (as BridgedLocalProcessTerminalView)
+        model.terminalView = term
         // Keep default scrollback; do not reset buffer to avoid disrupting input/echo
         // Wire helpers for selection/screen text
         model.getSelectionText = { [weak term] in
