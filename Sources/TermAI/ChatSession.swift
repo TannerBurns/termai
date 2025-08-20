@@ -63,7 +63,9 @@ final class ChatSession: ObservableObject, Identifiable {
         streamingTask = nil
         streamingMessageId = nil
         messages = []
+        sessionTitle = ""  // Reset title when clearing chat
         persistMessages()
+        persistSettings()  // Persist the cleared title
     }
     
     func cancelStreaming() {
@@ -84,6 +86,9 @@ final class ChatSession: ObservableObject, Identifiable {
         pendingTerminalContext = nil
         pendingTerminalMeta = nil
         
+        // Check if this is the first user message and generate title if needed
+        let isFirstUserMessage = messages.filter { $0.role == "user" }.isEmpty
+        
         messages.append(ChatMessage(role: "user", content: text, terminalContext: ctx, terminalContextMeta: meta))
         let assistantIndex = messages.count
         messages.append(ChatMessage(role: "assistant", content: ""))
@@ -91,6 +96,13 @@ final class ChatSession: ObservableObject, Identifiable {
         
         // Force UI update
         messages = messages
+        
+        // Generate title for the first user message
+        if isFirstUserMessage && sessionTitle.isEmpty {
+            Task { [weak self] in
+                await self?.generateTitle(from: text)
+            }
+        }
         
         // Cancel any previous stream
         streamingTask?.cancel()
@@ -109,6 +121,87 @@ final class ChatSession: ObservableObject, Identifiable {
                 self.streamingMessageId = nil
                 self.persistMessages()
             }
+        }
+    }
+    
+    // MARK: - Title Generation
+    private func generateTitle(from userMessage: String) async {
+        // Run title generation with a timeout to prevent hanging
+        let titleTask = Task { [weak self] in
+            guard let self = self else { return }
+            
+            struct RequestBody: Encodable {
+                struct Message: Codable { let role: String; let content: String }
+                let model: String
+                let messages: [Message]
+                let stream: Bool
+                let max_tokens: Int
+                let temperature: Double
+            }
+            
+            let titlePrompt = """
+            Generate a concise 2-5 word title for a chat conversation that starts with this user message. \
+            The title should capture the main topic or intent. \
+            Only respond with the title itself, no quotes, no explanation.
+            
+            User message: \(userMessage)
+            """
+            
+            let url = self.apiBaseURL.appendingPathComponent("chat/completions")
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 5.0  // 5 second timeout for title generation
+            if let apiKey = self.apiKey {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+            
+            let messages = [
+                RequestBody.Message(role: "system", content: "You are a helpful assistant that generates concise titles."),
+                RequestBody.Message(role: "user", content: titlePrompt)
+            ]
+            
+            let req = RequestBody(
+                model: self.model,
+                messages: messages,
+                stream: false,
+                max_tokens: 20,
+                temperature: 0.7
+            )
+            
+            do {
+                request.httpBody = try JSONEncoder().encode(req)
+                let (data, response) = try await URLSession.shared.data(for: request)
+                
+                guard !Task.isCancelled else { return }
+                
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                    return // Silently fail - title generation is not critical
+                }
+                
+                // Try to decode OpenAI-style response
+                struct Choice: Decodable {
+                    struct Message: Decodable { let content: String }
+                    let message: Message
+                }
+                struct ResponseBody: Decodable { let choices: [Choice] }
+                
+                if let decoded = try? JSONDecoder().decode(ResponseBody.self, from: data),
+                   let title = decoded.choices.first?.message.content {
+                    await MainActor.run { [weak self] in
+                        self?.sessionTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                        self?.persistSettings()
+                    }
+                }
+            } catch {
+                // Silently fail - title generation is not critical
+            }
+        }
+        
+        // Cancel the task if it takes more than 5 seconds
+        Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)  // 5 seconds
+            titleTask.cancel()
         }
     }
     

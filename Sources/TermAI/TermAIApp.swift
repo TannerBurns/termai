@@ -12,6 +12,10 @@ struct TermAIApp: App {
         WindowGroup {
             SimplifiedContentView(globalTabsManager: globalTabsManager)
                 .environmentObject(ptyModel)
+                .onAppear {
+                    // Connect PTYModel to AppDelegate for cleanup
+                    appDelegate.ptyModel = ptyModel
+                }
         }
         .windowStyle(.titleBar)
 
@@ -67,6 +71,8 @@ struct SimplifiedContentView: View {
 // Chat sessions strip is now rendered inside ChatPane
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    weak var ptyModel: PTYModel?
+    
     @objc func newGlobalTab(_ sender: Any?) { }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -78,6 +84,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.applicationIconImage = dockIcon
         }
         setupStatusItem()
+    }
+    
+    func applicationWillTerminate(_ notification: Notification) {
+        // Properly terminate the terminal process before app quits
+        ptyModel?.terminateProcess()
     }
 
     private var statusItem: NSStatusItem?
