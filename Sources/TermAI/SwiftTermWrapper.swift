@@ -15,8 +15,12 @@ final class PTYModel: ObservableObject {
     @Published var visibleRows: Int = 0
     @Published var lastOutputLineRange: (start: Int, end: Int)? = nil
     @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    @Published var lastExitCode: Int32 = 0
     // Theme selection id, used to apply a preset theme to the terminal view
     @Published var themeId: String = "system"
+    // Agent helpers
+    var markNextOutputStart: (() -> Void)?
+    @Published var lastSentCommandForCapture: String? = nil
     
     // Keep a reference to the terminal view for cleanup
     fileprivate weak var terminalView: BridgedLocalProcessTerminalView?
@@ -36,6 +40,17 @@ import SwiftTerm
 
 private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     weak var bridgeModel: PTYModel?
+    
+    func markOutputStart() {
+        let buffer = self.getTerminal().getBufferAsData()
+        let text = String(data: buffer, encoding: .utf8) ?? String(data: buffer, encoding: .isoLatin1) ?? ""
+        bridgeModel?.previousBuffer = text
+        bridgeModel?.lastOutputStartOffset = text.count
+        // Track viewport row for alignment
+        let absRow = self.terminal.buffer.y
+        let viewportRow = absRow - self.terminal.buffer.yDisp
+        bridgeModel?.lastOutputStartViewportRow = viewportRow
+    }
     
     func terminateShell() {
         // Send exit command to the shell
@@ -64,7 +79,19 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
                 let idx = text.index(text.startIndex, offsetBy: start)
                 newChunk = String(text[idx...])
             }
-            let trimmedChunk = Self.trimPrompt(from: newChunk)
+            var trimmedChunk = Self.trimPrompt(from: newChunk)
+            if let lastCmd = model.lastSentCommandForCapture, !lastCmd.isEmpty {
+                trimmedChunk = Self.trimEcho(of: lastCmd, from: trimmedChunk)
+            }
+            // Extract and remove both exit code and cwd markers if present
+            let rcProcessed = Self.stripExitCodeMarker(from: trimmedChunk)
+            trimmedChunk = rcProcessed.cleaned
+            if let rc = rcProcessed.code { model.lastExitCode = rc }
+            let cwdProcessed = Self.stripCwdMarker(from: trimmedChunk)
+            trimmedChunk = cwdProcessed.cleaned
+            if let cwd = cwdProcessed.cwd, !cwd.isEmpty {
+                model.currentWorkingDirectory = cwd
+            }
             if !trimmedChunk.isEmpty {
                 model.lastOutputChunk = trimmedChunk
                 // Also compute line range based on viewport start
@@ -82,14 +109,7 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
         // When user presses Enter (\r or \n), mark buffer offset as the start of next output
         if data.contains(10) || data.contains(13) { // \n or \r
-            let buffer = self.getTerminal().getBufferAsData()
-            let text = String(data: buffer, encoding: .utf8) ?? String(data: buffer, encoding: .isoLatin1) ?? ""
-            bridgeModel?.previousBuffer = text
-            bridgeModel?.lastOutputStartOffset = text.count
-            // Track viewport row for alignment
-            let absRow = self.terminal.buffer.y
-            let viewportRow = absRow - self.terminal.buffer.yDisp
-            bridgeModel?.lastOutputStartViewportRow = viewportRow
+            markOutputStart()
         }
         super.send(source: source, data: data)
     }
@@ -105,6 +125,118 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             }
         }
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Attempts to remove the echoed command from the start of the chunk, tolerating terminal line wraps
+    private static func trimEcho(of command: String, from chunk: String) -> String {
+        guard !command.isEmpty, !chunk.isEmpty else { return chunk }
+        
+        // First try to find where the command echo ends (it might be wrapped or truncated)
+        // Look for the command text in the chunk, allowing for line breaks
+        let commandChars = Array(command)
+        let chunkChars = Array(chunk)
+        var matchEnd = 0
+        var cmdIdx = 0
+        var chunkIdx = 0
+        
+        while chunkIdx < chunkChars.count && cmdIdx < commandChars.count {
+            let ch = chunkChars[chunkIdx]
+            
+            // Skip ANSI escape sequences
+            if ch == "\u{001B}" && chunkIdx + 1 < chunkChars.count && chunkChars[chunkIdx + 1] == "[" {
+                chunkIdx += 2
+                while chunkIdx < chunkChars.count {
+                    let c = chunkChars[chunkIdx]
+                    chunkIdx += 1
+                    if c >= "@" && c <= "~" { break }
+                }
+                continue
+            }
+            
+            // Skip newlines/carriage returns in the chunk
+            if ch == "\n" || ch == "\r" {
+                chunkIdx += 1
+                continue
+            }
+            
+            // Try to match command character
+            if ch == commandChars[cmdIdx] {
+                chunkIdx += 1
+                cmdIdx += 1
+                matchEnd = chunkIdx
+            } else if cmdIdx == 0 {
+                // Haven't started matching yet, skip this character
+                chunkIdx += 1
+            } else {
+                // Was matching but stopped - might be truncated, accept what we have
+                break
+            }
+        }
+        
+        // If we matched at least some of the command, trim it
+        if matchEnd > 0 {
+            // Skip any trailing newline after the command
+            while matchEnd < chunkChars.count && (chunkChars[matchEnd] == "\n" || chunkChars[matchEnd] == "\r") {
+                matchEnd += 1
+            }
+            let result = String(chunkChars[matchEnd...])
+            return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        return chunk
+    }
+
+    private static func stripExitCodeMarker(from chunk: String) -> (cleaned: String, code: Int32?) {
+        guard !chunk.isEmpty else { return (chunk, nil) }
+        let marker = "__TERMAI_RC__="
+        guard let r = chunk.range(of: marker, options: .backwards) else { return (chunk, nil) }
+        var idx = r.upperBound
+        var numStr = ""
+        while idx < chunk.endIndex, chunk[idx].isNumber || chunk[idx] == "-" {
+            numStr.append(chunk[idx])
+            idx = chunk.index(after: idx)
+        }
+        let code = Int32(numStr)
+        // Remove the marker and any trailing newline
+        var lineStart = r.lowerBound
+        while lineStart > chunk.startIndex {
+            let prev = chunk.index(before: lineStart)
+            if chunk[prev] == "\n" || chunk[prev] == "\r" { break }
+            lineStart = prev
+        }
+        var lineEnd = idx
+        if lineEnd < chunk.endIndex, chunk[lineEnd] == "\n" || chunk[lineEnd] == "\r" {
+            lineEnd = chunk.index(after: lineEnd)
+        }
+        let cleaned = chunk.replacingCharacters(in: lineStart..<lineEnd, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (cleaned, code)
+    }
+
+    private static func stripCwdMarker(from chunk: String) -> (cleaned: String, cwd: String?) {
+        guard !chunk.isEmpty else { return (chunk, nil) }
+        let marker = "__TERMAI_CWD__="
+        guard let r = chunk.range(of: marker, options: .backwards) else { return (chunk, nil) }
+        var idx = r.upperBound
+        var path = ""
+        while idx < chunk.endIndex {
+            let c = chunk[idx]
+            if c == "\n" || c == "\r" { break }
+            path.append(c)
+            idx = chunk.index(after: idx)
+        }
+        // Remove the marker line
+        var lineStart = r.lowerBound
+        while lineStart > chunk.startIndex {
+            let prev = chunk.index(before: lineStart)
+            if chunk[prev] == "\n" || chunk[prev] == "\r" { break }
+            lineStart = prev
+        }
+        var lineEnd = idx
+        if lineEnd < chunk.endIndex, chunk[lineEnd] == "\n" || chunk[lineEnd] == "\r" {
+            lineEnd = chunk.index(after: lineEnd)
+        }
+        let cleaned = chunk.replacingCharacters(in: lineStart..<lineEnd, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (cleaned, path)
     }
 }
 
@@ -131,6 +263,10 @@ struct SwiftTermView: NSViewRepresentable {
         // Wire programmatic input sender
         model.sendInput = { [weak term] text in
             term?.send(txt: text)
+        }
+        // Provide a helper for marking where the next output begins for programmatic commands
+        model.markNextOutputStart = { [weak term] in
+            (term as? BridgedLocalProcessTerminalView)?.markOutputStart()
         }
         // Start shell in user's home directory by injecting cd via login shell
         let home = FileManager.default.homeDirectoryForCurrentUser.path

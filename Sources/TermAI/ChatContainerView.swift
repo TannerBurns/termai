@@ -17,6 +17,14 @@ struct ChatContainerView: View {
                 if let session = tabsManager.selectedSession {
                     // Create a view that observes the session
                     SessionHeaderView(session: session)
+                    Toggle(isOn: Binding(
+                        get: { session.agentModeEnabled },
+                        set: { session.agentModeEnabled = $0; session.persistSettings() }
+                    )) {
+                        Text("Agent Mode")
+                    }
+                    .toggleStyle(.switch)
+                    .help("When enabled, the assistant can run terminal commands automatically.")
                 }
                 
                 Spacer()
@@ -88,6 +96,29 @@ struct ChatContainerView: View {
                     ptyModel: ptyModel
                 )
                 .id(selectedSession.id) // Force view recreation when session changes
+                .onReceive(NotificationCenter.default.publisher(for: .TermAIExecuteCommand)) { note in
+                    // When a command is executed, schedule a capture and publish a finish event for the selected session
+                    guard let cmd = note.userInfo?["command"] as? String else { return }
+                    // Capture after a small delay to accumulate output
+                    // Wait longer to ensure markers are processed
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        // Grab last output chunk and exit code from the terminal
+                        let output = ptyModel.lastOutputChunk
+                        let rc = ptyModel.lastExitCode
+                        let cwd = ptyModel.currentWorkingDirectory
+                        // Route the finish to the same session id that issued the command (if provided)
+                        let sid = (note.userInfo?["sessionId"] as? UUID) ?? selectedSession.id
+                        NotificationCenter.default.post(name: .TermAICommandFinished, object: nil, userInfo: [
+                            "sessionId": sid,
+                            "command": cmd,
+                            "output": output,
+                            "cwd": cwd,
+                            "exitCode": rc
+                        ])
+                        // Clear last-sent marker after capture
+                        ptyModel.lastSentCommandForCapture = nil
+                    }
+                }
             } else {
                 Color.clear
             }

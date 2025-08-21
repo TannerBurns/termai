@@ -12,6 +12,9 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var streamingMessageId: UUID? = nil
     @Published var pendingTerminalContext: String? = nil
     @Published var pendingTerminalMeta: TerminalContextMeta? = nil
+    @Published var agentModeEnabled: Bool = false
+    @Published var agentContextLog: [String] = []
+    @Published var lastKnownCwd: String = ""
     
     // Configuration (each session has its own copy)
     @Published var apiBaseURL: URL
@@ -50,6 +53,7 @@ final class ChatSession: ObservableObject, Identifiable {
     
     deinit {
         streamingTask?.cancel()
+        if let obs = commandFinishedObserver { NotificationCenter.default.removeObserver(obs) }
     }
     
     func setPendingTerminalContext(_ text: String, meta: TerminalContextMeta?) {
@@ -78,10 +82,32 @@ final class ChatSession: ObservableObject, Identifiable {
         streamingMessageId = nil
     }
     
+    /// Append a user message without triggering model streaming (used by Agent mode)
+    func appendUserMessage(_ text: String) {
+        let ctx = pendingTerminalContext
+        let meta = pendingTerminalMeta
+        pendingTerminalContext = nil
+        pendingTerminalMeta = nil
+        messages.append(ChatMessage(role: "user", content: text, terminalContext: ctx, terminalContextMeta: meta))
+        // Force UI update and persist
+        messages = messages
+        persistMessages()
+    }
+    
     func sendUserMessage(_ text: String) async {
         // Validate model is selected
         guard !model.isEmpty else {
             messages.append(ChatMessage(role: "assistant", content: "⚠️ No model selected. Please go to Settings (⌘,) and select a model."))
+            return
+        }
+        // Generate title for the first user message as the very first step (synchronously)
+        let isFirstUserMessage = messages.filter { $0.role == "user" }.isEmpty
+        if isFirstUserMessage && sessionTitle.isEmpty {
+            await generateTitle(from: text)
+        }
+        if agentModeEnabled {
+            // In agent mode we run the agent orchestration instead of directly streaming
+            await runAgentOrchestration(for: text)
             return
         }
         
@@ -89,9 +115,6 @@ final class ChatSession: ObservableObject, Identifiable {
         let meta = pendingTerminalMeta
         pendingTerminalContext = nil
         pendingTerminalMeta = nil
-        
-        // Check if this is the first user message and generate title if needed
-        let isFirstUserMessage = messages.filter { $0.role == "user" }.isEmpty
         
         messages.append(ChatMessage(role: "user", content: text, terminalContext: ctx, terminalContextMeta: meta))
         let assistantIndex = messages.count
@@ -101,12 +124,7 @@ final class ChatSession: ObservableObject, Identifiable {
         // Force UI update
         messages = messages
         
-        // Generate title for the first user message
-        if isFirstUserMessage && sessionTitle.isEmpty {
-            Task { [weak self] in
-                await self?.generateTitle(from: text)
-            }
-        }
+        // Title already generated before sending when needed
         
         // Cancel any previous stream
         streamingTask?.cancel()
@@ -124,6 +142,366 @@ final class ChatSession: ObservableObject, Identifiable {
             await MainActor.run {
                 self.streamingMessageId = nil
                 self.persistMessages()
+            }
+        }
+    }
+
+    // MARK: - Agent Orchestration
+    private var commandFinishedObserver: NSObjectProtocol? = nil
+    
+    private func runAgentOrchestration(for userPrompt: String) async {
+        // Append user message first
+        appendUserMessage(userPrompt)
+        
+        // Add an agent status message (collapsed) indicating decision in progress
+        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent deciding next action…", details: "Evaluating whether to run commands or reply directly.", command: nil, output: nil, collapsed: true)))
+        messages = messages
+        persistMessages()
+        
+        // Ask the model whether to run commands or reply
+        let decisionPrompt = """
+        You are operating in an agent mode inside a terminal-centric app. Given the user's request below, decide one of two actions: either respond directly (RESPOND) or run one or more shell commands (RUN). 
+        Reply strictly in JSON on one line with keys: {"action":"RESPOND|RUN", "reason":"short sentence"}.
+        User: \(userPrompt)
+        """
+        let decision = await callOneShotJSON(prompt: decisionPrompt)
+        AgentDebugConfig.log("[Agent] Decision: \(decision.raw)")
+        
+        // Replace last agent status with decision
+        if let lastIdx = messages.indices.last, messages[lastIdx].agentEvent != nil {
+            let jsonText = decision.raw
+            messages[lastIdx] = ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent decision", details: jsonText, command: nil, output: nil, collapsed: true))
+        }
+        messages = messages
+        persistMessages()
+        
+        guard decision.action == "RUN" else {
+            // Fall back to normal streaming reply using the same request path
+            let assistantIndex = messages.count
+            messages.append(ChatMessage(role: "assistant", content: ""))
+            streamingMessageId = messages[assistantIndex].id
+            messages = messages
+            do {
+                _ = try await requestChatCompletionStream(assistantIndex: assistantIndex)
+            } catch is CancellationError {
+                // ignore
+            } catch {
+                await MainActor.run {
+                    self.messages.append(ChatMessage(role: "assistant", content: "Error: \(error.localizedDescription)"))
+                }
+            }
+            await MainActor.run {
+                self.streamingMessageId = nil
+                self.persistMessages()
+            }
+            return
+        }
+        
+        // Generate a concrete goal
+        let goalPrompt = """
+        Convert the user's request below into a concise actionable goal a shell-capable agent should accomplish.
+        Reply as JSON: {"goal":"short goal phrase"}.
+        User: \(userPrompt)
+        """
+        let goal = await callOneShotJSON(prompt: goalPrompt)
+        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Goal", details: goal.raw, command: nil, output: nil, collapsed: true)))
+        messages = messages
+        persistMessages()
+        
+        // Agent context maintained as a growing log we pass to the model
+        agentContextLog = []
+        agentContextLog.append("GOAL: \(goal.goal ?? "")")
+        // Observe terminal completion events targeted to this session
+        if commandFinishedObserver == nil {
+            commandFinishedObserver = NotificationCenter.default.addObserver(forName: .TermAICommandFinished, object: nil, queue: .main) { [weak self] note in
+                guard let self = self else { return }
+                Task { @MainActor in
+                    guard let sid = note.userInfo?["sessionId"] as? UUID, sid == self.id else { return }
+                    let cmd = note.userInfo?["command"] as? String ?? ""
+                    let cwd = note.userInfo?["cwd"] as? String ?? ""
+                    let rc = note.userInfo?["exitCode"] as? Int32
+                    let out = (note.userInfo?["output"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.lastKnownCwd = cwd
+                    self.agentContextLog.append("CWD: \(cwd)")
+                    if let rc { self.agentContextLog.append("__TERMAI_RC__=\(rc)") }
+                    if !out.isEmpty {
+                        self.agentContextLog.append("OUTPUT(\(cmd.prefix(64))): \(out.prefix(2000))")
+                        // Update last status event bubble with output
+                        if let idx = self.messages.lastIndex(where: { $0.agentEvent?.command == cmd }) {
+                            var msg = self.messages[idx]
+                            var evt = msg.agentEvent!
+                            evt.output = out
+                            msg.agentEvent = evt
+                            self.messages[idx] = msg
+                            self.messages = self.messages
+                            self.persistMessages()
+                        }
+                    }
+                }
+            }
+        }
+        
+        var iterations = 0
+        let maxIterations = 6
+        var fixAttempts = 0
+        let maxFixAttempts = 3
+        stepLoop: while iterations < maxIterations {
+            iterations += 1
+            // Ask next step
+            let contextBlob = agentContextLog.joined(separator: "\n")
+            let stepPrompt = """
+            You are a terminal agent. Based on the GOAL and CONTEXT below, suggest the next step and a single shell command to run.
+            Constraints:
+            - Output strictly JSON on one line.
+            - Do NOT include placeholders like <DIR> or <VENV_DIR>. Use explicit paths under the current project dir if appropriate (e.g., ./venv), or skip the command if user input would be required.
+            - If you cannot safely determine values, return an empty command and explain in the step.
+            Reply JSON: {"step":"what you will do", "command":"bash to run or empty string"}.
+            ---
+            ENVIRONMENT:
+            - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
+            - Shell: /bin/zsh
+            GOAL: \(goal.goal ?? "")
+            CONTEXT:\n\(contextBlob)
+            """
+            AgentDebugConfig.log("[Agent] Step prompt =>\n\(stepPrompt)")
+            let step = await callOneShotJSON(prompt: stepPrompt)
+            let commandToRun = step.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "step", title: step.step ?? "Next step", details: nil, command: commandToRun, output: nil, collapsed: true)))
+            messages = messages
+            persistMessages()
+            
+            guard !commandToRun.isEmpty else { break }
+            
+            // Execute in terminal and capture output snapshot from PTYModel via App scope. We'll rely on Terminal to echo output; here we only append status.
+            // Insert a hint message that command is being executed in the terminal
+            let runningTitle = "Executing command in terminal"
+            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: runningTitle, details: "\(commandToRun)", command: commandToRun, output: nil, collapsed: false)))
+            messages = messages
+            persistMessages()
+            
+            // Fire a notification so UI can send the command to terminal
+            AgentDebugConfig.log("[Agent] Executing command: \(commandToRun)")
+            NotificationCenter.default.post(name: .TermAIExecuteCommand, object: nil, userInfo: [
+                "sessionId": self.id,
+                "command": commandToRun
+            ])
+            
+            // Wait for output or timeout (increased to account for marker processing)
+            let capturedOut = await waitForCommandOutput(matching: commandToRun, timeout: 10.0)
+            // Record that the command was issued and capture output if any
+            agentContextLog.append("RAN: \(commandToRun)")
+            if let out = capturedOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                agentContextLog.append("OUTPUT: \(out.prefix(3000))")
+            }
+            AgentDebugConfig.log("[Agent] Command finished. cwd=\(self.lastKnownCwd), exit=\(lastExitCodeString())\nOutput (first 500 chars):\n\((capturedOut ?? "(no output)").prefix(500))")
+            
+            // Analyze command outcome; propose fixes if failed
+            let analyzePrompt = """
+            Analyze the following command execution and decide outcome and next action.
+            Reply strictly as JSON on one line with keys:
+            {"outcome":"success|fail|uncertain", "reason":"short", "next":"continue|stop|fix", "fixed_command":"optional replacement if next=fix else empty"}
+            GOAL: \(goal.goal ?? "")
+            COMMAND: \(commandToRun)
+            OUTPUT:\n\(capturedOut ?? "(no output)")
+            CWD: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
+            EXIT_CODE: \(lastExitCodeString())
+            """
+            AgentDebugConfig.log("[Agent] Analyze prompt =>\n\(analyzePrompt)")
+            let analysis = await callOneShotJSON(prompt: analyzePrompt)
+            AgentDebugConfig.log("[Agent] Analysis: \(analysis.raw)")
+            if analysis.next == "fix", let fixed = analysis.fixed_command?.trimmingCharacters(in: .whitespacesAndNewlines), !fixed.isEmpty, fixAttempts < maxFixAttempts {
+                fixAttempts += 1
+                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Fixing command and retrying", details: fixed, command: fixed, output: nil, collapsed: false)))
+                messages = messages
+                persistMessages()
+                AgentDebugConfig.log("[Agent] Fixing by executing: \(fixed)")
+                NotificationCenter.default.post(name: .TermAIExecuteCommand, object: nil, userInfo: [
+                    "sessionId": self.id,
+                    "command": fixed
+                ])
+                let fixOut = await waitForCommandOutput(matching: fixed, timeout: 10.0)
+                agentContextLog.append("RAN: \(fixed)")
+                if let out = fixOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    agentContextLog.append("OUTPUT: \(out.prefix(3000))")
+                }
+                // Immediately reassess after a fix attempt based on exit code and output
+                let quickAssessPrompt = """
+                Decide if the GOAL is now achieved after the fix attempt. Reply JSON: {"done":true|false, "reason":"short"}.
+                GOAL: \(goal.goal ?? "")
+                BASE CONTEXT:
+                - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
+                - Last Command: \(fixed)
+                - Last Output: \((fixOut ?? "").prefix(3000))
+                - Last Exit Code: \(lastExitCodeString())
+                CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
+                """
+                AgentDebugConfig.log("[Agent] Post-fix assess prompt =>\n\(quickAssessPrompt)")
+                let quickAssess = await callOneShotJSON(prompt: quickAssessPrompt)
+                AgentDebugConfig.log("[Agent] Post-fix assess: \(quickAssess.raw)")
+                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Post-fix assessment", details: quickAssess.raw, command: nil, output: nil, collapsed: true)))
+                messages = messages
+                persistMessages()
+                if quickAssess.done == true {
+                    let summaryPrompt = """
+                    Summarize concisely what was done to achieve the goal and the result. Reply markdown.
+                    GOAL: \(goal.goal ?? "")
+                    CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
+                    """
+                    AgentDebugConfig.log("[Agent] Summary prompt =>\n\(summaryPrompt)")
+                    let summaryText = await callOneShotText(prompt: summaryPrompt)
+                    messages.append(ChatMessage(role: "assistant", content: summaryText))
+                    messages = messages
+                    persistMessages()
+                    break stepLoop
+                }
+            }
+            
+            // Ask if goal achieved, with latest context
+            let assessPrompt = """
+            Given the GOAL and CONTEXT, decide if the goal is accomplished. Reply JSON: {"done":true|false, "reason":"short"}.
+            GOAL: \(goal.goal ?? "")
+            BASE CONTEXT:
+            - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
+            - Last Command: \(commandToRun)
+            - Last Output: \((capturedOut ?? "").prefix(3000))
+            - Last Exit Code: \(lastExitCodeString())
+            CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
+            """
+            AgentDebugConfig.log("[Agent] Assess prompt =>\n\(assessPrompt)")
+            let assess = await callOneShotJSON(prompt: assessPrompt)
+            AgentDebugConfig.log("[Agent] Assess result => \(assess.raw)")
+            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Assessment", details: assess.raw, command: nil, output: nil, collapsed: true)))
+            messages = messages
+            persistMessages()
+            
+            if assess.done == true {
+                // Summarize actions
+                let summaryPrompt = """
+                Summarize concisely what was done to achieve the goal and the result. Reply markdown.
+                GOAL: \(goal.goal ?? "")
+                CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
+                """
+                let summaryText = await callOneShotText(prompt: summaryPrompt)
+                messages.append(ChatMessage(role: "assistant", content: summaryText))
+                messages = messages
+                persistMessages()
+                break stepLoop
+            } else {
+                // Decide to continue or stop and summarize
+                let contPrompt = """
+                Decide whether to CONTINUE or STOP given diminishing returns. Reply JSON: {"decision":"CONTINUE|STOP", "reason":"short"}.
+                GOAL: \(goal.goal ?? "")
+                CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
+                """
+                let cont = await callOneShotJSON(prompt: contPrompt)
+                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Continue?", details: cont.raw, command: nil, output: nil, collapsed: true)))
+                messages = messages
+                persistMessages()
+                if cont.decision == "STOP" { 
+                    let summaryPrompt = """
+                    Summarize what was done so far and suggest next steps. Reply markdown.
+                    GOAL: \(goal.goal ?? "")
+                    CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
+                    """
+                    let summaryText = await callOneShotText(prompt: summaryPrompt)
+                    messages.append(ChatMessage(role: "assistant", content: summaryText))
+                    messages = messages
+                    persistMessages()
+                    break stepLoop
+                }
+            }
+        }
+    }
+    
+    private struct JSONDecision: Decodable { let action: String?; let reason: String? }
+    private struct JSONGoal: Decodable { let goal: String? }
+    private struct JSONStep: Decodable { let step: String?; let command: String? }
+    private struct JSONAssess: Decodable { let done: Bool?; let reason: String? }
+    private struct JSONCont: Decodable { let decision: String?; let reason: String? }
+    private struct JSONAnalyze: Decodable { let outcome: String?; let reason: String?; let next: String?; let fixed_command: String? }
+    
+    private struct RawJSON: Decodable { }
+    
+    private func callOneShotJSON(prompt: String) async -> (raw: String, action: String?, reason: String?, goal: String?, step: String?, command: String?, done: Bool?, decision: String?, outcome: String?, next: String?, fixed_command: String?) {
+        let text = await callOneShotText(prompt: prompt)
+        let compact = text.replacingOccurrences(of: "\n", with: " ")
+        let data = compact.data(using: .utf8) ?? Data()
+        var action: String? = nil, reason: String? = nil, goal: String? = nil, step: String? = nil, command: String? = nil, done: Bool? = nil, decision: String? = nil, outcome: String? = nil, next: String? = nil, fixed: String? = nil
+        if let obj = try? JSONDecoder().decode(JSONDecision.self, from: data) { action = obj.action; reason = obj.reason }
+        if let obj = try? JSONDecoder().decode(JSONGoal.self, from: data) { goal = obj.goal }
+        if let obj = try? JSONDecoder().decode(JSONStep.self, from: data) { step = obj.step; command = obj.command }
+        if let obj = try? JSONDecoder().decode(JSONAssess.self, from: data) { done = obj.done; reason = obj.reason ?? reason }
+        if let obj = try? JSONDecoder().decode(JSONCont.self, from: data) { decision = obj.decision; reason = obj.reason ?? reason }
+        if let obj = try? JSONDecoder().decode(JSONAnalyze.self, from: data) { outcome = obj.outcome; next = obj.next; fixed = obj.fixed_command ?? fixed }
+        return (raw: compact, action: action, reason: reason, goal: goal, step: step, command: command, done: done, decision: decision, outcome: outcome, next: next, fixed_command: fixed)
+    }
+    
+    private func callOneShotText(prompt: String) async -> String {
+        struct RequestBody: Encodable {
+            struct Message: Codable { let role: String; let content: String }
+            let model: String
+            let messages: [Message]
+            let stream: Bool
+            let temperature: Double
+        }
+        let url = apiBaseURL.appendingPathComponent("chat/completions")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        let messages = [
+            RequestBody.Message(role: "system", content: systemPrompt),
+            RequestBody.Message(role: "user", content: prompt)
+        ]
+        let req = RequestBody(model: model, messages: messages, stream: false, temperature: 0.2)
+        do {
+            request.httpBody = try JSONEncoder().encode(req)
+            let (data, _) = try await URLSession.shared.data(for: request)
+            // Try OpenAI-like
+            struct Choice: Decodable { struct Message: Decodable { let content: String }; let message: Message }
+            struct Resp: Decodable { let choices: [Choice] }
+            if let decoded = try? JSONDecoder().decode(Resp.self, from: data), let content = decoded.choices.first?.message.content { return content }
+            // Try Ollama-like
+            struct OR: Decodable { struct Message: Decodable { let content: String? }; let message: Message?; let response: String? }
+            if let o = try? JSONDecoder().decode(OR.self, from: data) { return o.message?.content ?? o.response ?? String(data: data, encoding: .utf8) ?? "" }
+            return String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            return "{\"error\":\"\(error.localizedDescription)\"}"
+        }
+    }
+    
+    private func lastExitCodeString() -> String {
+        // We don't have direct access to PTYModel here; rely on last recorded value from context if present.
+        // As a simple fallback, look for the last "OUTPUT: __TERMAI_RC__=N" line we injected into agentContextLog.
+        if let line = agentContextLog.last(where: { $0.contains("__TERMAI_RC__=") }) {
+            if let idx = line.lastIndex(of: "=") {
+                let num = line[line.index(after: idx)...]
+                return String(num)
+            }
+        }
+        return "unknown"
+    }
+
+    private func waitForCommandOutput(matching command: String, timeout: TimeInterval) async -> String? {
+        let sid = self.id
+        return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            var token: NSObjectProtocol?
+            var resolved = false
+            func finish(_ value: String?) {
+                guard !resolved else { return }
+                resolved = true
+                if let t = token { NotificationCenter.default.removeObserver(t) }
+                token = nil
+                continuation.resume(returning: value)
+            }
+            token = NotificationCenter.default.addObserver(forName: .TermAICommandFinished, object: nil, queue: .main) { note in
+                guard let noteSid = note.userInfo?["sessionId"] as? UUID, noteSid == sid else { return }
+                guard let cmd = note.userInfo?["command"] as? String, cmd == command else { return }
+                let out = note.userInfo?["output"] as? String
+                finish(out)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+                finish(nil)
             }
         }
     }
@@ -327,8 +705,14 @@ final class ChatSession: ObservableObject, Identifiable {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         
-        let userMessages = messages.filter { $0.role != "system" }
-        let allMessages: [RequestBody.Message] = [RequestBody.Message(role: "system", content: systemPrompt)] + userMessages.map {
+        // Exclude agent event bubbles and assistant placeholders from the provider context
+        let conversational = messages.filter { msg in
+            guard msg.role != "system" else { return false }
+            if msg.agentEvent != nil { return false }
+            if msg.role == "assistant" && msg.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return false }
+            return true
+        }
+        let allMessages: [RequestBody.Message] = [RequestBody.Message(role: "system", content: systemPrompt)] + conversational.map {
             var prefix = ""
             if let ctx = $0.terminalContext, !ctx.isEmpty {
                 var header = "Terminal Context:"
@@ -446,7 +830,8 @@ final class ChatSession: ObservableObject, Identifiable {
             model: model,
             providerName: providerName,
             systemPrompt: nil,  // No longer used
-            sessionTitle: sessionTitle
+            sessionTitle: sessionTitle,
+            agentModeEnabled: agentModeEnabled
         )
         try? PersistenceService.saveJSON(settings, to: "session-settings-\(id.uuidString).json")
     }
@@ -459,6 +844,7 @@ final class ChatSession: ObservableObject, Identifiable {
             providerName = settings.providerName
             // Note: systemPrompt is no longer loaded from settings - using hard-coded prompt
             sessionTitle = settings.sessionTitle ?? ""
+            agentModeEnabled = settings.agentModeEnabled ?? false
         }
         
         // After loading settings, fetch models if connected to Ollama
@@ -476,6 +862,7 @@ private struct SessionSettings: Codable {
     let providerName: String
     let systemPrompt: String? // Kept for backward compatibility but no longer used
     let sessionTitle: String?
+    let agentModeEnabled: Bool?
 }
 
 private struct OpenAIStreamChunk: Decodable {

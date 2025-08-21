@@ -38,6 +38,7 @@ struct ChatPane: View {
                     )
                 // Context chip moved below tabs
                 Spacer()
+                // Agent Mode toggle is not applicable in this legacy ChatPane using ChatViewModel
 
             }
             .padding(8)
@@ -149,7 +150,7 @@ struct ChatPane: View {
             VStack(spacing: 2) {
                 TextEditor(text: $messageText)
                     .font(.system(size: 11, weight: .regular, design: .default))
-                    .frame(height: 32)
+                    .frame(height: 80)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.2)))
                     .disabled(sending)
                 HStack {
