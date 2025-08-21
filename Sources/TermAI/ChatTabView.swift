@@ -5,7 +5,7 @@ struct ChatTabView: View {
     @StateObject private var session: ChatSession
     @State private var messageText: String = ""
     @State private var sending: Bool = false
-    @State private var showSystemPrompt: Bool = false
+
     @State private var scrollViewHeight: CGFloat = 0
     @State private var contentBottomY: CGFloat = 0
     
@@ -32,24 +32,100 @@ struct ChatTabView: View {
                 Text(session.sessionTitle.isEmpty ? "Chat \(tabIndex + 1)" : session.sessionTitle)
                     .font(.headline)
                 
-                Label(session.providerName, systemImage: "network")
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Color.gray.opacity(0.15)))
+                // Provider selector - clickable chip
+                Menu {
+                    Button(action: {
+                        session.providerName = "Ollama"
+                        session.apiBaseURL = URL(string: "http://localhost:11434/v1")!
+                        session.persistSettings()
+                        Task { await session.fetchOllamaModels() }
+                    }) {
+                        HStack {
+                            Text("Ollama (Local)")
+                            if session.providerName == "Ollama" {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    
+                    Button(action: {
+                        session.providerName = "OpenAI"
+                        session.apiBaseURL = URL(string: "https://api.openai.com/v1")!
+                        session.persistSettings()
+                        session.availableModels = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+                    }) {
+                        HStack {
+                            Text("OpenAI")
+                            if session.providerName == "OpenAI" {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    
+                    Button(action: {
+                        session.providerName = "Custom"
+                        session.persistSettings()
+                    }) {
+                        HStack {
+                            Text("Custom")
+                            if session.providerName == "Custom" {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                } label: {
+                    Label(session.providerName, systemImage: "network")
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.gray.opacity(0.15)))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Click to change provider")
                 
-                Label(session.model, systemImage: "cpu")
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Color.gray.opacity(0.15)))
+                // Model selector - clickable chip
+                Menu {
+                    if session.availableModels.isEmpty {
+                        Button("Fetching models...") {}
+                            .disabled(true)
+                    } else {
+                        ForEach(session.availableModels, id: \.self) { model in
+                            Button(action: {
+                                session.model = model
+                                session.persistSettings()
+                            }) {
+                                HStack {
+                                    Text(model)
+                                    if model == session.model {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                        
+                        Divider()
+                        
+                        Button("Refresh Models") {
+                            Task {
+                                await session.fetchOllamaModels()
+                            }
+                        }
+                    }
+                } label: {
+                    Label(session.model.isEmpty ? "Select Model" : session.model, systemImage: "cpu")
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(session.model.isEmpty ? Color.orange.opacity(0.15) : Color.gray.opacity(0.15)))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Click to change model")
                 
                 Spacer()
                 
-                Button(action: { showSystemPrompt.toggle() }) {
-                    Label("System Prompt", systemImage: showSystemPrompt ? "chevron.down" : "chevron.right")
-                }
-                .buttonStyle(.borderless)
+
                 
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
@@ -59,6 +135,28 @@ struct ChatTabView: View {
                 .help("Close Chat")
             }
             .padding(8)
+            
+            // Title generation error indicator
+            if let error = session.titleGenerationError {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text("Title generation error: \(error)")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                    Spacer()
+                    Button("Dismiss") {
+                        session.titleGenerationError = nil
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(4)
+                .padding(.horizontal, 8)
+            }
             
             // Terminal context indicator
             if let ctx = session.pendingTerminalContext, !ctx.isEmpty {
@@ -87,25 +185,7 @@ struct ChatTabView: View {
                 .padding(.bottom, 6)
             }
             
-            // System prompt editor
-            if showSystemPrompt {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("System Prompt")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextEditor(text: $session.systemPrompt)
-                        .font(.system(.body, design: .monospaced))
-                        .frame(minHeight: 100)
-                        .padding(6)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
-                        .onChange(of: session.systemPrompt) { _ in
-                            session.persistSettings()
-                        }
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
-            }
+
             
             // Messages
             ScrollViewReader { proxy in

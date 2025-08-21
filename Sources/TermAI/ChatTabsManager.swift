@@ -8,10 +8,16 @@ final class ChatTabsManager: ObservableObject {
     @Published var selectedSessionId: UUID?
     
     init() {
-        // Start with one empty session
-        let firstSession = ChatSession()
-        sessions = [firstSession]
-        selectedSessionId = firstSession.id
+        // Try to restore previous sessions
+        loadSessions()
+        
+        // If no sessions were restored, create a new one
+        if sessions.isEmpty {
+            let firstSession = ChatSession()
+            sessions = [firstSession]
+            selectedSessionId = firstSession.id
+            saveSessions()
+        }
     }
     
     var selectedSession: ChatSession? {
@@ -31,11 +37,12 @@ final class ChatTabsManager: ObservableObject {
             newSession.apiKey = source.apiKey
             newSession.model = source.model
             newSession.providerName = source.providerName
-            newSession.systemPrompt = source.systemPrompt
+            // systemPrompt is now automatically generated and cannot be copied
         }
         
         sessions.append(newSession)
         selectedSessionId = newSession.id
+        saveSessions() // Save when adding new session
         return newSession
     }
     
@@ -58,6 +65,8 @@ final class ChatTabsManager: ObservableObject {
             let newIndex = min(index, sessions.count - 1)
             selectedSessionId = sessions[newIndex].id
         }
+        
+        saveSessions() // Save when removing session
     }
     
     func closeSession(id: UUID) {
@@ -69,6 +78,49 @@ final class ChatTabsManager: ObservableObject {
     func selectSession(id: UUID) {
         if sessions.contains(where: { $0.id == id }) {
             selectedSessionId = id
+            saveSessions() // Save selection change
         }
     }
+    
+    // MARK: - Persistence
+    
+    func saveSessions() {
+        let sessionData = SessionsData(
+            sessionIds: sessions.map { $0.id },
+            selectedSessionId: selectedSessionId
+        )
+        try? PersistenceService.saveJSON(sessionData, to: "sessions-manifest.json")
+        
+        // Also make sure each session saves its settings
+        for session in sessions {
+            session.persistSettings()
+            session.persistMessages()
+        }
+    }
+    
+    private func loadSessions() {
+        guard let sessionData = try? PersistenceService.loadJSON(SessionsData.self, from: "sessions-manifest.json") else {
+            return
+        }
+        
+        // Restore each session
+        var restoredSessions: [ChatSession] = []
+        for sessionId in sessionData.sessionIds {
+            let session = ChatSession(restoredId: sessionId)
+            session.loadSettings()
+            session.loadMessages()
+            restoredSessions.append(session)
+        }
+        
+        if !restoredSessions.isEmpty {
+            sessions = restoredSessions
+            selectedSessionId = sessionData.selectedSessionId
+        }
+    }
+}
+
+// MARK: - Supporting Types
+private struct SessionsData: Codable {
+    let sessionIds: [UUID]
+    let selectedSessionId: UUID?
 }

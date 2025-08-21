@@ -14,6 +14,9 @@ struct SessionSettingsView: View {
                     Text("Provider:")
                     TextField("Provider Name", text: $session.providerName)
                         .textFieldStyle(.roundedBorder)
+                        .onChange(of: session.providerName) { _ in
+                            session.persistSettings()
+                        }
                 }
                 
                 HStack {
@@ -82,6 +85,10 @@ struct SessionSettingsView: View {
                         if session.model.isEmpty {
                             Text("Select a model...").tag("")
                         }
+                        // Show current model even if not in list
+                        if !session.model.isEmpty && !availableModels.contains(session.model) {
+                            Text("\(session.model) (custom)").tag(session.model)
+                        }
                         ForEach(availableModels, id: \.self) { model in
                             Text(model).tag(model)
                         }
@@ -129,15 +136,7 @@ struct SessionSettingsView: View {
                 }
             }
             
-            DisclosureGroup("System Prompt") {
-                TextEditor(text: $session.systemPrompt)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 120)
-                    .onChange(of: session.systemPrompt) { _ in
-                        session.persistSettings()
-                    }
-            }
-            
+
             Section("Session Info") {
                 HStack {
                     Text("Session ID:")
@@ -233,14 +232,11 @@ struct SessionSettingsView: View {
                                 session.model = modelNames[0]
                                 session.persistSettings()
                             }
-                            // Warn if current model is not in the list
+                            // Show warning if current model is not in the list, but don't override it
+                            // The user may have a valid model that's not currently available
                             else if !session.model.isEmpty && !modelNames.contains(session.model) {
-                                fetchError = "Warning: Model '\(session.model)' not found in available models"
-                                // Fall back to first available model
-                                if !modelNames.isEmpty {
-                                    session.model = modelNames[0]
-                                    session.persistSettings()
-                                }
+                                fetchError = "Note: Model '\(session.model)' not found in available models. It may still be valid."
+                                // Don't automatically change the model - let the user decide
                             }
                         }
                     }

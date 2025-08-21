@@ -20,12 +20,18 @@ final class ChatViewModel: ObservableObject {
     @Published var providerName: String = "Ollama"
     @Published var pendingTerminalContext: String? = nil
     @Published var pendingTerminalMeta: TerminalContextMeta? = nil
-    @Published var systemPrompt: String = "You are a helpful terminal assistant. When given pasted terminal outputs, analyze them and provide guidance."
     @Published var streamingMessageId: UUID? = nil
     @Published var availableModels: [String] = []
     @Published var modelFetchError: String? = nil
     @Published var sessionTitle: String = ""
+    @Published var titleGenerationError: String? = nil
     private var streamingTask: Task<Void, Never>? = nil
+    
+    // System info and prompt
+    private let systemInfo: SystemInfo = SystemInfo.gather()
+    var systemPrompt: String {
+        return systemInfo.injectIntoPrompt()
+    }
 
     init() {}
 
@@ -44,7 +50,7 @@ final class ChatViewModel: ObservableObject {
         streamingTask?.cancel()
         streamingTask = nil
         streamingMessageId = nil
-        messages = [ChatMessage(role: "system", content: "You are a helpful terminal assistant. When given pasted terminal outputs, analyze them and provide guidance.")]
+        messages = []
         sessionTitle = ""  // Reset title when clearing chat
         persistMessages()
         persistSettings()  // Persist the cleared title
@@ -131,7 +137,20 @@ final class ChatViewModel: ObservableObject {
     
     // MARK: - Title Generation
     private func generateTitle(from userMessage: String) async {
-        // Run title generation with a timeout to prevent hanging
+        // Clear any previous error
+        await MainActor.run { [weak self] in
+            self?.titleGenerationError = nil
+        }
+        
+        // Skip if model is not set
+        guard !model.isEmpty else {
+            await MainActor.run { [weak self] in
+                self?.titleGenerationError = "Cannot generate title: No model selected"
+            }
+            return
+        }
+        
+        // Run title generation in a separate task
         let titleTask = Task { [weak self] in
             guard let self = self else { return }
             
@@ -152,11 +171,12 @@ final class ChatViewModel: ObservableObject {
             User message: \(userMessage)
             """
             
+            // Use the same endpoint configuration as regular chat
             let url = self.apiBaseURL.appendingPathComponent("chat/completions")
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 5.0  // 5 second timeout for title generation
+            request.timeoutInterval = 60.0  // 60 second timeout for slow models
             if let apiKey = self.apiKey {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
@@ -176,37 +196,116 @@ final class ChatViewModel: ObservableObject {
             
             do {
                 request.httpBody = try JSONEncoder().encode(req)
-                let (data, response) = try await URLSession.shared.data(for: request)
                 
-                guard !Task.isCancelled else { return }
+                // Use a custom URLSession with longer timeout configuration
+                let config = URLSessionConfiguration.default
+                config.timeoutIntervalForRequest = 60.0
+                config.timeoutIntervalForResource = 60.0
+                let session = URLSession(configuration: config)
                 
-                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                    return // Silently fail - title generation is not critical
+                let (data, response) = try await session.data(for: request)
+                
+                guard !Task.isCancelled else { 
+                    await MainActor.run { [weak self] in
+                        self?.titleGenerationError = "Title generation was cancelled"
+                    }
+                    return 
                 }
                 
-                // Try to decode OpenAI-style response
-                struct Choice: Decodable {
+                guard let http = response as? HTTPURLResponse else {
+                    await MainActor.run { [weak self] in
+                        self?.titleGenerationError = "Invalid response from server"
+                    }
+                    return
+                }
+                
+                guard (200..<300).contains(http.statusCode) else {
+                    let errorBody = String(data: data, encoding: .utf8) ?? "No error details"
+                    await MainActor.run { [weak self] in
+                        self?.titleGenerationError = "Title generation failed (HTTP \(http.statusCode)): \(errorBody)"
+                    }
+                    return
+                }
+                
+                // Try to decode OpenAI-style response first
+                struct OpenAIChoice: Decodable {
                     struct Message: Decodable { let content: String }
                     let message: Message
                 }
-                struct ResponseBody: Decodable { let choices: [Choice] }
+                struct OpenAIResponse: Decodable { let choices: [OpenAIChoice] }
                 
-                if let decoded = try? JSONDecoder().decode(ResponseBody.self, from: data),
-                   let title = decoded.choices.first?.message.content {
+                // Try Ollama-style response
+                struct OllamaResponse: Decodable {
+                    struct Message: Decodable { let content: String }
+                    let message: Message?
+                    let response: String?
+                }
+                
+                var generatedTitle: String? = nil
+                
+                // Try OpenAI format
+                do {
+                    let decoded = try JSONDecoder().decode(OpenAIResponse.self, from: data)
+                    if let title = decoded.choices.first?.message.content {
+                        generatedTitle = title
+                    }
+                } catch {
+                    // Try Ollama format
+                    do {
+                        let decoded = try JSONDecoder().decode(OllamaResponse.self, from: data)
+                        generatedTitle = decoded.message?.content ?? decoded.response
+                    } catch {
+                        // Failed to decode both formats
+                    }
+                }
+                
+                if let title = generatedTitle {
                     await MainActor.run { [weak self] in
                         self?.sessionTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                        self?.titleGenerationError = nil  // Clear any error on success
                         self?.persistSettings()
+                    }
+                } else {
+                    let responseBody = String(data: data, encoding: .utf8) ?? "Unable to decode response"
+                    await MainActor.run { [weak self] in
+                        self?.titleGenerationError = "Could not parse title from response. Response: \(responseBody)"
                     }
                 }
             } catch {
-                // Silently fail - title generation is not critical
+                let errorMessage: String
+                if let urlError = error as? URLError {
+                    switch urlError.code {
+                    case .timedOut:
+                        errorMessage = "Request timed out (URLError)"
+                    case .notConnectedToInternet:
+                        errorMessage = "No internet connection"
+                    case .cannotConnectToHost:
+                        errorMessage = "Cannot connect to host: \(self.apiBaseURL.host ?? "unknown")"
+                    default:
+                        errorMessage = "Network error: \(urlError.localizedDescription)"
+                    }
+                } else {
+                    errorMessage = "Title generation error: \(error.localizedDescription)"
+                }
+                
+                await MainActor.run { [weak self] in
+                    self?.titleGenerationError = errorMessage
+                }
             }
         }
         
-        // Cancel the task if it takes more than 5 seconds
+        // Cancel the task if it takes more than 90 seconds (extra buffer beyond URLSession timeout)
         Task {
-            try? await Task.sleep(nanoseconds: 5_000_000_000)  // 5 seconds
-            titleTask.cancel()
+            try? await Task.sleep(nanoseconds: 90_000_000_000)  // 90 seconds
+            if !titleTask.isCancelled {
+                titleTask.cancel()
+                await MainActor.run { [weak self] in
+                    // Only set timeout error if we still don't have a title
+                    if self?.sessionTitle.isEmpty == true {
+                        self?.titleGenerationError = "Title generation timed out after 90 seconds"
+                    }
+                }
+            }
         }
     }
 
@@ -425,7 +524,7 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Persistence
     private var messagesFileName: String { "messages-\(id.uuidString).json" }
     func persistSettings() {
-        let s = AppSettings(apiBaseURLString: apiBaseURL.absoluteString, apiKey: apiKey, model: model, providerName: providerName, systemPrompt: systemPrompt)
+        let s = AppSettings(apiBaseURLString: apiBaseURL.absoluteString, apiKey: apiKey, model: model, providerName: providerName, systemPrompt: nil)
         try? PersistenceService.saveJSON(s, to: "settings.json")
     }
 
@@ -435,7 +534,7 @@ final class ChatViewModel: ObservableObject {
             apiKey = s.apiKey
             model = s.model
             if let pn = s.providerName { providerName = pn }
-            if let sp = s.systemPrompt { systemPrompt = sp }
+            // Note: systemPrompt is no longer loaded from settings - using hard-coded prompt
         }
     }
 

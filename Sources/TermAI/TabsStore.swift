@@ -39,7 +39,7 @@ final class TabsStore: ObservableObject {
             newVM.apiKey = source.apiKey
             newVM.model = source.model
             newVM.providerName = source.providerName
-            newVM.systemPrompt = source.systemPrompt
+            // systemPrompt is now automatically generated and cannot be copied
         }
         let tab = AppTab(title: "Tab \(tabs.count+1)", chatViewModel: newVM)
         tabs.append(tab)
@@ -68,7 +68,7 @@ final class TabsStore: ObservableObject {
             newVM.apiKey = currentChat.apiKey
             newVM.model = currentChat.model
             newVM.providerName = currentChat.providerName
-            newVM.systemPrompt = currentChat.systemPrompt
+            // systemPrompt is now automatically generated and cannot be copied
             // Do not reuse availableModels/modelFetchError references; fetch fresh on demand
         }
         currentTab.chats.append(newVM)
@@ -90,7 +90,7 @@ final class TabsStore: ObservableObject {
             newVM.apiKey = removed.apiKey
             newVM.model = removed.model
             newVM.providerName = removed.providerName
-            newVM.systemPrompt = removed.systemPrompt
+            // systemPrompt is now automatically generated and cannot be copied
             newVM.availableModels = removed.availableModels
             newVM.modelFetchError = removed.modelFetchError
             currentTab.chats = [newVM]
@@ -117,7 +117,7 @@ final class TabsStore: ObservableObject {
             newVM.apiKey = removed.apiKey
             newVM.model = removed.model
             newVM.providerName = removed.providerName
-            newVM.systemPrompt = removed.systemPrompt
+            // systemPrompt is now automatically generated and cannot be copied
             newVM.availableModels = removed.availableModels
             newVM.modelFetchError = removed.modelFetchError
             currentTab.chats = [newVM]

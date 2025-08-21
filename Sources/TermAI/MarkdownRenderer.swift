@@ -117,54 +117,153 @@ private struct CodeBlockView: View {
     let language: String?
     let code: String
     let isClosed: Bool
+    
+    /// Removes inline bash comments from a command line while preserving comments inside quotes
+    private func stripBashComment(from line: String) -> String {
+        var result = ""
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        var escaped = false
+        
+        for char in line {
+            if escaped {
+                result.append(char)
+                escaped = false
+                continue
+            }
+            
+            if char == "\\" {
+                escaped = true
+                result.append(char)
+                continue
+            }
+            
+            if char == "'" && !inDoubleQuote {
+                inSingleQuote.toggle()
+                result.append(char)
+                continue
+            }
+            
+            if char == "\"" && !inSingleQuote {
+                inDoubleQuote.toggle()
+                result.append(char)
+                continue
+            }
+            
+            if char == "#" && !inSingleQuote && !inDoubleQuote {
+                // Found start of comment, stop here
+                break
+            }
+            
+            result.append(char)
+        }
+        
+        return result.trimmingCharacters(in: .whitespaces)
+    }
+    
     var body: some View {
         let isShell = language?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).matchesAny(["bash", "sh", "shell", "zsh"]) == true
-        ScrollView(.horizontal, showsIndicators: true) {
-            Text(code)
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
-                .padding(8)
-        }
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.12)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
-        .overlay(alignment: .topTrailing) {
+        
+        VStack(alignment: .leading, spacing: 0) {
+            // Code block
+            ScrollView(.horizontal, showsIndicators: true) {
+                Text(code)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Color.gray.opacity(0.12))
+            
+            // Action buttons bar (only for shell code blocks)
             if isClosed && isShell {
-                HStack(spacing: 6) {
+                Divider()
+                HStack(spacing: 8) {
                     Button("Add to terminal") {
-                        let sanitized = code
+                        let commands = code
                             .components(separatedBy: .newlines)
-                            .map { line in
+                            .compactMap { line -> String? in
                                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                                if trimmed.hasPrefix("$ ") { return String(trimmed.dropFirst(2)) }
-                                if trimmed.hasPrefix("# ") { return String(trimmed.dropFirst(2)) }
-                                if trimmed.hasPrefix("% ") { return String(trimmed.dropFirst(2)) }
-                                return trimmed
+                                if trimmed.isEmpty { return nil }
+                                
+                                // Skip comment lines (any line starting with #)
+                                if trimmed.hasPrefix("#") {
+                                    // All lines starting with # are comments
+                                    return nil
+                                }
+                                
+                                // Remove shell prompts
+                                var command = trimmed
+                                if trimmed.hasPrefix("$ ") { 
+                                    command = String(trimmed.dropFirst(2))
+                                } else if trimmed.hasPrefix("% ") { 
+                                    command = String(trimmed.dropFirst(2))
+                                } else if trimmed.hasPrefix("> ") {
+                                    command = String(trimmed.dropFirst(2))
+                                }
+                                
+                                // Strip inline comments
+                                command = stripBashComment(from: command)
+                                return command.isEmpty ? nil : command
                             }
-                            .joined(separator: " ")
-                        ptyModel.sendInput?(sanitized)
+                        
+                        // Send commands separated by && so they appear as a single compound command
+                        // but can be edited before execution
+                        if !commands.isEmpty {
+                            let compoundCommand = commands.joined(separator: " && ")
+                            ptyModel.sendInput?(compoundCommand)
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.mini)
 
                     Button("▶️ Run in terminal") {
-                        let sanitized = code
+                        let commands = code
                             .components(separatedBy: .newlines)
-                            .map { line in
+                            .compactMap { line -> String? in
                                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                                if trimmed.hasPrefix("$ ") { return String(trimmed.dropFirst(2)) }
-                                if trimmed.hasPrefix("# ") { return String(trimmed.dropFirst(2)) }
-                                if trimmed.hasPrefix("% ") { return String(trimmed.dropFirst(2)) }
-                                return trimmed
+                                if trimmed.isEmpty { return nil }
+                                
+                                // Skip comment lines (any line starting with #)
+                                if trimmed.hasPrefix("#") {
+                                    // All lines starting with # are comments
+                                    return nil
+                                }
+                                
+                                // Remove shell prompts
+                                var command = trimmed
+                                if trimmed.hasPrefix("$ ") { 
+                                    command = String(trimmed.dropFirst(2))
+                                } else if trimmed.hasPrefix("% ") { 
+                                    command = String(trimmed.dropFirst(2))
+                                } else if trimmed.hasPrefix("> ") {
+                                    command = String(trimmed.dropFirst(2))
+                                }
+                                
+                                // Strip inline comments
+                                command = stripBashComment(from: command)
+                                return command.isEmpty ? nil : command
                             }
-                            .joined(separator: " ")
-                        ptyModel.sendInput?(sanitized + "\n")
+                        
+                        // Execute commands sequentially - send them as a compound command with &&
+                        // This ensures each command only runs if the previous one succeeded
+                        if !commands.isEmpty {
+                            let compoundCommand = commands.joined(separator: " && ")
+                            ptyModel.sendInput?(compoundCommand + "\n")
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.mini)
+                    
+                    Spacer()
                 }
-                .padding(6)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Color.gray.opacity(0.08))
             }
         }
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }

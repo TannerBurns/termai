@@ -6,7 +6,7 @@ struct ChatPane: View {
     @EnvironmentObject private var tabsStore: TabsStore
     @State private var messageText: String = ""
     @State private var sending: Bool = false
-    @State private var showSystemPrompt: Bool = false
+
     @State private var scrollViewHeight: CGFloat = 0
     @State private var contentBottomY: CGFloat = 0
 
@@ -38,10 +38,7 @@ struct ChatPane: View {
                     )
                 // Context chip moved below tabs
                 Spacer()
-                Button(action: { showSystemPrompt.toggle() }) {
-                    Label("System Prompt", systemImage: showSystemPrompt ? "chevron.down" : "chevron.right")
-                }
-                .buttonStyle(.borderless)
+
             }
             .padding(8)
 
@@ -109,24 +106,7 @@ struct ChatPane: View {
                 .padding(.bottom, 6)
             }
 
-            if showSystemPrompt {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("System Prompt")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextEditor(text: $model.systemPrompt)
-                        .font(.system(.body, design: .monospaced))
-                        .frame(minHeight: 100)
-                        .padding(6)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
-                        .onChange(of: model.systemPrompt) { _ in
-                            model.persistSettings()
-                        }
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
-            }
+
 
             ScrollViewReader { proxy in
                 ScrollView {
