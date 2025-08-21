@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 /// A completely self-contained chat tab view with its own session
 struct ChatTabView: View {
@@ -233,7 +234,7 @@ struct ChatTabView: View {
             VStack(spacing: 2) {
                 TextEditor(text: $messageText)
                     .font(.system(size: 11, weight: .regular, design: .default))
-                    .frame(height: 32)
+                    .frame(height: 80)
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.2)))
                     .disabled(sending)
                 HStack {
@@ -297,20 +298,81 @@ private struct ChatMessageBubble: View {
                 }
             }
             
-            MarkdownRenderer(text: message.content)
-                .environmentObject(ptyModel)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(message.role == "user" ? Color.accentColor.opacity(0.12) : Color.gray.opacity(0.12))
-                )
-                .overlay(alignment: .bottomLeading) {
-                    if isStreaming {
-                        CursorView().padding(.leading, 6).padding(.bottom, 6)
+            if let evt = message.agentEvent {
+                AgentInlineEventView(event: evt)
+                    .frame(maxWidth: .infinity, alignment: Alignment.leading)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.gray.opacity(0.12))
+                    )
+            } else {
+                MarkdownRenderer(text: message.content)
+                    .environmentObject(ptyModel)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: Alignment.leading)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(message.role == "user" ? Color.accentColor.opacity(0.12) : Color.gray.opacity(0.12))
+                    )
+                    .overlay(alignment: .bottomLeading) {
+                        if isStreaming {
+                            CursorView().padding(.leading, 6).padding(.bottom, 6)
+                        }
                     }
+            }
+        }
+    }
+}
+
+private struct AgentInlineEventView: View {
+    @State private var expanded: Bool = false
+    let event: AgentEvent
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(event.title, systemImage: symbol(for: event.kind))
+                    .font(.caption)
+                Spacer()
+                Button(action: { expanded.toggle() }) {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.caption)
                 }
+                .buttonStyle(.borderless)
+            }
+            if expanded {
+                if let cmd = event.command, !cmd.isEmpty {
+                    Text("$ " + cmd)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                if let details = event.details, !details.isEmpty {
+                    Text(details)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                }
+                if let output = event.output, !output.isEmpty {
+                    Divider()
+                    ScrollView {
+                        Text(output)
+                            .font(.system(.footnote, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: Alignment.leading)
+                    }
+                    .frame(minHeight: 40, maxHeight: 160)
+                }
+            }
+        }
+        .onAppear { expanded = !(event.collapsed ?? true) }
+    }
+    private func symbol(for kind: String) -> String {
+        switch kind.lowercased() {
+        case "status": return "bolt.circle"
+        case "step": return "list.number"
+        case "summary": return "doc.text.magnifyingglass"
+        default: return "info.circle"
         }
     }
 }
