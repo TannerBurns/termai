@@ -13,6 +13,30 @@ struct ChatTabContentView: View {
     
     var body: some View {
         VStack(spacing: 0) {
+            // Title generation error indicator
+            if let error = session.titleGenerationError {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text("Title error: \(error)")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Dismiss") {
+                        session.titleGenerationError = nil
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(4)
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+            }
+            
             // Terminal context indicator
             if let ctx = session.pendingTerminalContext, !ctx.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {

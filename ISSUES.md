@@ -1,0 +1,1 @@
+- cmd + shift + t is not opening a new global tabs

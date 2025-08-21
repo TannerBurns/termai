@@ -4,7 +4,7 @@ import SwiftUI
 struct ChatContainerView: View {
     @EnvironmentObject var tabsManager: ChatTabsManager
     let ptyModel: PTYModel
-    @State private var showSystemPrompt: Bool = false
+
     @State private var refreshID = UUID() // Force refresh when model changes
     
     var body: some View {
@@ -21,36 +21,11 @@ struct ChatContainerView: View {
                 
                 Spacer()
                 
-                Button(action: { showSystemPrompt.toggle() }) {
-                    Label("System Prompt", systemImage: showSystemPrompt ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
+
             }
             .padding(8)
             
-            // System prompt editor (when expanded)
-            if showSystemPrompt, let session = tabsManager.selectedSession {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("System Prompt")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextEditor(text: Binding(
-                        get: { session.systemPrompt },
-                        set: { newValue in
-                            session.systemPrompt = newValue
-                            session.persistSettings()
-                        }
-                    ))
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 100)
-                    .padding(6)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.08)))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 8)
-            }
+
             
             // Tab bar below header
             ScrollView(.horizontal, showsIndicators: false) {
@@ -126,28 +101,105 @@ private struct SessionHeaderView: View {
     
     var body: some View {
         HStack(spacing: 8) {
-            // Provider chip
-            Label(session.providerName, systemImage: "network")
-                .font(.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.gray.opacity(0.15)))
-            
-            // Model chip
-            if session.model.isEmpty {
-                Label("No model selected", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(Color.orange.opacity(0.15)))
-            } else {
-                Label(session.model, systemImage: "cpu")
+            // Provider selector - clickable chip
+            Menu {
+                Button(action: {
+                    session.providerName = "Ollama"
+                    session.apiBaseURL = URL(string: "http://localhost:11434/v1")!
+                    session.persistSettings()
+                    Task { await session.fetchOllamaModels() }
+                }) {
+                    HStack {
+                        Text("Ollama (Local)")
+                        if session.providerName == "Ollama" {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                
+                Button(action: {
+                    session.providerName = "OpenAI"
+                    session.apiBaseURL = URL(string: "https://api.openai.com/v1")!
+                    session.persistSettings()
+                    session.availableModels = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+                }) {
+                    HStack {
+                        Text("OpenAI")
+                        if session.providerName == "OpenAI" {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                
+                Button(action: {
+                    session.providerName = "Custom"
+                    session.persistSettings()
+                }) {
+                    HStack {
+                        Text("Custom")
+                        if session.providerName == "Custom" {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            } label: {
+                Label(session.providerName, systemImage: "network")
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(Capsule().fill(Color.gray.opacity(0.15)))
             }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Click to change provider")
+            
+            // Model selector - clickable chip
+            Menu {
+                if session.availableModels.isEmpty {
+                    Button("Fetching models...") {}
+                        .disabled(true)
+                } else {
+                    ForEach(session.availableModels, id: \.self) { model in
+                        Button(action: {
+                            session.model = model
+                            session.persistSettings()
+                        }) {
+                            HStack {
+                                Text(model)
+                                if model == session.model {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    Button("Refresh Models") {
+                        Task {
+                            await session.fetchOllamaModels()
+                        }
+                    }
+                }
+            } label: {
+                if session.model.isEmpty {
+                    Label("Select Model", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.orange.opacity(0.15)))
+                } else {
+                    Label(session.model, systemImage: "cpu")
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.gray.opacity(0.15)))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Click to change model")
         }
     }
 }

@@ -13,8 +13,9 @@ struct TermAIApp: App {
             SimplifiedContentView(globalTabsManager: globalTabsManager)
                 .environmentObject(ptyModel)
                 .onAppear {
-                    // Connect PTYModel to AppDelegate for cleanup
+                    // Connect PTYModel and ChatTabsManager to AppDelegate for cleanup
                     appDelegate.ptyModel = ptyModel
+                    appDelegate.tabsManager = globalTabsManager
                 }
         }
         .windowStyle(.titleBar)
@@ -72,6 +73,7 @@ struct SimplifiedContentView: View {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     weak var ptyModel: PTYModel?
+    weak var tabsManager: ChatTabsManager?
     
     @objc func newGlobalTab(_ sender: Any?) { }
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -87,6 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        // Save sessions before app quits
+        tabsManager?.saveSessions()
         // Properly terminate the terminal process before app quits
         ptyModel?.terminateProcess()
     }

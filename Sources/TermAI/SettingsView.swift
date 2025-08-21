@@ -47,11 +47,6 @@ struct SettingsView: View {
                 }
             }
 
-            DisclosureGroup("System Prompt") {
-                TextEditor(text: $chat.systemPrompt)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(minHeight: 120)
-            }
 
             if showAdvanced {
                 Section("Advanced") {
