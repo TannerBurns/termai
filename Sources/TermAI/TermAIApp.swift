@@ -1,6 +1,23 @@
 import SwiftUI
 import AppKit
 
+// Global configuration for verbose agent logging
+struct AgentDebugConfig {
+    static var verboseLogging: Bool = {
+        // Check for --verbose flag in command line arguments
+        return CommandLine.arguments.contains("--verbose") || 
+               ProcessInfo.processInfo.environment["TERMAI_VERBOSE"] != nil
+    }()
+    
+    static func log(_ message: String) {
+        #if DEBUG
+        if verboseLogging {
+            print(message)
+        }
+        #endif
+    }
+}
+
 @main
 struct TermAIApp: App {
     @StateObject private var globalTabsManager = ChatTabsManager()
@@ -16,6 +33,16 @@ struct TermAIApp: App {
                     // Connect PTYModel and ChatTabsManager to AppDelegate for cleanup
                     appDelegate.ptyModel = ptyModel
                     appDelegate.tabsManager = globalTabsManager
+                    // Observe agent command execution requests
+                    NotificationCenter.default.addObserver(forName: .TermAIExecuteCommand, object: nil, queue: .main) { note in
+                        guard let cmd = note.userInfo?["command"] as? String else { return }
+                        // Emit exit code and true physical cwd so agent always knows final location
+                        let wrapped = "{ \(cmd) ; RC=$?; echo __TERMAI_RC__=$RC; printf '__TERMAI_CWD__=%s\\n' \"$(pwd -P)\"; }"
+                        // Store the original command for echo trimming, not the wrapped version
+                        ptyModel.lastSentCommandForCapture = cmd
+                        ptyModel.markNextOutputStart?()
+                        ptyModel.sendInput?(wrapped + "\n")
+                    }
                 }
         }
         .windowStyle(.titleBar)
