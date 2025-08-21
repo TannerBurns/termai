@@ -21,9 +21,10 @@ struct ChatContainerView: View {
                         get: { session.agentModeEnabled },
                         set: { session.agentModeEnabled = $0; session.persistSettings() }
                     )) {
-                        Text("Agent Mode")
+                        Text("Agent").font(.caption2)
                     }
                     .toggleStyle(.switch)
+                    .controlSize(.mini)
                     .help("When enabled, the assistant can run terminal commands automatically.")
                 }
                 
@@ -136,9 +137,9 @@ private struct SessionHeaderView: View {
             Menu {
                 Button(action: {
                     session.providerName = "Ollama"
-                    session.apiBaseURL = URL(string: "http://localhost:11434/v1")!
+                    session.apiBaseURL = ChatSession.LocalProvider.ollama.defaultBaseURL
                     session.persistSettings()
-                    Task { await session.fetchOllamaModels() }
+                    Task { await session.fetchAvailableModels() }
                 }) {
                     HStack {
                         Text("Ollama (Local)")
@@ -149,39 +150,44 @@ private struct SessionHeaderView: View {
                 }
                 
                 Button(action: {
-                    session.providerName = "OpenAI"
-                    session.apiBaseURL = URL(string: "https://api.openai.com/v1")!
+                    session.providerName = "LM Studio"
+                    session.apiBaseURL = ChatSession.LocalProvider.lmStudio.defaultBaseURL
                     session.persistSettings()
-                    session.availableModels = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+                    Task { await session.fetchAvailableModels() }
                 }) {
                     HStack {
-                        Text("OpenAI")
-                        if session.providerName == "OpenAI" {
+                        Text("LM Studio")
+                        if session.providerName == "LM Studio" {
                             Image(systemName: "checkmark")
                         }
                     }
                 }
-                
+
                 Button(action: {
-                    session.providerName = "Custom"
+                    session.providerName = "vLLM"
+                    session.apiBaseURL = ChatSession.LocalProvider.vllm.defaultBaseURL
                     session.persistSettings()
+                    Task { await session.fetchAvailableModels() }
                 }) {
                     HStack {
-                        Text("Custom")
-                        if session.providerName == "Custom" {
+                        Text("vLLM")
+                        if session.providerName == "vLLM" {
                             Image(systemName: "checkmark")
                         }
                     }
                 }
             } label: {
                 Label(session.providerName, systemImage: "network")
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: 72, alignment: .leading)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
                     .background(Capsule().fill(Color.gray.opacity(0.15)))
             }
+            .controlSize(.mini)
             .menuStyle(.borderlessButton)
-            .fixedSize()
             .help("Click to change provider")
             
             // Model selector - clickable chip
@@ -208,29 +214,38 @@ private struct SessionHeaderView: View {
                     
                     Button("Refresh Models") {
                         Task {
-                            await session.fetchOllamaModels()
+                            await session.fetchAvailableModels()
                         }
                     }
                 }
             } label: {
                 if session.model.isEmpty {
                     Label("Select Model", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                         .foregroundColor(.orange)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .frame(minWidth: 260, maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(Capsule().fill(Color.orange.opacity(0.15)))
                 } else {
                     Label(session.model, systemImage: "cpu")
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(minWidth: 260, maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(Capsule().fill(Color.gray.opacity(0.15)))
                 }
             }
+            .controlSize(.mini)
             .menuStyle(.borderlessButton)
-            .fixedSize()
             .help("Click to change model")
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

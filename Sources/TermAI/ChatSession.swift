@@ -34,6 +34,24 @@ final class ChatSession: ObservableObject, Identifiable {
     // Private streaming state
     private var streamingTask: Task<Void, Never>? = nil
     
+    // MARK: - Local Providers
+    enum LocalProvider: String {
+        case ollama = "Ollama"
+        case lmStudio = "LM Studio"
+        case vllm = "vLLM"
+        
+        var defaultBaseURL: URL {
+            switch self {
+            case .ollama:
+                return URL(string: "http://localhost:11434/v1")!
+            case .lmStudio:
+                return URL(string: "http://localhost:1234/v1")!
+            case .vllm:
+                return URL(string: "http://localhost:8000/v1")!
+            }
+        }
+    }
+    
     init(
         apiBaseURL: URL = URL(string: "http://localhost:11434/v1")!,
         apiKey: String? = nil,
@@ -764,49 +782,90 @@ final class ChatSession: ObservableObject, Identifiable {
     }
     
     // MARK: - Models
-    func fetchOllamaModels() async {
-        modelFetchError = nil
-        let host = apiBaseURL.host?.lowercased() ?? ""
-        guard host == "localhost" || host == "127.0.0.1" else { return }
-        
+    func fetchAvailableModels() async {
+        await MainActor.run {
+            self.modelFetchError = nil
+            self.availableModels = []
+        }
+        switch LocalProvider(rawValue: providerName) {
+        case .ollama:
+            await fetchOllamaModelsInternal()
+        case .lmStudio, .vllm:
+            await fetchOpenAIStyleModels()
+        default:
+            break
+        }
+    }
+
+    /// Backward-compatible entry point kept for existing call sites
+    func fetchOllamaModels() async { await fetchAvailableModels() }
+
+    private func fetchOllamaModelsInternal() async {
+        let base = apiBaseURL.absoluteString
+        guard let url = URL(string: base.replacingOccurrences(of: "/v1", with: "") + "/api/tags") else {
+            await MainActor.run { self.modelFetchError = "Invalid Ollama URL" }
+            return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 10
         do {
-            let base = apiBaseURL.absoluteString
-            let url = URL(string: base.replacingOccurrences(of: "/v1", with: "") + "/api/tags")!
-            var req = URLRequest(url: url)
-            req.httpMethod = "GET"
-            req.timeoutInterval = 5 // Quick timeout for auto-fetch
-            
             let (data, response) = try await URLSession.shared.data(for: req)
-            
-            // Check for valid response
-            guard let httpResponse = response as? HTTPURLResponse,
-                  (200..<300).contains(httpResponse.statusCode) else {
-                return // Silently fail for auto-fetch
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                await MainActor.run { self.modelFetchError = "Failed to fetch Ollama models (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1))" }
+                return
             }
-            
-            struct TagsResponse: Decodable { 
-                struct Model: Decodable { let name: String }
-                let models: [Model] 
-            }
+            struct TagsResponse: Decodable { struct Model: Decodable { let name: String }; let models: [Model] }
             if let decoded = try? JSONDecoder().decode(TagsResponse.self, from: data) {
                 let names = decoded.models.map { $0.name }.sorted()
                 await MainActor.run {
                     self.availableModels = names
-                    
-                    // Only auto-select first model if truly no model is set
-                    // Don't override a persisted model selection
-                    if self.model.isEmpty && !names.isEmpty {
-                        self.model = names[0]
-                        self.persistSettings()
+                    if names.isEmpty {
+                        self.modelFetchError = "No models found on Ollama"
+                    } else if self.model.isEmpty || !names.contains(self.model) {
+                        self.model = names.first ?? self.model
                     }
-                    // Don't automatically change the model if it's not in the list
-                    // The user may have a valid model that's not currently running
-                    // or there may be a timing issue with fetching models
+                    self.persistSettings()
                 }
+            } else {
+                await MainActor.run { self.modelFetchError = "Unable to decode Ollama models" }
             }
         } catch {
-            // Silently fail for auto-fetch on init
-            // User can manually fetch in settings if needed
+            await MainActor.run { self.modelFetchError = "Ollama connection failed: \(error.localizedDescription)" }
+        }
+    }
+
+    private func fetchOpenAIStyleModels() async {
+        let url = apiBaseURL.appendingPathComponent("models")
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = 10
+        if let apiKey {
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                await MainActor.run { self.modelFetchError = "Failed to fetch models (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1))" }
+                return
+            }
+            struct ModelsResponse: Decodable { struct Model: Decodable { let id: String }; let data: [Model] }
+            if let decoded = try? JSONDecoder().decode(ModelsResponse.self, from: data) {
+                let ids = decoded.data.map { $0.id }.sorted()
+                await MainActor.run {
+                    self.availableModels = ids
+                    if ids.isEmpty {
+                        self.modelFetchError = "No models available"
+                    } else if self.model.isEmpty || !ids.contains(self.model) {
+                        self.model = ids.first ?? self.model
+                    }
+                    self.persistSettings()
+                }
+            } else {
+                await MainActor.run { self.modelFetchError = "Unable to decode models list" }
+            }
+        } catch {
+            await MainActor.run { self.modelFetchError = "Model fetch failed: \(error.localizedDescription)" }
         }
     }
     
@@ -847,10 +906,8 @@ final class ChatSession: ObservableObject, Identifiable {
             agentModeEnabled = settings.agentModeEnabled ?? false
         }
         
-        // After loading settings, fetch models if connected to Ollama
-        Task {
-            await fetchOllamaModels()
-        }
+        // After loading settings, fetch models for selected provider
+        Task { await fetchAvailableModels() }
     }
 }
 

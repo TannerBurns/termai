@@ -37,9 +37,9 @@ struct ChatTabView: View {
                 Menu {
                     Button(action: {
                         session.providerName = "Ollama"
-                        session.apiBaseURL = URL(string: "http://localhost:11434/v1")!
+                        session.apiBaseURL = ChatSession.LocalProvider.ollama.defaultBaseURL
                         session.persistSettings()
-                        Task { await session.fetchOllamaModels() }
+                        Task { await session.fetchAvailableModels() }
                     }) {
                         HStack {
                             Text("Ollama (Local)")
@@ -50,39 +50,44 @@ struct ChatTabView: View {
                     }
                     
                     Button(action: {
-                        session.providerName = "OpenAI"
-                        session.apiBaseURL = URL(string: "https://api.openai.com/v1")!
+                        session.providerName = "LM Studio"
+                        session.apiBaseURL = ChatSession.LocalProvider.lmStudio.defaultBaseURL
                         session.persistSettings()
-                        session.availableModels = ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+                        Task { await session.fetchAvailableModels() }
                     }) {
                         HStack {
-                            Text("OpenAI")
-                            if session.providerName == "OpenAI" {
+                            Text("LM Studio")
+                            if session.providerName == "LM Studio" {
                                 Image(systemName: "checkmark")
                             }
                         }
                     }
-                    
+
                     Button(action: {
-                        session.providerName = "Custom"
+                        session.providerName = "vLLM"
+                        session.apiBaseURL = ChatSession.LocalProvider.vllm.defaultBaseURL
                         session.persistSettings()
+                        Task { await session.fetchAvailableModels() }
                     }) {
                         HStack {
-                            Text("Custom")
-                            if session.providerName == "Custom" {
+                            Text("vLLM")
+                            if session.providerName == "vLLM" {
                                 Image(systemName: "checkmark")
                             }
                         }
                     }
                 } label: {
                     Label(session.providerName, systemImage: "network")
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(width: 72, alignment: .leading)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(Capsule().fill(Color.gray.opacity(0.15)))
                 }
+                .controlSize(.mini)
                 .menuStyle(.borderlessButton)
-                .fixedSize()
                 .help("Click to change provider")
                 
                 // Model selector - clickable chip
@@ -109,19 +114,23 @@ struct ChatTabView: View {
                         
                         Button("Refresh Models") {
                             Task {
-                                await session.fetchOllamaModels()
+                                await session.fetchAvailableModels()
                             }
                         }
                     }
                 } label: {
                     Label(session.model.isEmpty ? "Select Model" : session.model, systemImage: "cpu")
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .font(.caption2)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(minWidth: 260, maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(Capsule().fill(session.model.isEmpty ? Color.orange.opacity(0.15) : Color.gray.opacity(0.15)))
                 }
+                .controlSize(.mini)
                 .menuStyle(.borderlessButton)
-                .fixedSize()
                 .help("Click to change model")
                 
                 Spacer()
@@ -142,15 +151,15 @@ struct ChatTabView: View {
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundColor(.orange)
-                    Text("Title generation error: \(error)")
-                        .font(.caption)
+                    Text("Title error: \(error)")
+                        .font(.caption2)
                         .foregroundColor(.orange)
                     Spacer()
                     Button("Dismiss") {
                         session.titleGenerationError = nil
                     }
                     .buttonStyle(.borderless)
-                    .font(.caption)
+                    .font(.caption2)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -251,7 +260,7 @@ struct ChatTabView: View {
         .onAppear {
             session.loadSettings()
             session.loadMessages()
-            Task { await session.fetchOllamaModels() }
+            Task { await session.fetchAvailableModels() }
         }
     }
     
