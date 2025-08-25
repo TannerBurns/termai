@@ -21,6 +21,7 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var apiKey: String?
     @Published var model: String
     @Published var providerName: String
+    @Published var extraHeaders: [String: String] = [:]
     @Published var availableModels: [String] = []
     @Published var modelFetchError: String? = nil
     @Published var titleGenerationError: String? = nil
@@ -467,6 +468,7 @@ final class ChatSession: ObservableObject, Identifiable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        applyExtraHeaders(to: &request)
         let messages = [
             RequestBody.Message(role: "system", content: systemPrompt),
             RequestBody.Message(role: "user", content: prompt)
@@ -569,6 +571,7 @@ final class ChatSession: ObservableObject, Identifiable {
             if let apiKey = self.apiKey {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
+            self.applyExtraHeaders(to: &request)
             
             let messages = [
                 RequestBody.Message(role: "system", content: "You are a helpful assistant that generates concise titles."),
@@ -722,6 +725,7 @@ final class ChatSession: ObservableObject, Identifiable {
         if let apiKey {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
+        applyExtraHeaders(to: &request)
         
         // Exclude agent event bubbles and assistant placeholders from the provider context
         let conversational = messages.filter { msg in
@@ -782,6 +786,20 @@ final class ChatSession: ObservableObject, Identifiable {
     }
     
     // MARK: - Models
+
+    /// Applies any user-configured extra headers to the given request.
+    /// Headers here are applied last and thus override defaults like Authorization or Content-Type if duplicated.
+    private func applyExtraHeaders(to request: inout URLRequest) {
+        guard !extraHeaders.isEmpty else { return }
+        for (key, value) in extraHeaders {
+            // Skip obvious empties
+            let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedKey.isEmpty, !trimmedValue.isEmpty else { continue }
+            request.setValue(trimmedValue, forHTTPHeaderField: trimmedKey)
+        }
+    }
+
     func fetchAvailableModels() async {
         await MainActor.run {
             self.modelFetchError = nil
@@ -809,6 +827,7 @@ final class ChatSession: ObservableObject, Identifiable {
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         req.timeoutInterval = 10
+        applyExtraHeaders(to: &req)
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -843,6 +862,7 @@ final class ChatSession: ObservableObject, Identifiable {
         if let apiKey {
             req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
+        applyExtraHeaders(to: &req)
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -890,7 +910,8 @@ final class ChatSession: ObservableObject, Identifiable {
             providerName: providerName,
             systemPrompt: nil,  // No longer used
             sessionTitle: sessionTitle,
-            agentModeEnabled: agentModeEnabled
+            agentModeEnabled: agentModeEnabled,
+            extraHeaders: extraHeaders
         )
         try? PersistenceService.saveJSON(settings, to: "session-settings-\(id.uuidString).json")
     }
@@ -904,6 +925,7 @@ final class ChatSession: ObservableObject, Identifiable {
             // Note: systemPrompt is no longer loaded from settings - using hard-coded prompt
             sessionTitle = settings.sessionTitle ?? ""
             agentModeEnabled = settings.agentModeEnabled ?? false
+            extraHeaders = settings.extraHeaders ?? [:]
         }
         
         // After loading settings, fetch models for selected provider
@@ -920,6 +942,7 @@ private struct SessionSettings: Codable {
     let systemPrompt: String? // Kept for backward compatibility but no longer used
     let sessionTitle: String?
     let agentModeEnabled: Bool?
+    let extraHeaders: [String: String]?
 }
 
 private struct OpenAIStreamChunk: Decodable {

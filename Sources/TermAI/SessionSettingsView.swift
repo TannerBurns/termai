@@ -1,9 +1,16 @@
 import SwiftUI
 
+private struct HeaderItem: Identifiable, Equatable {
+    let id: UUID = UUID()
+    var key: String
+    var value: String
+}
+
 struct SessionSettingsView: View {
     @ObservedObject var session: ChatSession
     @State private var apiURLString: String = ""
     @State private var isFetching: Bool = false
+    @State private var headerItems: [HeaderItem] = []
     
     var body: some View {
         Form {
@@ -53,6 +60,37 @@ struct SessionSettingsView: View {
                         set: { session.apiKey = $0.isEmpty ? nil : $0; session.persistSettings() }
                     ))
                     .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Extra Headers (optional)")
+                    VStack(spacing: 6) {
+                        ForEach($headerItems) { $item in
+                            HStack(spacing: 8) {
+                                TextField("Key", text: $item.key)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onChange(of: item.key) { _ in syncHeaders() }
+                                TextField("Value", text: $item.value)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onChange(of: item.value) { _ in syncHeaders() }
+                                Button(action: { removeHeaderRow(id: item.id) }) {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Remove header")
+                            }
+                        }
+                        HStack {
+                            Button(action: { addHeaderRow() }) {
+                                Label("Add Header", systemImage: "plus.circle")
+                            }
+                            .buttonStyle(.bordered)
+                            Spacer()
+                        }
+                    }
+                    Text("Rows with empty key or value are ignored. Headers apply to all provider requests.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
             
@@ -136,6 +174,9 @@ struct SessionSettingsView: View {
         .frame(width: 600, height: 500)
         .onAppear {
             apiURLString = session.apiBaseURL.absoluteString
+            // Populate header rows from session
+            headerItems = session.extraHeaders.sorted(by: { $0.key < $1.key }).map { HeaderItem(key: $0.key, value: $0.value) }
+            if headerItems.isEmpty { headerItems = [HeaderItem(key: "", value: "")] }
             Task { @MainActor in
                 isFetching = true
                 defer { isFetching = false }
@@ -143,5 +184,26 @@ struct SessionSettingsView: View {
             }
         }
     }
-    
+
+    private func syncHeaders() {
+        var dict: [String: String] = [:]
+        for row in headerItems {
+            let k = row.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let v = row.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !k.isEmpty, !v.isEmpty else { continue }
+            dict[k] = v
+        }
+        session.extraHeaders = dict
+        session.persistSettings()
+    }
+
+    private func addHeaderRow() {
+        headerItems.append(HeaderItem(key: "", value: ""))
+    }
+
+    private func removeHeaderRow(id: UUID) {
+        headerItems.removeAll { $0.id == id }
+        if headerItems.isEmpty { headerItems = [HeaderItem(key: "", value: "")] }
+        syncHeaders()
+    }
 }

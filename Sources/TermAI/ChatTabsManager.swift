@@ -37,6 +37,7 @@ final class ChatTabsManager: ObservableObject {
             newSession.apiKey = source.apiKey
             newSession.model = source.model
             newSession.providerName = source.providerName
+            newSession.extraHeaders = source.extraHeaders
             // systemPrompt is now automatically generated and cannot be copied
         }
         
