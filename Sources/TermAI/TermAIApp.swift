@@ -33,6 +33,13 @@ struct TermAIApp: App {
                     // Connect PTYModel and ChatTabsManager to AppDelegate for cleanup
                     appDelegate.ptyModel = ptyModel
                     appDelegate.tabsManager = globalTabsManager
+                    // Gate caret blinking based on app active state
+                    NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+                        ptyModel.setCaretBlinkingEnabled(true)
+                    }
+                    NotificationCenter.default.addObserver(forName: NSApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
+                        ptyModel.setCaretBlinkingEnabled(false)
+                    }
                     // Observe agent command execution requests
                     NotificationCenter.default.addObserver(forName: .TermAIExecuteCommand, object: nil, queue: .main) { note in
                         guard let cmd = note.userInfo?["command"] as? String else { return }
@@ -40,6 +47,8 @@ struct TermAIApp: App {
                         let wrapped = "{ \(cmd) ; RC=$?; echo __TERMAI_RC__=$RC; printf '__TERMAI_CWD__=%s\\n' \"$(pwd -P)\"; }"
                         // Store the original command for echo trimming, not the wrapped version
                         ptyModel.lastSentCommandForCapture = cmd
+                        // Mark capture active during command execution
+                        ptyModel.captureActive = true
                         ptyModel.markNextOutputStart?()
                         ptyModel.sendInput?(wrapped + "\n")
                     }
