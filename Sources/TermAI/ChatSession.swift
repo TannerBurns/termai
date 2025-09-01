@@ -752,6 +752,8 @@ final class ChatSession: ObservableObject, Identifiable {
         
         var accumulated = ""
         let index = assistantIndex
+        var lastUiUpdateNs: UInt64 = 0
+        let minUiIntervalNs: UInt64 = 50_000_000 // 20 fps
         
         streamLoop: for try await line in bytes.lines {
             guard line.hasPrefix("data:") else { continue }
@@ -763,17 +765,23 @@ final class ChatSession: ObservableObject, Identifiable {
                 if let delta = chunk.choices.first?.delta?.content, !delta.isEmpty {
                     accumulated += delta
                     if Task.isCancelled { break streamLoop }
-                    messages[index].content = accumulated
-                    // Force UI update on each chunk
-                    messages = messages
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if now &- lastUiUpdateNs >= minUiIntervalNs {
+                        lastUiUpdateNs = now
+                        messages[index].content = accumulated
+                        messages = messages
+                    }
                 }
             } else if let ollama = try? JSONDecoder().decode(OllamaStreamChunk.self, from: data) {
                 if let content = ollama.message?.content ?? ollama.response {
                     accumulated += content
                     if Task.isCancelled { break streamLoop }
-                    messages[index].content = accumulated
-                    // Force UI update on each chunk
-                    messages = messages
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if now &- lastUiUpdateNs >= minUiIntervalNs {
+                        lastUiUpdateNs = now
+                        messages[index].content = accumulated
+                        messages = messages
+                    }
                 }
             }
         }

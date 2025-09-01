@@ -468,6 +468,8 @@ final class ChatViewModel: ObservableObject {
 
         // Determine which assistant message to stream into
         var accumulated = ""
+        var lastUiUpdateNs: UInt64 = 0
+        let minUiIntervalNs: UInt64 = 50_000_000 // ~20 fps
         let index: Int
         if let idx = assistantIndex, idx >= 0, idx < messages.count, messages[idx].role == "assistant" {
             index = idx
@@ -490,23 +492,32 @@ final class ChatViewModel: ObservableObject {
                 if let delta = chunk.choices.first?.delta?.content, !delta.isEmpty {
                     accumulated += delta
                     if Task.isCancelled { break streamLoop }
-                    messages[index].content = accumulated
-                    // Re-assign to trigger @Published change notifications during streaming
-                    messages = messages
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if now &- lastUiUpdateNs >= minUiIntervalNs {
+                        lastUiUpdateNs = now
+                        messages[index].content = accumulated
+                        messages = messages
+                    }
                 } else if let content = chunk.choices.first?.message?.content, !content.isEmpty {
                     accumulated += content
                     if Task.isCancelled { break streamLoop }
-                    messages[index].content = accumulated
-                    // Re-assign to trigger @Published change notifications during streaming
-                    messages = messages
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if now &- lastUiUpdateNs >= minUiIntervalNs {
+                        lastUiUpdateNs = now
+                        messages[index].content = accumulated
+                        messages = messages
+                    }
                 }
             } else if let ollama = try? JSONDecoder().decode(OllamaStreamChunk.self, from: data) {
                 if let content = ollama.message?.content ?? ollama.response { // various shapes
                     accumulated += content
                     if Task.isCancelled { break streamLoop }
-                    messages[index].content = accumulated
-                    // Re-assign to trigger @Published change notifications during streaming
-                    messages = messages
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    if now &- lastUiUpdateNs >= minUiIntervalNs {
+                        lastUiUpdateNs = now
+                        messages[index].content = accumulated
+                        messages = messages
+                    }
                 }
             }
         }

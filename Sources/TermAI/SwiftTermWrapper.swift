@@ -1,7 +1,7 @@
 import SwiftUI
 
 final class PTYModel: ObservableObject {
-    @Published var collectedOutput: String = ""
+    var collectedOutput: String = ""
     // Closures set by the SwiftTerm wrapper to provide selection and screen text
     var getSelectionText: (() -> String?)?
     var getScreenText: (() -> String)?
@@ -17,7 +17,9 @@ final class PTYModel: ObservableObject {
     @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     @Published var lastExitCode: Int32 = 0
     // Controls whether to perform heavy buffer processing on terminal updates
-    @Published var captureActive: Bool = false
+    @Published var captureActive: Bool = false { didSet { updateTerminalNotifications() } }
+    // Whether the user is interacting/hovering; enables lightweight updates only when useful
+    @Published var hoverActive: Bool = false { didSet { updateTerminalNotifications() } }
     // Theme selection id, used to apply a preset theme to the terminal view
     @Published var themeId: String = "system"
     // Agent helpers
@@ -35,6 +37,12 @@ final class PTYModel: ObservableObject {
     func terminateProcess() {
         terminalView?.terminateShell()
     }
+
+    fileprivate func updateTerminalNotifications() {
+        #if canImport(SwiftTerm)
+        terminalView?.notifyUpdateChanges = captureActive || hoverActive
+        #endif
+    }
 }
 
 #if canImport(SwiftTerm)
@@ -42,6 +50,8 @@ import SwiftTerm
 
 private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     weak var bridgeModel: PTYModel?
+    private var lastHeavyUpdateNs: UInt64 = 0
+    private let heavyUpdateMinIntervalNs: UInt64 = 80_000_000 // ~12.5 fps
     
     func markOutputStart() {
         let buffer = self.getTerminal().getBufferAsData()
@@ -71,11 +81,17 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
         // Update lightweight state immediately without heavy buffer copies
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let model = self.bridgeModel else { return }
-            model.hasSelection = !selection.isEmpty
-            model.visibleRows = self.terminal.rows
+            let newHasSel = !selection.isEmpty
+            if model.hasSelection != newHasSel { model.hasSelection = newHasSel }
+            let rows = self.terminal.rows
+            if model.visibleRows != rows { model.visibleRows = rows }
         }
         // Only perform heavy buffer processing when actively capturing command output
         guard let model = bridgeModel, (model.captureActive || model.lastSentCommandForCapture != nil) else { return }
+        // Throttle heavy work to reduce CPU while streaming
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now &- lastHeavyUpdateNs < heavyUpdateMinIntervalNs { return }
+        lastHeavyUpdateNs = now
         let data = self.getTerminal().getBufferAsData()
         let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
         DispatchQueue.main.async { [weak self] in
@@ -254,9 +270,11 @@ struct SwiftTermView: NSViewRepresentable {
         let term = BridgedLocalProcessTerminalView(frame: .zero)
         term.bridgeModel = model
         term.processDelegate = context.coordinator
-        term.notifyUpdateChanges = true
+        term.notifyUpdateChanges = false
+        term.caretViewTracksFocus = true
         // Store terminal reference for cleanup (as BridgedLocalProcessTerminalView)
         model.terminalView = term
+        model.updateTerminalNotifications()
         // Keep default scrollback; do not reset buffer to avoid disrupting input/echo
         // Wire helpers for selection/screen text
         model.getSelectionText = { [weak term] in
@@ -284,6 +302,8 @@ struct SwiftTermView: NSViewRepresentable {
         if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {
             term.apply(theme: theme)
         }
+        // Default to steady cursor to avoid continuous animations
+        term.getTerminal().setCursorStyle(.steadyBlock)
         return term
     }
 

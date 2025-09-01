@@ -39,6 +39,7 @@ struct TermAIApp: App {
                     }
                     NotificationCenter.default.addObserver(forName: NSApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
                         ptyModel.setCaretBlinkingEnabled(false)
+                        ptyModel.hoverActive = false
                     }
                     // Observe agent command execution requests
                     NotificationCenter.default.addObserver(forName: .TermAIExecuteCommand, object: nil, queue: .main) { note in

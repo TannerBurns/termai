@@ -25,6 +25,10 @@ struct TerminalPane: View {
 
             SwiftTermView(model: ptyModel)
                 .background(Color(NSColor.textBackgroundColor))
+                .onHover { isHovering in
+                    hovering = isHovering
+                    ptyModel.hoverActive = isHovering
+                }
                 .overlay(alignment: .bottomTrailing) {
                     let hasChunk = !ptyModel.lastOutputChunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     if (hovering || buttonHovering) && (hasSelection || hasChunk) {
