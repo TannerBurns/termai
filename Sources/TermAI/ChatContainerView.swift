@@ -118,6 +118,8 @@ struct ChatContainerView: View {
                         ])
                         // Clear last-sent marker after capture
                         ptyModel.lastSentCommandForCapture = nil
+                        // Disable capture state to stop heavy updates until next command
+                        ptyModel.captureActive = false
                     }
                 }
             } else {
