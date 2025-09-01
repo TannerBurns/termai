@@ -51,12 +51,7 @@ struct TerminalPane: View {
                 }
                 .onHover { hovering = $0 }
             .onReceive(ptyModel.$hasSelection) { hasSelection = $0 }
-            .onReceive(Timer.publish(every: 0.3, on: .main, in: .common).autoconnect()) { _ in
-                let sel = ptyModel.getSelectionText?() ?? ""
-                if hasSelection != !sel.isEmpty {
-                    hasSelection = !sel.isEmpty
-                }
-            }
+            // Removed periodic polling timer to reduce idle CPU usage.
 
             // Footer removed to avoid duplication
         }

@@ -16,6 +16,8 @@ final class PTYModel: ObservableObject {
     @Published var lastOutputLineRange: (start: Int, end: Int)? = nil
     @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     @Published var lastExitCode: Int32 = 0
+    // Controls whether to perform heavy buffer processing on terminal updates
+    @Published var captureActive: Bool = false
     // Theme selection id, used to apply a preset theme to the terminal view
     @Published var themeId: String = "system"
     // Agent helpers
@@ -66,13 +68,18 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     override func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
         super.rangeChanged(source: source, startY: startY, endY: endY)
         let selection = self.getSelection() ?? ""
+        // Update lightweight state immediately without heavy buffer copies
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let model = self.bridgeModel else { return }
+            model.hasSelection = !selection.isEmpty
+            model.visibleRows = self.terminal.rows
+        }
+        // Only perform heavy buffer processing when actively capturing command output
+        guard let model = bridgeModel, (model.captureActive || model.lastSentCommandForCapture != nil) else { return }
         let data = self.getTerminal().getBufferAsData()
         let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
         DispatchQueue.main.async { [weak self] in
-            guard let model = self?.bridgeModel else { return }
-            model.hasSelection = !selection.isEmpty
-            model.visibleRows = self?.terminal.rows ?? model.visibleRows
-
+            guard let self = self, let model = self.bridgeModel else { return }
             // Determine last output chunk
             var newChunk = ""
             if let start = model.lastOutputStartOffset, start <= text.count {
@@ -95,12 +102,12 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             if !trimmedChunk.isEmpty {
                 model.lastOutputChunk = trimmedChunk
                 // Also compute line range based on viewport start
-                if let startRow = model.lastOutputStartViewportRow, let rows = self?.terminal.rows {
+                if let startRow = model.lastOutputStartViewportRow {
+                    let rows = self.terminal.rows
                     let chunkLines = trimmedChunk.split(separator: "\n", omittingEmptySubsequences: false).count
                     model.lastOutputLineRange = (start: max(0, startRow), end: min(rows - 1, max(0, startRow + chunkLines - 1)))
                 }
             }
-
             model.previousBuffer = text
             model.collectedOutput = text
         }
@@ -330,6 +337,15 @@ struct SwiftTermView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(12)
         .background(Color(NSColor.textBackgroundColor))
+    }
+}
+#endif
+
+#if canImport(SwiftTerm)
+import SwiftTerm
+extension PTYModel {
+    func setCaretBlinkingEnabled(_ enabled: Bool) {
+        terminalView?.getTerminal().setCursorStyle(enabled ? .blinkBlock : .steadyBlock)
     }
 }
 #endif
