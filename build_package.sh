@@ -12,6 +12,7 @@ DOCK_ICNS="$ROOT/Icons/termAIDock.icns"          # preferred app/dock icon
 TOOLBAR_ICNS="$ROOT/Icons/termAIToolbar.icns"    # preferred toolbar/status icon
 ICONSET_DIR="$ROOT/Icon.iconset"
 ICNS_GEN="$ROOT/$APP_NAME.icns"
+VERSION_FILE="$ROOT/.build_version"
 
 # Optional signing/notarization env vars
 : "${DEVELOPER_ID:=}"   # e.g., Developer ID Application: Your Name (TEAMID)
@@ -20,6 +21,48 @@ ICNS_GEN="$ROOT/$APP_NAME.icns"
 : "${APP_PASSWORD:=}"   # App-specific password or @keychain-profile
 
 step() { echo; echo "[$1] $2"; }
+
+# CalVer versioning: YYYY.MM.DD for version, build number for same-day builds
+generate_version() {
+    local today
+    today=$(date +%Y.%m.%d)
+    local build_date
+    build_date=$(date +%Y%m%d)
+    local build_time
+    build_time=$(date +%H%M%S)
+    
+    # Read previous version info if exists
+    local prev_date=""
+    local prev_build=0
+    if [[ -f "$VERSION_FILE" ]]; then
+        prev_date=$(head -1 "$VERSION_FILE" 2>/dev/null || echo "")
+        prev_build=$(tail -1 "$VERSION_FILE" 2>/dev/null || echo "0")
+    fi
+    
+    # Determine build number
+    local build_num
+    if [[ "$prev_date" == "$build_date" ]]; then
+        # Same day: increment build number
+        build_num=$((prev_build + 1))
+    else
+        # New day: reset build number
+        build_num=1
+    fi
+    
+    # Save version info for next build
+    echo "$build_date" > "$VERSION_FILE"
+    echo "$build_num" >> "$VERSION_FILE"
+    
+    # Export version strings
+    # CFBundleShortVersionString: YYYY.MM.DD (user-facing version)
+    VERSION_STRING="$today"
+    # CFBundleVersion: YYYYMMDD.BUILD (build identifier, unique per build)
+    BUILD_STRING="${build_date}.${build_num}"
+    
+    echo "Version: $VERSION_STRING (Build $BUILD_STRING)"
+}
+
+generate_version
 
 step 1 "Building Release…"
 swift build -c release
@@ -64,7 +107,7 @@ step 3 "Creating app bundle…"
 rm -rf "$APP_DIR" "$ZIP_PATH"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
-cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
+cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -78,9 +121,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>${VERSION_STRING}</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>${BUILD_STRING}</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSApplicationCategoryType</key>

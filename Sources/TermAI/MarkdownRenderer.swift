@@ -5,15 +5,18 @@ struct MarkdownRenderer: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 12) {
             ForEach(parseBlocks(text), id: \.self) { block in
                 switch block {
                 case .paragraph(let p):
                     ParagraphView(text: p)
+                        .padding(.vertical, 2)
                 case .code(let lang, let code, let isClosed):
                     CodeBlockView(language: lang, code: code, isClosed: isClosed)
+                        .padding(.vertical, 4)
                 case .table(let headers, let rows):
                     TableView(headers: headers, rows: rows)
+                        .padding(.vertical, 4)
                 }
             }
         }
@@ -336,19 +339,25 @@ private struct MarkdownText: View {
     let text: String
     var body: some View {
         if #available(macOS 13.0, *) {
+            // Convert single newlines to markdown line breaks (two trailing spaces)
             let hardBreaks = text.replacingOccurrences(of: "\n", with: "  \n")
             let processed: AttributedString = {
                 var attr = (try? AttributedString(markdown: hardBreaks, options: .init(interpretedSyntax: .full))) ?? AttributedString(text)
                 for run in attr.runs {
                     if let intent = run.inlinePresentationIntent, intent.contains(.code) {
                         attr[run.range].font = .system(.body, design: .monospaced)
+                        attr[run.range].backgroundColor = Color.primary.opacity(0.06)
                     }
                 }
                 return attr
             }()
             Text(processed)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(text)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

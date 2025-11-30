@@ -14,6 +14,9 @@ struct ChatTabContentView: View {
     
     var body: some View {
         VStack(spacing: 0) {
+            // Per-chat agent controls bar
+            AgentControlsBar(session: session)
+            
             // Title generation error indicator
             if let error = session.titleGenerationError {
                 ErrorBanner(message: "Title error: \(error)") {
@@ -216,14 +219,19 @@ private struct ChatInputArea: View {
                         .padding(.vertical, 10)
                 }
                 
-                TextEditor(text: $messageText)
-                    .font(.system(size: 13))
-                    .scrollContentBackground(.hidden)
-                    .background(Color.clear)
-                    .frame(minHeight: 60, maxHeight: 120)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .disabled(sending)
+                ChatTextEditor(
+                    text: $messageText,
+                    isFocused: $isFocused,
+                    isDisabled: sending,
+                    onSubmit: {
+                        if !sending && !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            onSend()
+                        }
+                    }
+                )
+                .frame(minHeight: 60, maxHeight: 120)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
             }
             .background(
                 RoundedRectangle(cornerRadius: 14)
@@ -236,7 +244,6 @@ private struct ChatInputArea: View {
                         lineWidth: isFocused ? 2 : 1
                     )
             )
-            .onTapGesture { isFocused = true }
             
             // Bottom bar with CWD, stop button, and send button
             HStack(spacing: 12) {
@@ -260,6 +267,11 @@ private struct ChatInputArea: View {
                 }
                 
                 Spacer()
+                
+                // Keyboard hint
+                Text("⏎ send · ⇧⏎ newline")
+                    .font(.caption2)
+                    .foregroundColor(.secondary.opacity(0.5))
                 
                 // Stop button (visible during streaming)
                 if isStreaming {
@@ -303,7 +315,6 @@ private struct ChatInputArea: View {
                     .foregroundColor(.white)
                 }
                 .buttonStyle(.plain)
-                .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(sending || messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .animation(.easeInOut(duration: 0.15), value: messageText.isEmpty)
             }
@@ -320,6 +331,98 @@ private struct ChatInputArea: View {
             return "~" + path.dropFirst(home.count)
         }
         return path
+    }
+}
+
+// MARK: - Custom Text Editor with Enter/Shift+Enter handling
+private struct ChatTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    let isDisabled: Bool
+    let onSubmit: () -> Void
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        
+        let textView = SubmitTextView()
+        textView.delegate = context.coordinator
+        textView.onSubmit = onSubmit
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.font = NSFont.systemFont(ofSize: 13)
+        textView.textColor = NSColor.labelColor
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: .greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.autoresizingMask = [.width]
+        
+        scrollView.documentView = textView
+        context.coordinator.textView = textView
+        
+        return scrollView
+    }
+    
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? SubmitTextView else { return }
+        
+        if textView.string != text {
+            textView.string = text
+        }
+        textView.isEditable = !isDisabled
+        textView.isSelectable = !isDisabled
+        textView.onSubmit = onSubmit
+    }
+    
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: ChatTextEditor
+        weak var textView: NSTextView?
+        
+        init(_ parent: ChatTextEditor) {
+            self.parent = parent
+        }
+        
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+        }
+        
+        func textDidBeginEditing(_ notification: Notification) {
+            parent.isFocused = true
+        }
+        
+        func textDidEndEditing(_ notification: Notification) {
+            parent.isFocused = false
+        }
+    }
+}
+
+// Custom NSTextView that handles Enter vs Shift+Enter
+private class SubmitTextView: NSTextView {
+    var onSubmit: (() -> Void)?
+    
+    override func keyDown(with event: NSEvent) {
+        // Check for Enter key (keyCode 36)
+        if event.keyCode == 36 {
+            // If Shift is NOT held, submit
+            if !event.modifierFlags.contains(.shift) {
+                onSubmit?()
+                return
+            }
+            // Shift+Enter: insert newline (default behavior)
+        }
+        super.keyDown(with: event)
     }
 }
 
@@ -718,6 +821,123 @@ private struct AgentEventView: View {
     private func rerunCommand(_ cmd: String) {
         // Send command to terminal
         ptyModel.sendInput?(cmd + "\n")
+    }
+}
+
+// MARK: - Agent Controls Bar (Per-Chat)
+
+struct AgentControlsBar: View {
+    @ObservedObject var session: ChatSession
+    @State private var showingChecklistPopover: Bool = false
+    @State private var isHoveringProgress: Bool = false
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            if session.isAgentRunning {
+                // Show progress and stop button when agent is running
+                HStack(spacing: 8) {
+                    // Progress indicator - clickable to show checklist popover
+                    Button(action: { showingChecklistPopover.toggle() }) {
+                        HStack(spacing: 4) {
+                            ProgressView()
+                                .scaleEffect(0.5)
+                                .frame(width: 10, height: 10)
+                            
+                            // Use actual checklist count if available, otherwise estimated steps
+                            let totalSteps = session.agentChecklist?.items.count ?? session.agentEstimatedSteps
+                            let completedSteps = session.agentChecklist?.completedCount ?? 0
+                            
+                            if totalSteps > 0 {
+                                Text("\(completedSteps)/\(totalSteps) done")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            } else if session.agentCurrentStep > 0 {
+                                Text("Step \(session.agentCurrentStep)")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            if !session.agentPhase.isEmpty {
+                                Text("·")
+                                    .foregroundColor(.secondary.opacity(0.5))
+                                Text(session.agentPhase)
+                                    .font(.caption2)
+                                    .foregroundColor(.blue)
+                            }
+                            
+                            // Chevron indicator for popover
+                            if session.agentChecklist != nil {
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .medium))
+                                    .foregroundColor(.secondary.opacity(0.6))
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(isHoveringProgress ? Color.blue.opacity(0.18) : Color.blue.opacity(0.1))
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(isHoveringProgress ? Color.blue.opacity(0.3) : Color.clear, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { isHoveringProgress = $0 }
+                    .help("Click to view task checklist")
+                    .popover(isPresented: $showingChecklistPopover, arrowEdge: .bottom) {
+                        AgentChecklistPopover(
+                            checklist: session.agentChecklist,
+                            currentStep: session.agentCurrentStep,
+                            estimatedSteps: session.agentEstimatedSteps,
+                            phase: session.agentPhase
+                        )
+                    }
+                    
+                    // Stop button
+                    Button(action: { session.cancelAgent() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 8))
+                            Text("Stop")
+                                .font(.caption2)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(Color.red.opacity(0.15))
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.red.opacity(0.3), lineWidth: 1)
+                        )
+                        .foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop agent execution")
+                }
+                
+                Spacer()
+            } else {
+                // Show agent toggle when not running
+                Toggle(isOn: Binding(
+                    get: { session.agentModeEnabled },
+                    set: { session.agentModeEnabled = $0; session.persistSettings() }
+                )) {
+                    Text("Agent").font(.caption2)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .help("When enabled, the assistant can run terminal commands automatically.")
+                
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial.opacity(0.5))
     }
 }
 
