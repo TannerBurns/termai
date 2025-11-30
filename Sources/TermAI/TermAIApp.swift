@@ -10,12 +10,65 @@ struct AgentDebugConfig {
                ProcessInfo.processInfo.environment["TERMAI_VERBOSE"] != nil
     }
     
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+    
+    private static var logFileHandle: FileHandle?
+    private static var logFilePath: URL?
+    
+    /// Get the path to the current log file
+    static var currentLogPath: String? {
+        logFilePath?.path
+    }
+    
+    /// Initialize logging to a file
+    static func initializeLogging() {
+        guard verboseLogging else { return }
+        
+        let fileManager = FileManager.default
+        let logsDir = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("TermAI/Logs", isDirectory: true)
+        
+        try? fileManager.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        
+        let dateString = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
+        let logFile = logsDir.appendingPathComponent("agent-\(dateString).log")
+        
+        fileManager.createFile(atPath: logFile.path, contents: nil)
+        logFileHandle = try? FileHandle(forWritingTo: logFile)
+        logFilePath = logFile
+        
+        log("=== TermAI Agent Log Started ===")
+        log("Log file: \(logFile.path)")
+        log("Settings: maxIterations=\(AgentSettings.shared.maxIterations), enablePlanning=\(AgentSettings.shared.enablePlanning), enableReflection=\(AgentSettings.shared.enableReflection)")
+    }
+    
     static func log(_ message: String) {
-        #if DEBUG
-        if verboseLogging {
-            print(message)
+        guard verboseLogging else { return }
+        
+        let timestamp = dateFormatter.string(from: Date())
+        let logLine = "[\(timestamp)] \(message)\n"
+        
+        // Print to console
+        print(logLine, terminator: "")
+        
+        // Write to file
+        if let data = logLine.data(using: .utf8) {
+            logFileHandle?.write(data)
+            try? logFileHandle?.synchronize()
         }
-        #endif
+    }
+    
+    /// Close the log file
+    static func closeLogging() {
+        log("=== TermAI Agent Log Ended ===")
+        try? logFileHandle?.close()
+        logFileHandle = nil
     }
 }
 
@@ -30,6 +83,9 @@ struct TermAIApp: App {
             MainContentView()
                 .environmentObject(tabsStore)
                 .onAppear {
+                    // Initialize agent logging if enabled
+                    AgentDebugConfig.initializeLogging()
+                    
                     // Connect TabsStore to AppDelegate for cleanup
                     appDelegate.tabsStore = tabsStore
                     

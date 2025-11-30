@@ -4,11 +4,13 @@ import SwiftUI
 struct ChatContainerView: View {
     @EnvironmentObject var tabsManager: ChatTabsManager
     @StateObject private var historyManager = ChatHistoryManager.shared
+    @ObservedObject private var processManager = ProcessManager.shared
     let ptyModel: PTYModel
     
     // Command approval state
     @State private var pendingApproval: PendingCommandApproval? = nil
     @State private var showingHistoryPopover: Bool = false
+    @State private var showingProcessMonitor: Bool = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -18,46 +20,8 @@ struct ChatContainerView: View {
                     .font(.headline)
                 
                 if let session = tabsManager.selectedSession {
-                    // Create a view that observes the session
+                    // Provider and model selectors (agent controls moved to per-chat)
                     SessionHeaderView(session: session)
-                    
-                    // Agent toggle or cancel button
-                    if session.isAgentRunning {
-                        // Show cancel button when agent is running
-                        Button(action: { session.cancelAgent() }) {
-                            HStack(spacing: 4) {
-                                ProgressView()
-                                    .scaleEffect(0.6)
-                                    .frame(width: 12, height: 12)
-                                Text("Cancel")
-                                    .font(.caption2)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .fill(Color.red.opacity(0.15))
-                            )
-                            .overlay(
-                                Capsule()
-                                    .stroke(Color.red.opacity(0.3), lineWidth: 1)
-                            )
-                            .foregroundColor(.red)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Cancel agent execution")
-                    } else {
-                        // Show agent toggle when not running
-                        Toggle(isOn: Binding(
-                            get: { session.agentModeEnabled },
-                            set: { session.agentModeEnabled = $0; session.persistSettings() }
-                        )) {
-                            Text("Agent").font(.caption2)
-                        }
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
-                        .help("When enabled, the assistant can run terminal commands automatically.")
-                    }
                 }
                 
                 Spacer()
@@ -122,6 +86,26 @@ struct ChatContainerView: View {
                                 historyManager.deleteEntry(id: entry.id)
                             }
                         )
+                    }
+                    
+                    // Process Monitor button (only visible when processes are running)
+                    if !processManager.runningProcesses.isEmpty {
+                        ProcessMonitorButton(
+                            processCount: processManager.runningCount,
+                            isShowingPopover: $showingProcessMonitor
+                        )
+                        .popover(isPresented: $showingProcessMonitor, arrowEdge: .bottom) {
+                            ProcessMonitorPopover(
+                                processes: processManager.runningProcesses,
+                                onStop: { pid in
+                                    _ = processManager.stopProcess(pid: pid)
+                                },
+                                onStopAll: {
+                                    processManager.stopAllProcesses()
+                                    showingProcessMonitor = false
+                                }
+                            )
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -414,7 +398,7 @@ private struct ChatTabPill: View {
     }
 }
 
-// Separate view that observes the session for real-time updates
+// Separate view that observes the session for real-time updates (provider/model only)
 private struct SessionHeaderView: View {
     @ObservedObject var session: ChatSession
     
@@ -738,6 +722,443 @@ private struct ChatHistoryRow: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.05) : Color.black.opacity(0.03)) : Color.clear)
+        .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Process Monitor Button
+
+struct ProcessMonitorButton: View {
+    let processCount: Int
+    @Binding var isShowingPopover: Bool
+    
+    @State private var isHovered: Bool = false
+    @State private var isPulsing: Bool = false
+    
+    var body: some View {
+        Button(action: { isShowingPopover.toggle() }) {
+            ZStack(alignment: .topTrailing) {
+                // Main icon
+                Image(systemName: "gearshape.2.fill")
+                    .font(.caption)
+                    .foregroundColor(isHovered ? .accentColor : .secondary)
+                    .frame(width: 20, height: 20)
+                    .background(
+                        Circle()
+                            .fill(isHovered ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.05))
+                    )
+                    .scaleEffect(isPulsing ? 1.05 : 1.0)
+                
+                // Badge with count
+                Text("\(processCount)")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(minWidth: 12, minHeight: 12)
+                    .background(
+                        Circle()
+                            .fill(Color.green)
+                    )
+                    .offset(x: 4, y: -4)
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("\(processCount) background process\(processCount == 1 ? "" : "es") running")
+        .onAppear {
+            // Subtle pulse animation
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
+        }
+    }
+}
+
+// MARK: - Process Monitor Popover
+
+struct ProcessMonitorPopover: View {
+    let processes: [BackgroundProcessInfo]
+    let onStop: (Int32) -> Void
+    let onStopAll: () -> Void
+    
+    @State private var expandedPid: Int32? = nil
+    @State private var hoveredPid: Int32? = nil
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "gearshape.2.fill")
+                    .foregroundColor(.accentColor)
+                Text("Background Processes")
+                    .font(.headline)
+                Spacer()
+                
+                if processes.count > 1 {
+                    Button(action: onStopAll) {
+                        Text("Stop All")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            // Process list
+            if processes.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle")
+                        .font(.title2)
+                        .foregroundColor(.green)
+                    Text("No background processes")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 24)
+                .frame(maxWidth: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(processes) { process in
+                            ProcessRow(
+                                process: process,
+                                isExpanded: expandedPid == process.id,
+                                isHovered: hoveredPid == process.id,
+                                onToggleExpand: {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        if expandedPid == process.id {
+                                            expandedPid = nil
+                                        } else {
+                                            expandedPid = process.id
+                                        }
+                                    }
+                                },
+                                onStop: { onStop(process.id) }
+                            )
+                            .onHover { hoveredPid = $0 ? process.id : nil }
+                            
+                            if process.id != processes.last?.id {
+                                Divider()
+                                    .padding(.leading, 40)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .frame(width: 360)
+        .background(.ultraThinMaterial)
+    }
+}
+
+// MARK: - Process Row
+
+private struct ProcessRow: View {
+    let process: BackgroundProcessInfo
+    let isExpanded: Bool
+    let isHovered: Bool
+    let onToggleExpand: () -> Void
+    let onStop: () -> Void
+    
+    @State private var stopHovered: Bool = false
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Main row
+            HStack(spacing: 12) {
+                // Status indicator
+                Circle()
+                    .fill(process.isRunning ? Color.green : Color.gray)
+                    .frame(width: 8, height: 8)
+                    .overlay(
+                        Circle()
+                            .stroke(process.isRunning ? Color.green.opacity(0.3) : Color.clear, lineWidth: 3)
+                            .scaleEffect(1.5)
+                    )
+                
+                // Process info
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("PID \(process.id)")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        
+                        Text("•")
+                            .foregroundColor(.secondary.opacity(0.5))
+                        
+                        Text(process.uptimeString)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Text(process.shortCommand)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .foregroundColor(.primary)
+                }
+                
+                Spacer()
+                
+                // Expand button
+                Button(action: onToggleExpand) {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                
+                // Stop button
+                Button(action: onStop) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(stopHovered ? .red : .secondary)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Circle()
+                                .fill(stopHovered ? Color.red.opacity(0.1) : Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+                .onHover { stopHovered = $0 }
+                .help("Stop process")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.02)) : Color.clear)
+            .contentShape(Rectangle())
+            .onTapGesture { onToggleExpand() }
+            
+            // Expanded output
+            if isExpanded && !process.recentOutput.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Recent Output:")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                    
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        Text(process.recentOutput)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.primary.opacity(0.8))
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxHeight: 80)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+                .padding(.leading, 20)
+                .background(colorScheme == .dark ? Color.black.opacity(0.2) : Color.gray.opacity(0.1))
+            }
+        }
+    }
+}
+
+// MARK: - Agent Checklist Popover
+
+struct AgentChecklistPopover: View {
+    let checklist: TaskChecklist?
+    let currentStep: Int
+    let estimatedSteps: Int
+    let phase: String
+    
+    @State private var hoveredItemId: Int? = nil
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "checklist")
+                    .foregroundColor(.blue)
+                Text("Agent Progress")
+                    .font(.headline)
+                Spacer()
+                
+                // Progress badge
+                if let checklist = checklist {
+                    Text("\(checklist.completedCount)/\(checklist.items.count)")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule()
+                                .fill(Color.secondary.opacity(0.15))
+                        )
+                } else if estimatedSteps > 0 {
+                    Text("Step \(currentStep)/~\(estimatedSteps)")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            // Current phase indicator
+            if !phase.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 12, height: 12)
+                    Text("Current: \(phase)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.blue)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.blue.opacity(0.08))
+            }
+            
+            // Checklist items or empty state
+            if let checklist = checklist, !checklist.items.isEmpty {
+                // Progress bar
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.15))
+                        Rectangle()
+                            .fill(Color.green.opacity(0.6))
+                            .frame(width: geo.size.width * CGFloat(checklist.progressPercent) / 100.0)
+                    }
+                }
+                .frame(height: 3)
+                
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(checklist.items) { item in
+                            ChecklistItemRow(
+                                item: item,
+                                isHovered: hoveredItemId == item.id
+                            )
+                            .onHover { hoveredItemId = $0 ? item.id : nil }
+                            
+                            if item.id != checklist.items.last?.id {
+                                Divider()
+                                    .padding(.leading, 36)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 280)
+            } else {
+                // No checklist available yet
+                VStack(spacing: 8) {
+                    Image(systemName: "list.bullet.clipboard")
+                        .font(.title2)
+                        .foregroundColor(.secondary.opacity(0.6))
+                    Text("Building task list...")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                    Text("The agent is analyzing the request")
+                        .font(.caption)
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                .padding(.vertical, 24)
+                .frame(maxWidth: .infinity)
+            }
+            
+            // Goal description at bottom
+            if let checklist = checklist, !checklist.goalDescription.isEmpty {
+                Divider()
+                HStack(spacing: 6) {
+                    Image(systemName: "target")
+                        .font(.caption)
+                        .foregroundColor(.secondary.opacity(0.7))
+                    Text(checklist.goalDescription)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color.gray.opacity(0.05))
+            }
+        }
+        .frame(width: 340)
+        .background(.ultraThinMaterial)
+    }
+}
+
+// MARK: - Checklist Item Row
+
+private struct ChecklistItemRow: View {
+    let item: TaskChecklistItem
+    let isHovered: Bool
+    
+    @Environment(\.colorScheme) var colorScheme
+    
+    private var statusColor: Color {
+        switch item.status {
+        case .pending: return .secondary
+        case .inProgress: return .blue
+        case .completed: return .green
+        case .failed: return .red
+        case .skipped: return .orange
+        }
+    }
+    
+    private var statusIcon: String {
+        switch item.status {
+        case .pending: return "circle"
+        case .inProgress: return "arrow.right.circle.fill"
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "xmark.circle.fill"
+        case .skipped: return "slash.circle"
+        }
+    }
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            // Status icon
+            Image(systemName: statusIcon)
+                .font(.system(size: 14))
+                .foregroundColor(statusColor)
+                .frame(width: 20)
+            
+            // Content
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.description)
+                    .font(.system(size: 12))
+                    .foregroundColor(item.status == .completed || item.status == .skipped ? .secondary : .primary)
+                    .strikethrough(item.status == .skipped)
+                
+                if let note = item.verificationNote, !note.isEmpty {
+                    Text(note)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.8))
+                        .italic()
+                }
+            }
+            
+            Spacer()
+            
+            // Step number badge
+            Text("\(item.id)")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundColor(.secondary.opacity(0.6))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.secondary.opacity(0.1))
+                )
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            item.status == .inProgress 
+                ? Color.blue.opacity(0.08) 
+                : (isHovered ? (colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.02)) : Color.clear)
+        )
         .contentShape(Rectangle())
     }
 }

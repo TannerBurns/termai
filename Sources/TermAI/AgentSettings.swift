@@ -8,7 +8,7 @@ final class AgentSettings: ObservableObject, Codable {
     // MARK: - Execution Limits
     
     /// Maximum number of iterations the agent will attempt to complete a goal
-    @Published var maxIterations: Int = 6
+    @Published var maxIterations: Int = 100
     
     /// Maximum number of fix attempts when a command fails
     @Published var maxFixAttempts: Int = 3
@@ -24,6 +24,48 @@ final class AgentSettings: ObservableObject, Codable {
     /// Maximum characters for the agent context log
     @Published var maxContextSize: Int = 8000
     
+    /// Threshold above which output is summarized
+    @Published var outputSummarizationThreshold: Int = 5000
+    
+    /// Enable automatic summarization of long outputs
+    @Published var enableOutputSummarization: Bool = true
+    
+    /// Maximum size of the full output buffer for search
+    @Published var maxFullOutputBuffer: Int = 50000
+    
+    // MARK: - Planning & Reflection
+    
+    /// Enable planning phase before execution
+    @Published var enablePlanning: Bool = true
+    
+    /// Interval (in steps) between reflection prompts
+    @Published var reflectionInterval: Int = 10
+    
+    /// Enable periodic reflection and progress assessment
+    @Published var enableReflection: Bool = true
+    
+    /// Number of similar commands before stuck detection triggers
+    @Published var stuckDetectionThreshold: Int = 3
+    
+    /// Enable verification phase before declaring goal complete
+    @Published var enableVerificationPhase: Bool = true
+    
+    // MARK: - Verification & Testing
+    
+    /// Timeout in seconds for HTTP requests during verification
+    @Published var httpRequestTimeout: TimeInterval = 10.0
+    
+    /// Timeout in seconds when waiting for background process startup
+    @Published var backgroundProcessTimeout: TimeInterval = 5.0
+    
+    // MARK: - File Coordination
+    
+    /// Timeout in seconds for waiting to acquire a file lock
+    @Published var fileLockTimeout: TimeInterval = 30.0
+    
+    /// Enable smart merging of non-overlapping file edits across sessions
+    @Published var enableFileMerging: Bool = true
+    
     // MARK: - Model Behavior
     
     /// Temperature for agent decision-making (lower = more deterministic)
@@ -31,6 +73,11 @@ final class AgentSettings: ObservableObject, Codable {
     
     /// Temperature for title generation (higher = more creative)
     @Published var titleTemperature: Double = 1.0
+    
+    // MARK: - Defaults
+    
+    /// Enable agent mode by default for new chat sessions
+    @Published var agentModeEnabledByDefault: Bool = false
     
     // MARK: - Safety
     
@@ -53,6 +100,19 @@ final class AgentSettings: ObservableObject, Codable {
         case commandTimeout
         case maxOutputCapture
         case maxContextSize
+        case outputSummarizationThreshold
+        case enableOutputSummarization
+        case maxFullOutputBuffer
+        case enablePlanning
+        case reflectionInterval
+        case enableReflection
+        case stuckDetectionThreshold
+        case enableVerificationPhase
+        case httpRequestTimeout
+        case backgroundProcessTimeout
+        case fileLockTimeout
+        case enableFileMerging
+        case agentModeEnabledByDefault
         case requireCommandApproval
         case autoApproveReadOnly
         case verboseLogging
@@ -64,11 +124,24 @@ final class AgentSettings: ObservableObject, Codable {
     
     required init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        maxIterations = try container.decodeIfPresent(Int.self, forKey: .maxIterations) ?? 6
+        maxIterations = try container.decodeIfPresent(Int.self, forKey: .maxIterations) ?? 100
         maxFixAttempts = try container.decodeIfPresent(Int.self, forKey: .maxFixAttempts) ?? 3
         commandTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .commandTimeout) ?? 10.0
         maxOutputCapture = try container.decodeIfPresent(Int.self, forKey: .maxOutputCapture) ?? 3000
         maxContextSize = try container.decodeIfPresent(Int.self, forKey: .maxContextSize) ?? 8000
+        outputSummarizationThreshold = try container.decodeIfPresent(Int.self, forKey: .outputSummarizationThreshold) ?? 5000
+        enableOutputSummarization = try container.decodeIfPresent(Bool.self, forKey: .enableOutputSummarization) ?? true
+        maxFullOutputBuffer = try container.decodeIfPresent(Int.self, forKey: .maxFullOutputBuffer) ?? 50000
+        enablePlanning = try container.decodeIfPresent(Bool.self, forKey: .enablePlanning) ?? true
+        reflectionInterval = try container.decodeIfPresent(Int.self, forKey: .reflectionInterval) ?? 10
+        enableReflection = try container.decodeIfPresent(Bool.self, forKey: .enableReflection) ?? true
+        stuckDetectionThreshold = try container.decodeIfPresent(Int.self, forKey: .stuckDetectionThreshold) ?? 3
+        enableVerificationPhase = try container.decodeIfPresent(Bool.self, forKey: .enableVerificationPhase) ?? true
+        httpRequestTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .httpRequestTimeout) ?? 10.0
+        backgroundProcessTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .backgroundProcessTimeout) ?? 5.0
+        fileLockTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .fileLockTimeout) ?? 30.0
+        enableFileMerging = try container.decodeIfPresent(Bool.self, forKey: .enableFileMerging) ?? true
+        agentModeEnabledByDefault = try container.decodeIfPresent(Bool.self, forKey: .agentModeEnabledByDefault) ?? false
         requireCommandApproval = try container.decodeIfPresent(Bool.self, forKey: .requireCommandApproval) ?? false
         autoApproveReadOnly = try container.decodeIfPresent(Bool.self, forKey: .autoApproveReadOnly) ?? true
         verboseLogging = try container.decodeIfPresent(Bool.self, forKey: .verboseLogging) ?? false
@@ -83,6 +156,19 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(commandTimeout, forKey: .commandTimeout)
         try container.encode(maxOutputCapture, forKey: .maxOutputCapture)
         try container.encode(maxContextSize, forKey: .maxContextSize)
+        try container.encode(outputSummarizationThreshold, forKey: .outputSummarizationThreshold)
+        try container.encode(enableOutputSummarization, forKey: .enableOutputSummarization)
+        try container.encode(maxFullOutputBuffer, forKey: .maxFullOutputBuffer)
+        try container.encode(enablePlanning, forKey: .enablePlanning)
+        try container.encode(reflectionInterval, forKey: .reflectionInterval)
+        try container.encode(enableReflection, forKey: .enableReflection)
+        try container.encode(stuckDetectionThreshold, forKey: .stuckDetectionThreshold)
+        try container.encode(enableVerificationPhase, forKey: .enableVerificationPhase)
+        try container.encode(httpRequestTimeout, forKey: .httpRequestTimeout)
+        try container.encode(backgroundProcessTimeout, forKey: .backgroundProcessTimeout)
+        try container.encode(fileLockTimeout, forKey: .fileLockTimeout)
+        try container.encode(enableFileMerging, forKey: .enableFileMerging)
+        try container.encode(agentModeEnabledByDefault, forKey: .agentModeEnabledByDefault)
         try container.encode(requireCommandApproval, forKey: .requireCommandApproval)
         try container.encode(autoApproveReadOnly, forKey: .autoApproveReadOnly)
         try container.encode(verboseLogging, forKey: .verboseLogging)
@@ -107,11 +193,24 @@ final class AgentSettings: ObservableObject, Codable {
     
     /// Reset all settings to defaults
     func resetToDefaults() {
-        maxIterations = 6
+        maxIterations = 100
         maxFixAttempts = 3
         commandTimeout = 10.0
         maxOutputCapture = 3000
         maxContextSize = 8000
+        outputSummarizationThreshold = 5000
+        enableOutputSummarization = true
+        maxFullOutputBuffer = 50000
+        enablePlanning = true
+        reflectionInterval = 10
+        enableReflection = true
+        stuckDetectionThreshold = 3
+        enableVerificationPhase = true
+        httpRequestTimeout = 10.0
+        backgroundProcessTimeout = 5.0
+        fileLockTimeout = 30.0
+        enableFileMerging = true
+        agentModeEnabledByDefault = false
         requireCommandApproval = false
         autoApproveReadOnly = true
         verboseLogging = false

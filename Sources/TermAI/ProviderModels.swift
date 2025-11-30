@@ -131,8 +131,9 @@ struct CuratedModels {
     static let anthropic: [ModelDefinition] = [
         // Claude 4 series
         ModelDefinition(id: "claude-sonnet-4-5", displayName: "Claude Sonnet 4.5", provider: .anthropic, supportsReasoning: true),
+        ModelDefinition(id: "claude-opus-4-5", displayName: "Claude Opus 4.5", provider: .anthropic, supportsReasoning: true),
         ModelDefinition(id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5", provider: .anthropic, supportsReasoning: true),
-        ModelDefinition(id: "claude-opus-4", displayName: "Claude Opus 4", provider: .anthropic, supportsReasoning: true),
+        ModelDefinition(id: "claude-opus-4", displayName: "Claude Opus 4", provider: .anthropic, supportsReasoning: true), 
         ModelDefinition(id: "claude-sonnet-4", displayName: "Claude Sonnet 4", provider: .anthropic, supportsReasoning: true),
         
         // Claude 3.7 series
