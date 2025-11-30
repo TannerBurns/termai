@@ -466,11 +466,20 @@ struct AgentSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                // Default Behavior Section
+                defaultBehaviorSection
+                
                 // Execution Limits Section
                 executionLimitsSection
                 
+                // Planning & Reflection Section
+                planningReflectionSection
+                
                 // Context & Memory Section
                 contextMemorySection
+                
+                // Output Handling Section
+                outputHandlingSection
                 
                 // Safety Section
                 safetySection
@@ -484,11 +493,19 @@ struct AgentSettingsView: View {
             .padding(24)
         }
         .frame(minWidth: 500)
+        .onChange(of: settings.agentModeEnabledByDefault) { _ in settings.save() }
         .onChange(of: settings.maxIterations) { _ in settings.save() }
         .onChange(of: settings.maxFixAttempts) { _ in settings.save() }
         .onChange(of: settings.commandTimeout) { _ in settings.save() }
         .onChange(of: settings.maxOutputCapture) { _ in settings.save() }
         .onChange(of: settings.maxContextSize) { _ in settings.save() }
+        .onChange(of: settings.outputSummarizationThreshold) { _ in settings.save() }
+        .onChange(of: settings.enableOutputSummarization) { _ in settings.save() }
+        .onChange(of: settings.maxFullOutputBuffer) { _ in settings.save() }
+        .onChange(of: settings.enablePlanning) { _ in settings.save() }
+        .onChange(of: settings.reflectionInterval) { _ in settings.save() }
+        .onChange(of: settings.enableReflection) { _ in settings.save() }
+        .onChange(of: settings.stuckDetectionThreshold) { _ in settings.save() }
         .onChange(of: settings.requireCommandApproval) { _ in settings.save() }
         .onChange(of: settings.autoApproveReadOnly) { _ in settings.save() }
         .onChange(of: settings.verboseLogging) { _ in settings.save() }
@@ -502,6 +519,33 @@ struct AgentSettingsView: View {
         }
     }
     
+    // MARK: - Default Behavior Section
+    private var defaultBehaviorSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsSectionHeader("Default Behavior", subtitle: "Control how new chat sessions behave")
+            
+            VStack(spacing: 16) {
+                // Agent Mode Enabled by Default
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Enable Agent Mode by Default")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("New chat sessions will start with agent mode enabled.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: $settings.agentModeEnabledByDefault)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+            }
+            .settingsCard()
+        }
+    }
+    
     // MARK: - Execution Limits Section
     private var executionLimitsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -511,20 +555,35 @@ struct AgentSettingsView: View {
                 // Max Iterations
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Maximum Iterations")
+                        Text("Maximum Steps")
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
-                        Text("\(settings.maxIterations)")
+                        TextField("", value: Binding(
+                            get: { settings.maxIterations },
+                            set: { settings.maxIterations = max(0, min(500, $0)) }
+                        ), format: .number)
+                        .textFieldStyle(.plain)
                             .font(.system(size: 13, design: .monospaced))
-                            .foregroundColor(.secondary)
+                        .frame(width: 60)
+                        .multilineTextAlignment(.trailing)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.primary.opacity(0.05))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                        )
                     }
                     
                     Slider(value: Binding(
                         get: { Double(settings.maxIterations) },
                         set: { settings.maxIterations = Int($0) }
-                    ), in: 1...20, step: 1)
+                    ), in: 0...500, step: 10)
                     
-                    Text("Maximum number of command execution cycles before the agent stops.")
+                    Text("Maximum number of steps (0 = unlimited). Recommended: 50-200 for complex tasks.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
@@ -573,6 +632,99 @@ struct AgentSettingsView: View {
                 }
             }
             .settingsCard()
+        }
+    }
+    
+    // MARK: - Planning & Reflection Section
+    private var planningReflectionSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsSectionHeader("Planning & Reflection", subtitle: "Control how the agent plans and reviews progress")
+            
+            VStack(spacing: 16) {
+                // Enable Planning
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Enable Planning Phase")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Generate a step-by-step plan before executing commands.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: $settings.enablePlanning)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+                
+                Divider()
+                
+                // Enable Reflection
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Enable Periodic Reflection")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Pause to assess progress and adjust approach if needed.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: $settings.enableReflection)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+                
+                if settings.enableReflection {
+                    // Reflection Interval
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Reflection Interval")
+                                .font(.system(size: 13, weight: .medium))
+                            Spacer()
+                            Text("Every \(settings.reflectionInterval) steps")
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Slider(value: Binding(
+                            get: { Double(settings.reflectionInterval) },
+                            set: { settings.reflectionInterval = Int($0) }
+                        ), in: 3...25, step: 1)
+                        
+                        Text("How often the agent pauses to review progress.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Divider()
+                
+                // Stuck Detection
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Stuck Detection Threshold")
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        Text("\(settings.stuckDetectionThreshold) similar commands")
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Slider(value: Binding(
+                        get: { Double(settings.stuckDetectionThreshold) },
+                        set: { settings.stuckDetectionThreshold = Int($0) }
+                    ), in: 2...10, step: 1)
+                    
+                    Text("Trigger a strategy change after this many similar failed commands.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .settingsCard()
+            .animation(.easeInOut(duration: 0.2), value: settings.enableReflection)
         }
     }
     
@@ -627,6 +779,82 @@ struct AgentSettingsView: View {
                 }
             }
             .settingsCard()
+        }
+    }
+    
+    // MARK: - Output Handling Section
+    private var outputHandlingSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsSectionHeader("Long Output Handling", subtitle: "Control how large terminal outputs are processed")
+            
+            VStack(spacing: 16) {
+                // Enable Output Summarization
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Enable Output Summarization")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Automatically summarize long command outputs to preserve context.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: $settings.enableOutputSummarization)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+                
+                if settings.enableOutputSummarization {
+                    Divider()
+                    
+                    // Summarization Threshold
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Summarization Threshold")
+                                .font(.system(size: 13, weight: .medium))
+                            Spacer()
+                            Text("\(settings.outputSummarizationThreshold) chars")
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Slider(value: Binding(
+                            get: { Double(settings.outputSummarizationThreshold) },
+                            set: { settings.outputSummarizationThreshold = Int($0) }
+                        ), in: 1000...20000, step: 1000)
+                        
+                        Text("Outputs longer than this will be summarized to preserve key information.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Divider()
+                
+                // Full Output Buffer
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Full Output Buffer")
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        Text("\(settings.maxFullOutputBuffer / 1000)K chars")
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Slider(value: Binding(
+                        get: { Double(settings.maxFullOutputBuffer) },
+                        set: { settings.maxFullOutputBuffer = Int($0) }
+                    ), in: 10000...100000, step: 10000)
+                    
+                    Text("Full outputs are stored up to this size for search and reference.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .settingsCard()
+            .animation(.easeInOut(duration: 0.2), value: settings.enableOutputSummarization)
         }
     }
     
