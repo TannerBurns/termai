@@ -56,9 +56,29 @@ final class ChatTabsManager: ObservableObject {
         let sessionToRemove = sessions[index]
         sessionToRemove.cancelStreaming()
         
-        // If this is the only session, create a new one instead of removing
+        // Archive to history if the session has messages
+        let hasMessages = !sessionToRemove.messages.filter { $0.role == "user" }.isEmpty
+        if hasMessages {
+            // Make sure session data is saved before archiving
+            sessionToRemove.persistMessages()
+            sessionToRemove.persistSettings()
+            ChatHistoryManager.shared.addEntry(from: sessionToRemove)
+        }
+        
+        // If this is the only session, replace it with a new one (don't reuse ID)
         if sessions.count == 1 {
-            sessions[0].clearChat()
+            // Create a new session with settings from the old one
+            let newSession = ChatSession()
+            newSession.apiBaseURL = sessionToRemove.apiBaseURL
+            newSession.apiKey = sessionToRemove.apiKey
+            newSession.model = sessionToRemove.model
+            newSession.providerName = sessionToRemove.providerName
+            newSession.providerType = sessionToRemove.providerType
+            newSession.persistSettings()
+            
+            sessions = [newSession]
+            selectedSessionId = newSession.id
+            saveSessions()
             return
         }
         
@@ -84,6 +104,39 @@ final class ChatTabsManager: ObservableObject {
             selectedSessionId = id
             saveSessions() // Save selection change
         }
+    }
+    
+    // MARK: - History Restoration
+    
+    /// Restore a session from chat history as a new tab
+    func restoreFromHistory(sessionId: UUID) -> ChatSession? {
+        // Check if session already exists in active sessions
+        if sessions.contains(where: { $0.id == sessionId }) {
+            // Just select it instead
+            selectedSessionId = sessionId
+            saveSessions()
+            return sessions.first { $0.id == sessionId }
+        }
+        
+        // Create a new session with the archived ID
+        let restoredSession = ChatSession(restoredId: sessionId)
+        restoredSession.loadSettings()
+        restoredSession.loadMessages()
+        
+        // Only restore if it has messages
+        guard !restoredSession.messages.isEmpty else {
+            return nil
+        }
+        
+        // Add to sessions and select it
+        sessions.append(restoredSession)
+        selectedSessionId = restoredSession.id
+        saveSessions()
+        
+        // Remove from history since it's now active
+        ChatHistoryManager.shared.removeEntry(id: sessionId)
+        
+        return restoredSession
     }
     
     // MARK: - Persistence
