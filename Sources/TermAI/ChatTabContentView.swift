@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Chat tab content view without the header (since header is in container)
 struct ChatTabContentView: View {
@@ -89,8 +90,10 @@ struct ChatTabContentView: View {
             ChatInputArea(
                 messageText: $messageText,
                 sending: sending,
+                isStreaming: session.streamingMessageId != nil,
                 cwd: ptyModel.currentWorkingDirectory,
-                onSend: send
+                onSend: send,
+                onStop: { session.cancelStreaming() }
             )
         }
         .background(
@@ -194,8 +197,10 @@ private struct ScrollToBottomButton: View {
 private struct ChatInputArea: View {
     @Binding var messageText: String
     let sending: Bool
+    let isStreaming: Bool
     let cwd: String
     let onSend: () -> Void
+    let onStop: () -> Void
     
     @State private var isFocused: Bool = false
     
@@ -233,7 +238,7 @@ private struct ChatInputArea: View {
             )
             .onTapGesture { isFocused = true }
             
-            // Bottom bar with CWD and send button
+            // Bottom bar with CWD, stop button, and send button
             HStack(spacing: 12) {
                 // Current working directory
                 if !cwd.isEmpty {
@@ -256,10 +261,28 @@ private struct ChatInputArea: View {
                 
                 Spacer()
                 
+                // Stop button (visible during streaming)
+                if isStreaming {
+                    Button(action: onStop) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .frame(width: 28, height: 28)
+                            .background(
+                                Circle()
+                                    .fill(Color.red.opacity(0.9))
+                            )
+                            .foregroundColor(.white)
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.escape, modifiers: [])
+                    .help("Stop generation (Esc)")
+                    .transition(.scale.combined(with: .opacity))
+                }
+                
                 // Send button
                 Button(action: onSend) {
                     Group {
-                        if sending {
+                        if sending && !isStreaming {
                             ProgressView()
                                 .controlSize(.small)
                                 .tint(.white)
@@ -284,6 +307,7 @@ private struct ChatInputArea: View {
                 .disabled(sending || messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .animation(.easeInOut(duration: 0.15), value: messageText.isEmpty)
             }
+            .animation(.easeInOut(duration: 0.2), value: isStreaming)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -439,7 +463,7 @@ private struct ChatMessageBubble: View {
             
             // Message content
             if let evt = message.agentEvent {
-                AgentEventView(event: evt)
+                AgentEventView(event: evt, ptyModel: ptyModel)
             } else {
                 MarkdownRenderer(text: message.content)
                     .environmentObject(ptyModel)
@@ -527,7 +551,9 @@ private struct StreamingIndicator: View {
 // MARK: - Agent Event View
 private struct AgentEventView: View {
     @State private var expanded: Bool = false
+    @State private var showCopied: Bool = false
     let event: AgentEvent
+    let ptyModel: PTYModel
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -547,6 +573,33 @@ private struct AgentEventView: View {
                     .fontWeight(.medium)
                 
                 Spacer()
+                
+                // Action buttons (shown when there's a command)
+                if let cmd = event.command, !cmd.isEmpty {
+                    HStack(spacing: 4) {
+                        // Copy button
+                        Button(action: { copyCommand(cmd) }) {
+                            Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10))
+                                .foregroundColor(showCopied ? .green : .secondary)
+                                .frame(width: 20, height: 20)
+                                .background(Circle().fill(Color.primary.opacity(0.05)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Copy command")
+                        
+                        // Re-run button
+                        Button(action: { rerunCommand(cmd) }) {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .frame(width: 20, height: 20)
+                                .background(Circle().fill(Color.primary.opacity(0.05)))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Re-run in terminal")
+                    }
+                }
                 
                 Button(action: { withAnimation(.spring(response: 0.3)) { expanded.toggle() } }) {
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
@@ -568,6 +621,25 @@ private struct AgentEventView: View {
                             Text(cmd)
                                 .font(.system(.footnote, design: .monospaced))
                                 .textSelection(.enabled)
+                            
+                            Spacer()
+                            
+                            // Inline action buttons
+                            HStack(spacing: 8) {
+                                Button(action: { copyCommand(cmd) }) {
+                                    Label(showCopied ? "Copied" : "Copy", systemImage: showCopied ? "checkmark" : "doc.on.doc")
+                                        .font(.caption2)
+                                        .foregroundColor(showCopied ? .green : .accentColor)
+                                }
+                                .buttonStyle(.plain)
+                                
+                                Button(action: { rerunCommand(cmd) }) {
+                                    Label("Re-run", systemImage: "arrow.clockwise")
+                                        .font(.caption2)
+                                        .foregroundColor(.accentColor)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -626,6 +698,26 @@ private struct AgentEventView: View {
         case "summary": return "checkmark"
         default: return "info.circle"
         }
+    }
+    
+    private func copyCommand(_ cmd: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(cmd, forType: .string)
+        
+        withAnimation {
+            showCopied = true
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation {
+                showCopied = false
+            }
+        }
+    }
+    
+    private func rerunCommand(_ cmd: String) {
+        // Send command to terminal
+        ptyModel.sendInput?(cmd + "\n")
     }
 }
 
