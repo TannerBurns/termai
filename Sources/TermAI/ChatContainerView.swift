@@ -3,10 +3,12 @@ import SwiftUI
 /// Container view that manages multiple chat tabs
 struct ChatContainerView: View {
     @EnvironmentObject var tabsManager: ChatTabsManager
+    @StateObject private var historyManager = ChatHistoryManager.shared
     let ptyModel: PTYModel
     
     // Command approval state
     @State private var pendingApproval: PendingCommandApproval? = nil
+    @State private var showingHistoryPopover: Bool = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -94,6 +96,33 @@ struct ChatContainerView: View {
                     }
                     .buttonStyle(.plain)
                     .help("New Chat Session (⇧⌘T)")
+                    
+                    // History button
+                    Button(action: { showingHistoryPopover.toggle() }) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.caption)
+                            .foregroundColor(historyManager.entries.isEmpty ? .secondary.opacity(0.5) : .secondary)
+                            .frame(width: 20, height: 20)
+                            .background(
+                                Circle()
+                                    .fill(Color.primary.opacity(0.05))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(historyManager.entries.isEmpty)
+                    .help(historyManager.entries.isEmpty ? "No chat history" : "View chat history")
+                    .popover(isPresented: $showingHistoryPopover, arrowEdge: .bottom) {
+                        ChatHistoryPopover(
+                            entries: historyManager.entries,
+                            onRestore: { entry in
+                                _ = tabsManager.restoreFromHistory(sessionId: entry.id)
+                                showingHistoryPopover = false
+                            },
+                            onDelete: { entry in
+                                historyManager.deleteEntry(id: entry.id)
+                            }
+                        )
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -571,5 +600,144 @@ private struct SessionHeaderView: View {
     
     private func displayName(for modelId: String) -> String {
         CuratedModels.find(id: modelId)?.displayName ?? modelId
+    }
+}
+
+// MARK: - Chat History Popover
+
+private struct ChatHistoryPopover: View {
+    let entries: [ChatHistoryEntry]
+    let onRestore: (ChatHistoryEntry) -> Void
+    let onDelete: (ChatHistoryEntry) -> Void
+    
+    @State private var hoveredEntry: UUID? = nil
+    @Environment(\.colorScheme) var colorScheme
+    
+    private let dateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundColor(.secondary)
+                Text("Chat History")
+                    .font(.headline)
+                Spacer()
+                Text("\(entries.count) saved")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
+            
+            Divider()
+            
+            if entries.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "tray")
+                        .font(.system(size: 32))
+                        .foregroundColor(.secondary.opacity(0.5))
+                    Text("No saved chats")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(entries) { entry in
+                            ChatHistoryRow(
+                                entry: entry,
+                                isHovered: hoveredEntry == entry.id,
+                                dateFormatter: dateFormatter,
+                                onRestore: { onRestore(entry) },
+                                onDelete: { onDelete(entry) }
+                            )
+                            .onHover { hovering in
+                                hoveredEntry = hovering ? entry.id : nil
+                            }
+                            
+                            if entry.id != entries.last?.id {
+                                Divider()
+                                    .padding(.leading, 16)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 400)
+            }
+        }
+        .frame(width: 320)
+        .background(colorScheme == .dark ? Color(white: 0.1) : Color.white)
+    }
+}
+
+// MARK: - Chat History Row
+
+private struct ChatHistoryRow: View {
+    let entry: ChatHistoryEntry
+    let isHovered: Bool
+    let dateFormatter: RelativeDateTimeFormatter
+    let onRestore: () -> Void
+    let onDelete: () -> Void
+    
+    @State private var deleteHovered: Bool = false
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Main content - clickable to restore
+            Button(action: onRestore) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(entry.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                        .foregroundColor(.primary)
+                    
+                    Text(entry.messagePreview)
+                        .font(.system(size: 11))
+                        .lineLimit(2)
+                        .foregroundColor(.secondary)
+                    
+                    HStack(spacing: 8) {
+                        Text(dateFormatter.localizedString(for: entry.savedDate, relativeTo: Date()))
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary.opacity(0.8))
+                        
+                        Text("·")
+                            .foregroundColor(.secondary.opacity(0.5))
+                        
+                        Text("\(entry.messageCount) messages")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary.opacity(0.8))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            
+            // Delete button - visible on hover
+            if isHovered {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundColor(deleteHovered ? .red : .secondary)
+                }
+                .buttonStyle(.plain)
+                .onHover { deleteHovered = $0 }
+                .help("Remove from history")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(isHovered ? (colorScheme == .dark ? Color.white.opacity(0.05) : Color.black.opacity(0.03)) : Color.clear)
+        .contentShape(Rectangle())
     }
 }
