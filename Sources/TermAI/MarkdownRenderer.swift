@@ -161,110 +161,167 @@ private struct CodeBlockView: View {
         return result.trimmingCharacters(in: .whitespaces)
     }
     
+    private func extractCommands() -> [String] {
+        code.components(separatedBy: .newlines)
+            .compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty { return nil }
+                
+                // Skip comment lines (any line starting with #)
+                if trimmed.hasPrefix("#") { return nil }
+                
+                // Remove shell prompts
+                var command = trimmed
+                if trimmed.hasPrefix("$ ") { 
+                    command = String(trimmed.dropFirst(2))
+                } else if trimmed.hasPrefix("% ") { 
+                    command = String(trimmed.dropFirst(2))
+                } else if trimmed.hasPrefix("> ") {
+                    command = String(trimmed.dropFirst(2))
+                }
+                
+                // Strip inline comments
+                command = stripBashComment(from: command)
+                return command.isEmpty ? nil : command
+            }
+    }
+    
     var body: some View {
         let isShell = language?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).matchesAny(["bash", "sh", "shell", "zsh"]) == true
         
         VStack(alignment: .leading, spacing: 0) {
+            // Language badge and copy button
+            if let lang = language, !lang.isEmpty {
+                HStack {
+                    Text(lang.uppercased())
+                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(Color.primary.opacity(0.06))
+                        )
+                    
+                    Spacer()
+                    
+                    Button(action: {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(code, forType: .string)
+                    }) {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy code")
+                }
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+            }
+            
             // Code block
-            ScrollView(.horizontal, showsIndicators: true) {
+            ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
-                    .font(.system(.body, design: .monospaced))
+                    .font(.system(size: 12, weight: .regular, design: .monospaced))
                     .textSelection(.enabled)
-                    .padding(8)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .background(Color.gray.opacity(0.12))
             
             // Action buttons bar (only for shell code blocks)
             if isClosed && isShell {
-                Divider()
                 HStack(spacing: 8) {
-                    Button("Add to terminal") {
-                        let commands = code
-                            .components(separatedBy: .newlines)
-                            .compactMap { line -> String? in
-                                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                                if trimmed.isEmpty { return nil }
-                                
-                                // Skip comment lines (any line starting with #)
-                                if trimmed.hasPrefix("#") {
-                                    // All lines starting with # are comments
-                                    return nil
-                                }
-                                
-                                // Remove shell prompts
-                                var command = trimmed
-                                if trimmed.hasPrefix("$ ") { 
-                                    command = String(trimmed.dropFirst(2))
-                                } else if trimmed.hasPrefix("% ") { 
-                                    command = String(trimmed.dropFirst(2))
-                                } else if trimmed.hasPrefix("> ") {
-                                    command = String(trimmed.dropFirst(2))
-                                }
-                                
-                                // Strip inline comments
-                                command = stripBashComment(from: command)
-                                return command.isEmpty ? nil : command
-                            }
-                        
-                        // Send commands separated by && so they appear as a single compound command
-                        // but can be edited before execution
+                    CodeActionButton(
+                        title: "Copy to terminal",
+                        icon: "terminal",
+                        color: .blue
+                    ) {
+                        let commands = extractCommands()
                         if !commands.isEmpty {
                             let compoundCommand = commands.joined(separator: " && ")
                             ptyModel.sendInput?(compoundCommand)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.mini)
-
-                    Button("▶️ Run in terminal") {
-                        let commands = code
-                            .components(separatedBy: .newlines)
-                            .compactMap { line -> String? in
-                                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                                if trimmed.isEmpty { return nil }
-                                
-                                // Skip comment lines (any line starting with #)
-                                if trimmed.hasPrefix("#") {
-                                    // All lines starting with # are comments
-                                    return nil
-                                }
-                                
-                                // Remove shell prompts
-                                var command = trimmed
-                                if trimmed.hasPrefix("$ ") { 
-                                    command = String(trimmed.dropFirst(2))
-                                } else if trimmed.hasPrefix("% ") { 
-                                    command = String(trimmed.dropFirst(2))
-                                } else if trimmed.hasPrefix("> ") {
-                                    command = String(trimmed.dropFirst(2))
-                                }
-                                
-                                // Strip inline comments
-                                command = stripBashComment(from: command)
-                                return command.isEmpty ? nil : command
-                            }
-                        
-                        // Execute commands sequentially - send them as a compound command with &&
-                        // This ensures each command only runs if the previous one succeeded
+                    
+                    CodeActionButton(
+                        title: "Run",
+                        icon: "play.fill",
+                        color: .green
+                    ) {
+                        let commands = extractCommands()
                         if !commands.isEmpty {
                             let compoundCommand = commands.joined(separator: " && ")
                             ptyModel.sendInput?(compoundCommand + "\n")
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.mini)
                     
                     Spacer()
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(Color.gray.opacity(0.08))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
             }
         }
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.12)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.2)))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(
+                    LinearGradient(
+                        colors: [Color.primary.opacity(0.1), Color.primary.opacity(0.05)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        )
+    }
+}
+
+// MARK: - Code Action Button
+private struct CodeActionButton: View {
+    let title: String
+    let icon: String
+    let color: Color
+    let action: () -> Void
+    
+    @State private var isHovered: Bool = false
+    @State private var isPressed: Bool = false
+    
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(isHovered ? .white : color)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(isHovered ? color : color.opacity(0.12))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(color.opacity(isHovered ? 0 : 0.3), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(isPressed ? 0.95 : 1.0)
+        .animation(.spring(response: 0.2), value: isHovered)
+        .animation(.spring(response: 0.15), value: isPressed)
+        .onHover { isHovered = $0 }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in isPressed = true }
+                .onEnded { _ in isPressed = false }
+        )
     }
 }
 
@@ -299,30 +356,59 @@ private struct MarkdownText: View {
 private struct TableView: View {
     let headers: [String]
     let rows: [[String]]
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            // Header row
+            HStack(spacing: 0) {
                 ForEach(headers.indices, id: \.self) { i in
                     MarkdownText(text: headers[i])
-                        .fontWeight(.semibold)
-                        .padding(6)
+                        .font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            .background(Color.gray.opacity(0.1))
-            ForEach(rows.indices, id: \.self) { r in
-                HStack(alignment: .top) {
-                    ForEach(rows[r].indices, id: \.self) { c in
-                        MarkdownText(text: rows[r][c])
-                            .padding(6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    
+                    if i < headers.count - 1 {
+                        Divider()
                     }
                 }
-                .background(r % 2 == 0 ? Color.clear : Color.gray.opacity(0.05))
             }
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.gray.opacity(0.2)))
+            .background(.ultraThinMaterial)
+            
+            Divider()
+            
+            // Body rows
+            ForEach(rows.indices, id: \.self) { r in
+                HStack(spacing: 0) {
+                    ForEach(rows[r].indices, id: \.self) { c in
+                        MarkdownText(text: rows[r][c])
+                            .font(.system(size: 12))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        
+                        if c < rows[r].count - 1 {
+                            Divider()
+                        }
+                    }
+                }
+                .background(r % 2 == 0 ? Color.clear : Color.primary.opacity(0.02))
+                
+                if r < rows.count - 1 {
+                    Divider()
+                        .opacity(0.5)
+                }
+            }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.primary.opacity(0.02))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
