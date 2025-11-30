@@ -37,6 +37,10 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var agentModeEnabled: Bool = false
     @Published var agentContextLog: [String] = []
     @Published var lastKnownCwd: String = ""
+    @Published var isAgentRunning: Bool = false
+    
+    // Agent cancellation
+    private var agentCancelled: Bool = false
     
     // Configuration (each session has its own copy)
     @Published var apiBaseURL: URL
@@ -47,6 +51,14 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var modelFetchError: String? = nil
     @Published var titleGenerationError: String? = nil
     
+    // Generation settings
+    @Published var temperature: Double = 0.7
+    @Published var maxTokens: Int = 4096
+    @Published var reasoningEffort: ReasoningEffort = .medium
+    
+    // Provider type tracking
+    @Published var providerType: ProviderType = .local(.ollama)
+    
     // System info and prompt
     private let systemInfo: SystemInfo = SystemInfo.gather()
     var systemPrompt: String {
@@ -56,7 +68,7 @@ final class ChatSession: ObservableObject, Identifiable {
     // Private streaming state
     private var streamingTask: Task<Void, Never>? = nil
     
-    // MARK: - Local Providers
+    // MARK: - Local Providers (kept for backward compatibility)
     enum LocalProvider: String {
         case ollama = "Ollama"
         case lmStudio = "LM Studio"
@@ -72,6 +84,26 @@ final class ChatSession: ObservableObject, Identifiable {
                 return URL(string: "http://localhost:8000/v1")!
             }
         }
+    }
+    
+    // MARK: - Cloud Provider Helpers
+    
+    /// Whether the current provider is a cloud provider
+    var isCloudProvider: Bool {
+        providerType.isCloud
+    }
+    
+    /// Get the current cloud provider if applicable
+    var currentCloudProvider: CloudProvider? {
+        if case .cloud(let provider) = providerType {
+            return provider
+        }
+        return nil
+    }
+    
+    /// Whether the current model supports reasoning/thinking
+    var currentModelSupportsReasoning: Bool {
+        CuratedModels.supportsReasoning(modelId: model)
     }
     
     init(
@@ -120,6 +152,28 @@ final class ChatSession: ObservableObject, Identifiable {
         streamingTask?.cancel()
         streamingTask = nil
         streamingMessageId = nil
+    }
+    
+    /// Cancel the current agent execution
+    func cancelAgent() {
+        agentCancelled = true
+        isAgentRunning = false
+        
+        // Add a message indicating cancellation
+        messages.append(ChatMessage(
+            role: "assistant",
+            content: "",
+            agentEvent: AgentEvent(
+                kind: "status",
+                title: "Agent cancelled",
+                details: "User cancelled the agent execution",
+                command: nil,
+                output: nil,
+                collapsed: true
+            )
+        ))
+        messages = messages
+        persistMessages()
     }
     
     /// Append a user message without triggering model streaming (used by Agent mode)
@@ -190,6 +244,11 @@ final class ChatSession: ObservableObject, Identifiable {
     private var commandFinishedObserver: NSObjectProtocol? = nil
     
     private func runAgentOrchestration(for userPrompt: String) async {
+        // Reset cancellation state and mark agent as running
+        agentCancelled = false
+        isAgentRunning = true
+        defer { isAgentRunning = false }
+        
         // Append user message first
         appendUserMessage(userPrompt)
         
@@ -265,7 +324,7 @@ final class ChatSession: ObservableObject, Identifiable {
                     self.agentContextLog.append("CWD: \(cwd)")
                     if let rc { self.agentContextLog.append("__TERMAI_RC__=\(rc)") }
                     if !out.isEmpty {
-                        self.agentContextLog.append("OUTPUT(\(cmd.prefix(64))): \(out.prefix(2000))")
+                        self.agentContextLog.append("OUTPUT(\(cmd.prefix(64))): \(out.prefix(AgentSettings.shared.maxOutputCapture))")
                         // Update last status event bubble with output
                         if let idx = self.messages.lastIndex(where: { $0.agentEvent?.command == cmd }) {
                             var msg = self.messages[idx]
@@ -282,10 +341,16 @@ final class ChatSession: ObservableObject, Identifiable {
         }
         
         var iterations = 0
-        let maxIterations = 6
+        let maxIterations = AgentSettings.shared.maxIterations
         var fixAttempts = 0
-        let maxFixAttempts = 3
+        let maxFixAttempts = AgentSettings.shared.maxFixAttempts
         stepLoop: while iterations < maxIterations {
+            // Check for cancellation
+            if agentCancelled {
+                AgentDebugConfig.log("[Agent] Cancelled by user")
+                break stepLoop
+            }
+            
             iterations += 1
             // Ask next step
             let contextBlob = agentContextLog.joined(separator: "\n")
@@ -312,27 +377,37 @@ final class ChatSession: ObservableObject, Identifiable {
             
             guard !commandToRun.isEmpty else { break }
             
-            // Execute in terminal and capture output snapshot from PTYModel via App scope. We'll rely on Terminal to echo output; here we only append status.
-            // Insert a hint message that command is being executed in the terminal
-            let runningTitle = "Executing command in terminal"
-            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: runningTitle, details: "\(commandToRun)", command: commandToRun, output: nil, collapsed: false)))
-            messages = messages
-            persistMessages()
-            
-            // Fire a notification so UI can send the command to terminal
-            AgentDebugConfig.log("[Agent] Executing command: \(commandToRun)")
-            NotificationCenter.default.post(name: .TermAIExecuteCommand, object: nil, userInfo: [
-                "sessionId": self.id,
-                "command": commandToRun
-            ])
-            
-            // Wait for output or timeout (increased to account for marker processing)
-            let capturedOut = await waitForCommandOutput(matching: commandToRun, timeout: 10.0)
-            // Record that the command was issued and capture output if any
-            agentContextLog.append("RAN: \(commandToRun)")
-            if let out = capturedOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                agentContextLog.append("OUTPUT: \(out.prefix(3000))")
+            // Execute command with optional approval flow
+            let capturedOut: String?
+            if AgentSettings.shared.requireCommandApproval && !AgentSettings.shared.shouldAutoApprove(commandToRun) {
+                // Use approval flow
+                capturedOut = await executeCommandWithApproval(commandToRun)
+                
+                // Check if command was rejected
+                if capturedOut == nil && !agentContextLog.contains(where: { $0.contains("RAN: \(commandToRun)") }) {
+                    // Command was rejected, skip this iteration
+                    continue stepLoop
+                }
+            } else {
+                // Direct execution without approval
+                let runningTitle = "Executing command in terminal"
+                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: runningTitle, details: "\(commandToRun)", command: commandToRun, output: nil, collapsed: false)))
+                messages = messages
+                persistMessages()
+                
+                AgentDebugConfig.log("[Agent] Executing command: \(commandToRun)")
+                NotificationCenter.default.post(name: .TermAIExecuteCommand, object: nil, userInfo: [
+                    "sessionId": self.id,
+                    "command": commandToRun
+                ])
+                
+                capturedOut = await waitForCommandOutput(matching: commandToRun, timeout: AgentSettings.shared.commandTimeout)
+                agentContextLog.append("RAN: \(commandToRun)")
+                if let out = capturedOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    agentContextLog.append("OUTPUT: \(out.prefix(AgentSettings.shared.maxOutputCapture))")
+                }
             }
+            
             AgentDebugConfig.log("[Agent] Command finished. cwd=\(self.lastKnownCwd), exit=\(lastExitCodeString())\nOutput (first 500 chars):\n\((capturedOut ?? "(no output)").prefix(500))")
             
             // Analyze command outcome; propose fixes if failed
@@ -354,15 +429,26 @@ final class ChatSession: ObservableObject, Identifiable {
                 messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Fixing command and retrying", details: fixed, command: fixed, output: nil, collapsed: false)))
                 messages = messages
                 persistMessages()
-                AgentDebugConfig.log("[Agent] Fixing by executing: \(fixed)")
-                NotificationCenter.default.post(name: .TermAIExecuteCommand, object: nil, userInfo: [
-                    "sessionId": self.id,
-                    "command": fixed
-                ])
-                let fixOut = await waitForCommandOutput(matching: fixed, timeout: 10.0)
-                agentContextLog.append("RAN: \(fixed)")
-                if let out = fixOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    agentContextLog.append("OUTPUT: \(out.prefix(3000))")
+                
+                // Execute fix command with optional approval
+                let fixOut: String?
+                if AgentSettings.shared.requireCommandApproval && !AgentSettings.shared.shouldAutoApprove(fixed) {
+                    fixOut = await executeCommandWithApproval(fixed)
+                    if fixOut == nil && !agentContextLog.contains(where: { $0.contains("RAN: \(fixed)") }) {
+                        // Fix command was rejected, continue without fix
+                        continue stepLoop
+                    }
+                } else {
+                    AgentDebugConfig.log("[Agent] Fixing by executing: \(fixed)")
+                    NotificationCenter.default.post(name: .TermAIExecuteCommand, object: nil, userInfo: [
+                        "sessionId": self.id,
+                        "command": fixed
+                    ])
+                    fixOut = await waitForCommandOutput(matching: fixed, timeout: AgentSettings.shared.commandTimeout)
+                    agentContextLog.append("RAN: \(fixed)")
+                    if let out = fixOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        agentContextLog.append("OUTPUT: \(out.prefix(AgentSettings.shared.maxOutputCapture))")
+                    }
                 }
                 // Immediately reassess after a fix attempt based on exit code and output
                 let quickAssessPrompt = """
@@ -371,7 +457,7 @@ final class ChatSession: ObservableObject, Identifiable {
                 BASE CONTEXT:
                 - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
                 - Last Command: \(fixed)
-                - Last Output: \((fixOut ?? "").prefix(3000))
+                - Last Output: \((fixOut ?? "").prefix(AgentSettings.shared.maxOutputCapture))
                 - Last Exit Code: \(lastExitCodeString())
                 CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
                 """
@@ -403,7 +489,7 @@ final class ChatSession: ObservableObject, Identifiable {
             BASE CONTEXT:
             - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
             - Last Command: \(commandToRun)
-            - Last Output: \((capturedOut ?? "").prefix(3000))
+            - Last Output: \((capturedOut ?? "").prefix(AgentSettings.shared.maxOutputCapture))
             - Last Exit Code: \(lastExitCodeString())
             CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
             """
@@ -477,6 +563,20 @@ final class ChatSession: ObservableObject, Identifiable {
     }
     
     private func callOneShotText(prompt: String) async -> String {
+        // Route to appropriate provider
+        if case .cloud(let cloudProvider) = providerType {
+            switch cloudProvider {
+            case .openai:
+                return await callOneShotOpenAI(prompt: prompt)
+            case .anthropic:
+                return await callOneShotAnthropic(prompt: prompt)
+            }
+        } else {
+            return await callOneShotLocal(prompt: prompt)
+        }
+    }
+    
+    private func callOneShotLocal(prompt: String) async -> String {
         struct RequestBody: Encodable {
             struct Message: Codable { let role: String; let content: String }
             let model: String
@@ -504,6 +604,89 @@ final class ChatSession: ObservableObject, Identifiable {
             // Try Ollama-like
             struct OR: Decodable { struct Message: Decodable { let content: String? }; let message: Message?; let response: String? }
             if let o = try? JSONDecoder().decode(OR.self, from: data) { return o.message?.content ?? o.response ?? String(data: data, encoding: .utf8) ?? "" }
+            return String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            return "{\"error\":\"\(error.localizedDescription)\"}"
+        }
+    }
+    
+    private func callOneShotOpenAI(prompt: String) async -> String {
+        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .openai) else {
+            return "{\"error\":\"OpenAI API key not found\"}"
+        }
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        // Build request body as dictionary for flexibility
+        var bodyDict: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": prompt]
+            ],
+            "stream": false,
+            "max_completion_tokens": 1024
+        ]
+        
+        // For reasoning models, use temperature 1.0; otherwise use agent temperature
+        if currentModelSupportsReasoning {
+            bodyDict["temperature"] = 1.0
+        } else {
+            bodyDict["temperature"] = 0.2
+        }
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+            let (data, _) = try await URLSession.shared.data(for: request)
+            struct Choice: Decodable { struct Message: Decodable { let content: String }; let message: Message }
+            struct Resp: Decodable { let choices: [Choice] }
+            if let decoded = try? JSONDecoder().decode(Resp.self, from: data), let content = decoded.choices.first?.message.content {
+                return content
+            }
+            return String(data: data, encoding: .utf8) ?? ""
+        } catch {
+            return "{\"error\":\"\(error.localizedDescription)\"}"
+        }
+    }
+    
+    private func callOneShotAnthropic(prompt: String) async -> String {
+        let url = URL(string: "https://api.anthropic.com/v1/messages")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        
+        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .anthropic) else {
+            return "{\"error\":\"Anthropic API key not found\"}"
+        }
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        
+        let bodyDict: [String: Any] = [
+            "model": model,
+            "max_tokens": 1024,
+            "system": systemPrompt,
+            "messages": [
+                ["role": "user", "content": prompt]
+            ]
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+            let (data, _) = try await URLSession.shared.data(for: request)
+            
+            // Anthropic response format
+            struct ContentBlock: Decodable { let type: String; let text: String? }
+            struct AnthropicResponse: Decodable { let content: [ContentBlock] }
+            
+            if let decoded = try? JSONDecoder().decode(AnthropicResponse.self, from: data),
+               let textBlock = decoded.content.first(where: { $0.type == "text" }),
+               let text = textBlock.text {
+                return text
+            }
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
             return "{\"error\":\"\(error.localizedDescription)\"}"
@@ -546,6 +729,161 @@ final class ChatSession: ObservableObject, Identifiable {
         }
     }
     
+    /// Request approval for a command if settings require it
+    /// Returns the approved command (possibly edited), or nil if rejected
+    private func requestCommandApproval(_ command: String) async -> String? {
+        let settings = AgentSettings.shared
+        
+        // Auto-approve if approval not required or command is read-only and auto-approve is enabled
+        if settings.shouldAutoApprove(command) {
+            return command
+        }
+        
+        // Post notification requesting approval
+        let approvalId = UUID()
+        NotificationCenter.default.post(
+            name: .TermAICommandPendingApproval,
+            object: nil,
+            userInfo: [
+                "sessionId": self.id,
+                "approvalId": approvalId,
+                "command": command
+            ]
+        )
+        
+        // Add a pending approval message
+        messages.append(ChatMessage(
+            role: "assistant",
+            content: "",
+            agentEvent: AgentEvent(
+                kind: "status",
+                title: "Awaiting command approval",
+                details: command,
+                command: command,
+                output: nil,
+                collapsed: false
+            )
+        ))
+        messages = messages
+        persistMessages()
+        
+        // Wait for approval response
+        return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+            var token: NSObjectProtocol?
+            var resolved = false
+            
+            func finish(_ value: String?) {
+                guard !resolved else { return }
+                resolved = true
+                if let t = token { NotificationCenter.default.removeObserver(t) }
+                token = nil
+                continuation.resume(returning: value)
+            }
+            
+            token = NotificationCenter.default.addObserver(
+                forName: .TermAICommandApprovalResponse,
+                object: nil,
+                queue: .main
+            ) { note in
+                guard let noteApprovalId = note.userInfo?["approvalId"] as? UUID,
+                      noteApprovalId == approvalId else { return }
+                
+                let approved = note.userInfo?["approved"] as? Bool ?? false
+                let editedCommand = note.userInfo?["command"] as? String
+                
+                if approved {
+                    finish(editedCommand ?? command)
+                } else {
+                    finish(nil)
+                }
+            }
+            
+            // Timeout after 5 minutes (user might be away)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
+                finish(nil)
+            }
+        }
+    }
+    
+    /// Execute a command with optional approval flow
+    private func executeCommandWithApproval(_ command: String) async -> String? {
+        // Request approval if needed
+        guard let approvedCommand = await requestCommandApproval(command) else {
+            // Command was rejected
+            messages.append(ChatMessage(
+                role: "assistant",
+                content: "",
+                agentEvent: AgentEvent(
+                    kind: "status",
+                    title: "Command rejected",
+                    details: "User declined to execute: \(command)",
+                    command: nil,
+                    output: nil,
+                    collapsed: true
+                )
+            ))
+            messages = messages
+            persistMessages()
+            return nil
+        }
+        
+        // Update status if command was edited
+        if approvedCommand != command {
+            messages.append(ChatMessage(
+                role: "assistant",
+                content: "",
+                agentEvent: AgentEvent(
+                    kind: "status",
+                    title: "Command edited by user",
+                    details: approvedCommand,
+                    command: approvedCommand,
+                    output: nil,
+                    collapsed: true
+                )
+            ))
+            messages = messages
+            persistMessages()
+        }
+        
+        // Execute the command
+        let runningTitle = "Executing command in terminal"
+        messages.append(ChatMessage(
+            role: "assistant",
+            content: "",
+            agentEvent: AgentEvent(
+                kind: "status",
+                title: runningTitle,
+                details: approvedCommand,
+                command: approvedCommand,
+                output: nil,
+                collapsed: false
+            )
+        ))
+        messages = messages
+        persistMessages()
+        
+        AgentDebugConfig.log("[Agent] Executing command: \(approvedCommand)")
+        NotificationCenter.default.post(
+            name: .TermAIExecuteCommand,
+            object: nil,
+            userInfo: [
+                "sessionId": self.id,
+                "command": approvedCommand
+            ]
+        )
+        
+        // Wait for output
+        let output = await waitForCommandOutput(matching: approvedCommand, timeout: AgentSettings.shared.commandTimeout)
+        
+        // Record in context log
+        agentContextLog.append("RAN: \(approvedCommand)")
+        if let out = output, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            agentContextLog.append("OUTPUT: \(out.prefix(AgentSettings.shared.maxOutputCapture))")
+        }
+        
+        return output
+    }
+    
     // MARK: - Title Generation
     private func generateTitle(from userMessage: String) async {
         // Clear any previous error
@@ -565,15 +903,6 @@ final class ChatSession: ObservableObject, Identifiable {
         let titleTask = Task { [weak self] in
             guard let self = self else { return }
             
-            struct RequestBody: Encodable {
-                struct Message: Codable { let role: String; let content: String }
-                let model: String
-                let messages: [Message]
-                let stream: Bool
-                let max_tokens: Int
-                let temperature: Double
-            }
-            
             let titlePrompt = """
             Generate a concise 2-5 word title for a chat conversation that starts with this user message. \
             The title should capture the main topic or intent. \
@@ -582,31 +911,102 @@ final class ChatSession: ObservableObject, Identifiable {
             User message: \(userMessage)
             """
             
-            // Use the same endpoint configuration as regular chat
-            let url = self.apiBaseURL.appendingPathComponent("chat/completions")
+            // Determine the correct URL based on provider type
+            let url: URL
+            if case .cloud(let cloudProvider) = self.providerType {
+                switch cloudProvider {
+                case .openai:
+                    url = URL(string: "https://api.openai.com/v1/chat/completions")!
+                case .anthropic:
+                    // Use Anthropic endpoint
+                    url = URL(string: "https://api.anthropic.com/v1/messages")!
+                }
+            } else {
+                url = self.apiBaseURL.appendingPathComponent("chat/completions")
+            }
+            
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 60.0  // 60 second timeout for slow models
-            if let apiKey = self.apiKey {
+            request.timeoutInterval = 60.0
+            
+            // Set up authentication based on provider
+            if case .cloud(let cloudProvider) = self.providerType {
+                switch cloudProvider {
+                case .openai:
+                    if let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .openai) {
+                        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    }
+                case .anthropic:
+                    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                    if let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .anthropic) {
+                        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+                    }
+                }
+            } else if let apiKey = self.apiKey {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
             
-            let messages = [
-                RequestBody.Message(role: "system", content: "You are a helpful assistant that generates concise titles."),
-                RequestBody.Message(role: "user", content: titlePrompt)
-            ]
-            
-            let req = RequestBody(
-                model: self.model,
-                messages: messages,
-                stream: false,
-                max_tokens: 256,
-                temperature: 1.0
-            )
-            
+            // Build request body based on provider
+            let requestData: Data
             do {
-                request.httpBody = try JSONEncoder().encode(req)
+                if case .cloud(let cloudProvider) = self.providerType {
+                    switch cloudProvider {
+                    case .openai:
+                        // OpenAI format with max_completion_tokens
+                        var bodyDict: [String: Any] = [
+                            "model": self.model,
+                            "messages": [
+                                ["role": "system", "content": "You are a helpful assistant that generates concise titles."],
+                                ["role": "user", "content": titlePrompt]
+                            ],
+                            "stream": false,
+                            "max_completion_tokens": 256
+                        ]
+                        // For reasoning models use temperature 1.0, otherwise use title temperature
+                        if self.currentModelSupportsReasoning {
+                            bodyDict["temperature"] = 1.0
+                        } else {
+                            bodyDict["temperature"] = self.temperature
+                        }
+                        requestData = try JSONSerialization.data(withJSONObject: bodyDict)
+                        
+                    case .anthropic:
+                        // Anthropic format
+                        let bodyDict: [String: Any] = [
+                            "model": self.model,
+                            "max_tokens": 256,
+                            "system": "You are a helpful assistant that generates concise titles.",
+                            "messages": [
+                                ["role": "user", "content": titlePrompt]
+                            ]
+                        ]
+                        requestData = try JSONSerialization.data(withJSONObject: bodyDict)
+                    }
+                } else {
+                    // Local provider format (Ollama, LM Studio, vLLM)
+                    struct RequestBody: Encodable {
+                        struct Message: Codable { let role: String; let content: String }
+                        let model: String
+                        let messages: [Message]
+                        let stream: Bool
+                        let max_tokens: Int
+                        let temperature: Double
+                    }
+                    let messages = [
+                        RequestBody.Message(role: "system", content: "You are a helpful assistant that generates concise titles."),
+                        RequestBody.Message(role: "user", content: titlePrompt)
+                    ]
+                    let req = RequestBody(
+                        model: self.model,
+                        messages: messages,
+                        stream: false,
+                        max_tokens: 256,
+                        temperature: self.temperature
+                    )
+                    requestData = try JSONEncoder().encode(req)
+                }
+                request.httpBody = requestData
                 
                 // Use a custom URLSession with longer timeout configuration
                 let config = URLSessionConfiguration.default
@@ -638,43 +1038,48 @@ final class ChatSession: ObservableObject, Identifiable {
                     return
                 }
                 
-                // Try to decode OpenAI-style response first
+                // Response format structs
                 struct OpenAIChoice: Decodable {
                     struct Message: Decodable { let content: String }
                     let message: Message
                 }
                 struct OpenAIResponse: Decodable { let choices: [OpenAIChoice] }
                 
-                // Try Ollama-style response with delta (for streaming compatibility)
-                struct OllamaChoice: Decodable {
-                    struct Delta: Decodable { let content: String? }
-                    let delta: Delta?
-                    let message: OpenAIChoice.Message?
-                }
-                struct OllamaResponseWithDelta: Decodable { let choices: [OllamaChoice] }
-                
-                // Try Ollama-style response
                 struct OllamaResponse: Decodable {
                     struct Message: Decodable { let content: String }
                     let message: Message?
                     let response: String?
                 }
                 
+                // Anthropic response format
+                struct AnthropicContentBlock: Decodable { let type: String; let text: String? }
+                struct AnthropicResponse: Decodable { let content: [AnthropicContentBlock] }
+                
                 var generatedTitle: String? = nil
                 
-                // Try OpenAI format
-                do {
-                    let decoded = try JSONDecoder().decode(OpenAIResponse.self, from: data)
-                    if let title = decoded.choices.first?.message.content {
-                        generatedTitle = title
+                // Parse based on provider
+                if case .cloud(let cloudProvider) = self.providerType, cloudProvider == .anthropic {
+                    // Anthropic format
+                    if let decoded = try? JSONDecoder().decode(AnthropicResponse.self, from: data),
+                       let textBlock = decoded.content.first(where: { $0.type == "text" }),
+                       let text = textBlock.text {
+                        generatedTitle = text
                     }
-                } catch {
-                    // Try Ollama format
+                } else {
+                    // Try OpenAI format first
                     do {
-                        let decoded = try JSONDecoder().decode(OllamaResponse.self, from: data)
-                        generatedTitle = decoded.message?.content ?? decoded.response
+                        let decoded = try JSONDecoder().decode(OpenAIResponse.self, from: data)
+                        if let title = decoded.choices.first?.message.content {
+                            generatedTitle = title
+                        }
                     } catch {
-                        // Failed to decode both formats
+                        // Try Ollama format
+                        do {
+                            let decoded = try JSONDecoder().decode(OllamaResponse.self, from: data)
+                            generatedTitle = decoded.message?.content ?? decoded.response
+                        } catch {
+                            // Failed to decode both formats
+                        }
                     }
                 }
                 
@@ -730,11 +1135,28 @@ final class ChatSession: ObservableObject, Identifiable {
     
     // MARK: - Streaming
     private func requestChatCompletionStream(assistantIndex: Int) async throws -> String {
+        // Route to appropriate provider
+        if case .cloud(let cloudProvider) = providerType {
+            switch cloudProvider {
+            case .openai:
+                return try await requestOpenAIStream(assistantIndex: assistantIndex)
+            case .anthropic:
+                return try await requestAnthropicStream(assistantIndex: assistantIndex)
+            }
+        } else {
+            return try await requestLocalProviderStream(assistantIndex: assistantIndex)
+        }
+    }
+    
+    // MARK: - Local Provider Streaming (Ollama, LM Studio, vLLM)
+    private func requestLocalProviderStream(assistantIndex: Int) async throws -> String {
         struct RequestBody: Encodable {
             struct Message: Codable { let role: String; let content: String }
             let model: String
             let messages: [Message]
             let stream: Bool
+            let temperature: Double?
+            let max_tokens: Int?
         }
         
         let url = apiBaseURL.appendingPathComponent("chat/completions")
@@ -745,6 +1167,122 @@ final class ChatSession: ObservableObject, Identifiable {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         
+        let allMessages = buildMessageArray()
+        let req = RequestBody(
+            model: model,
+            messages: allMessages.map { .init(role: $0.role, content: $0.content) },
+            stream: true,
+            temperature: temperature,
+            max_tokens: maxTokens
+        )
+        request.httpBody = try JSONEncoder().encode(req)
+        
+        return try await streamSSEResponse(request: request, assistantIndex: assistantIndex)
+    }
+    
+    // MARK: - OpenAI Streaming
+    private func requestOpenAIStream(assistantIndex: Int) async throws -> String {
+        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .openai) else {
+            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "OpenAI API key not found. Set OPENAI_API_KEY environment variable."])
+        }
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        let allMessages = buildMessageArray()
+        
+        // Build request body as dictionary to handle different parameter names
+        var bodyDict: [String: Any] = [
+            "model": model,
+            "messages": allMessages.map { ["role": $0.role, "content": $0.content] },
+            "stream": true
+        ]
+        
+        // Handle temperature and max tokens based on whether model supports reasoning
+        if currentModelSupportsReasoning {
+            // Reasoning models require temperature = 1.0
+            bodyDict["temperature"] = 1.0
+            // Use max_completion_tokens for newer models
+            bodyDict["max_completion_tokens"] = maxTokens
+            // Add reasoning effort if not "none"
+            if let reasoningValue = reasoningEffort.openAIValue {
+                bodyDict["reasoning_effort"] = reasoningValue
+            }
+        } else {
+            // Standard models use regular temperature and max_tokens
+            bodyDict["temperature"] = temperature
+            bodyDict["max_completion_tokens"] = maxTokens
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+        
+        return try await streamSSEResponse(request: request, assistantIndex: assistantIndex)
+    }
+    
+    // MARK: - Anthropic Streaming
+    private func requestAnthropicStream(assistantIndex: Int) async throws -> String {
+        let url = URL(string: "https://api.anthropic.com/v1/messages")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        
+        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .anthropic) else {
+            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Anthropic API key not found. Set ANTHROPIC_API_KEY environment variable."])
+        }
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        
+        // Anthropic uses extended thinking via beta header
+        if currentModelSupportsReasoning && reasoningEffort != .none {
+            request.setValue("interleaved-thinking-2025-05-14", forHTTPHeaderField: "anthropic-beta")
+        }
+        
+        let allMessages = buildMessageArray()
+        
+        // Anthropic format is different - separate system from messages
+        var bodyDict: [String: Any] = [
+            "model": model,
+            "max_tokens": maxTokens,
+            "stream": true
+        ]
+        
+        // Add system prompt
+        bodyDict["system"] = systemPrompt
+        
+        // Convert messages (exclude system role for Anthropic)
+        let anthropicMessages = allMessages.filter { $0.role != "system" }.map { msg -> [String: Any] in
+            return ["role": msg.role, "content": msg.content]
+        }
+        bodyDict["messages"] = anthropicMessages
+        
+        // Add temperature (only for non-reasoning or when reasoning is disabled)
+        if !currentModelSupportsReasoning || reasoningEffort == .none {
+            bodyDict["temperature"] = temperature
+        }
+        
+        // Add thinking configuration for extended thinking models
+        if currentModelSupportsReasoning, let budgetTokens = reasoningEffort.anthropicBudgetTokens {
+            bodyDict["thinking"] = [
+                "type": "enabled",
+                "budget_tokens": budgetTokens
+            ]
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+        
+        return try await streamAnthropicResponse(request: request, assistantIndex: assistantIndex)
+    }
+    
+    // MARK: - Message Building Helper
+    private struct SimpleMessage {
+        let role: String
+        let content: String
+    }
+    
+    private func buildMessageArray() -> [SimpleMessage] {
         // Exclude agent event bubbles and assistant placeholders from the provider context
         let conversational = messages.filter { msg in
             guard msg.role != "system" else { return false }
@@ -752,24 +1290,36 @@ final class ChatSession: ObservableObject, Identifiable {
             if msg.role == "assistant" && msg.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return false }
             return true
         }
-        let allMessages: [RequestBody.Message] = [RequestBody.Message(role: "system", content: systemPrompt)] + conversational.map {
+        
+        var result = [SimpleMessage(role: "system", content: systemPrompt)]
+        result += conversational.map { msg in
             var prefix = ""
-            if let ctx = $0.terminalContext, !ctx.isEmpty {
+            if let ctx = msg.terminalContext, !ctx.isEmpty {
                 var header = "Terminal Context:"
-                if let meta = $0.terminalContextMeta, let cwd = meta.cwd, !cwd.isEmpty {
+                if let meta = msg.terminalContextMeta, let cwd = meta.cwd, !cwd.isEmpty {
                     header += "\nCurrent Working Directory - \(cwd)"
                 }
                 prefix = "\(header)\n```\n\(ctx)\n```\n\n"
             }
-            return RequestBody.Message(role: $0.role, content: prefix + $0.content)
+            return SimpleMessage(role: msg.role, content: prefix + msg.content)
+        }
+        return result
+    }
+    
+    // MARK: - SSE Response Streaming (OpenAI-compatible)
+    private func streamSSEResponse(request: URLRequest, assistantIndex: Int) async throws -> String {
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
         }
         
-        let req = RequestBody(model: model, messages: allMessages, stream: true)
-        request.httpBody = try JSONEncoder().encode(req)
-        
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "HTTP error: \((response as? HTTPURLResponse)?.statusCode ?? -1)"])
+        if !(200..<300).contains(http.statusCode) {
+            // Try to read error message
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+            }
+            throw NSError(domain: "ChatAPI", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode): \(errorBody)"])
         }
         
         var accumulated = ""
@@ -819,12 +1369,99 @@ final class ChatSession: ObservableObject, Identifiable {
         return accumulated
     }
     
+    // MARK: - Anthropic Response Streaming
+    private func streamAnthropicResponse(request: URLRequest, assistantIndex: Int) async throws -> String {
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
+        }
+        
+        if !(200..<300).contains(http.statusCode) {
+            // Try to read error message
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+            }
+            throw NSError(domain: "ChatAPI", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode): \(errorBody)"])
+        }
+        
+        var accumulated = ""
+        let index = assistantIndex
+        
+        // Throttle UI updates
+        let updateInterval: TimeInterval = 0.05
+        var lastUpdateTime = Date.distantPast
+        
+        // Anthropic SSE event types
+        struct ContentBlockDelta: Decodable {
+            struct Delta: Decodable {
+                let type: String?
+                let text: String?
+                let thinking: String?
+            }
+            let delta: Delta?
+        }
+        
+        streamLoop: for try await line in bytes.lines {
+            if Task.isCancelled { break streamLoop }
+            
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard let data = payload.data(using: .utf8) else { continue }
+            
+            // Parse event type from previous line or inline
+            if let event = try? JSONDecoder().decode(ContentBlockDelta.self, from: data),
+               let delta = event.delta {
+                var didAccumulate = false
+                
+                // Handle text delta
+                if let text = delta.text, !text.isEmpty {
+                    accumulated += text
+                    didAccumulate = true
+                }
+                
+                // Handle thinking delta (for extended thinking models)
+                // We could optionally display thinking in a collapsible section
+                // For now, we just skip it
+                
+                if didAccumulate {
+                    let now = Date()
+                    if now.timeIntervalSince(lastUpdateTime) >= updateInterval {
+                        messages[index].content = accumulated
+                        messages = messages
+                        lastUpdateTime = now
+                    }
+                }
+            }
+        }
+        
+        // Ensure final state is always reflected in UI
+        messages[index].content = accumulated
+        messages = messages
+        
+        return accumulated
+    }
+    
     // MARK: - Models
     func fetchAvailableModels() async {
         await MainActor.run {
             self.modelFetchError = nil
             self.availableModels = []
         }
+        
+        // Handle cloud providers - use curated model list
+        if case .cloud(let cloudProvider) = providerType {
+            let models = CuratedModels.models(for: cloudProvider).map { $0.id }
+            await MainActor.run {
+                self.availableModels = models
+                if models.isEmpty {
+                    self.modelFetchError = "No models available for \(cloudProvider.rawValue)"
+                }
+            }
+            return
+        }
+        
+        // Handle local providers
         switch LocalProvider(rawValue: providerName) {
         case .ollama:
             await fetchOllamaModelsInternal()
@@ -930,7 +1567,11 @@ final class ChatSession: ObservableObject, Identifiable {
             providerName: providerName,
             systemPrompt: nil,  // No longer used
             sessionTitle: sessionTitle,
-            agentModeEnabled: agentModeEnabled
+            agentModeEnabled: agentModeEnabled,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            reasoningEffort: reasoningEffort,
+            providerType: providerType
         )
         try? PersistenceService.saveJSON(settings, to: "session-settings-\(id.uuidString).json")
     }
@@ -944,9 +1585,37 @@ final class ChatSession: ObservableObject, Identifiable {
             // Note: systemPrompt is no longer loaded from settings - using hard-coded prompt
             sessionTitle = settings.sessionTitle ?? ""
             agentModeEnabled = settings.agentModeEnabled ?? false
+            
+            // Load generation settings
+            temperature = settings.temperature ?? 0.7
+            maxTokens = settings.maxTokens ?? 4096
+            reasoningEffort = settings.reasoningEffort ?? .medium
+            providerType = settings.providerType ?? .local(.ollama)
         }
         
         // After loading settings, fetch models for selected provider
+        Task { await fetchAvailableModels() }
+    }
+    
+    /// Switch to a cloud provider
+    func switchToCloudProvider(_ provider: CloudProvider) {
+        providerType = .cloud(provider)
+        providerName = provider.rawValue
+        apiBaseURL = provider.baseURL
+        apiKey = CloudAPIKeyManager.shared.getAPIKey(for: provider)
+        model = "" // Reset model selection
+        availableModels = CuratedModels.models(for: provider).map { $0.id }
+        persistSettings()
+    }
+    
+    /// Switch to a local provider
+    func switchToLocalProvider(_ provider: LocalLLMProvider) {
+        providerType = .local(provider)
+        providerName = provider.rawValue
+        apiBaseURL = provider.defaultBaseURL
+        apiKey = nil
+        model = "" // Reset model selection
+        persistSettings()
         Task { await fetchAvailableModels() }
     }
 }
@@ -960,6 +1629,12 @@ private struct SessionSettings: Codable {
     let systemPrompt: String? // Kept for backward compatibility but no longer used
     let sessionTitle: String?
     let agentModeEnabled: Bool?
+    
+    // Generation settings
+    let temperature: Double?
+    let maxTokens: Int?
+    let reasoningEffort: ReasoningEffort?
+    let providerType: ProviderType?
 }
 
 private struct OpenAIStreamChunk: Decodable {
