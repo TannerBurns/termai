@@ -1,137 +1,182 @@
 import Foundation
+import SwiftUI
 
 @MainActor
 final class AppTab: Identifiable, ObservableObject {
-    let id: UUID = UUID()
+    let id: UUID
     @Published var title: String
-    // Multiple chat sessions per global tab
-    @Published var chats: [ChatViewModel]
-    @Published var selectedChatIndex: Int = 0
+    /// Each app tab owns its own terminal instance
     let ptyModel: PTYModel
-
-    init(title: String = "Tab", chatViewModel: ChatViewModel, ptyModel: PTYModel = PTYModel()) {
+    /// Each app tab has its own chat tabs manager for multiple chat sessions
+    let chatTabsManager: ChatTabsManager
+    
+    init(id: UUID = UUID(), title: String = "Tab", ptyModel: PTYModel = PTYModel(), chatTabsManager: ChatTabsManager? = nil) {
+        self.id = id
         self.title = title
-        self.chats = [chatViewModel]
         self.ptyModel = ptyModel
+        // Create a new ChatTabsManager or use the provided one (for restoration)
+        self.chatTabsManager = chatTabsManager ?? ChatTabsManager(tabId: id)
     }
-
-    var selectedChat: ChatViewModel { chats[max(0, min(selectedChatIndex, chats.count - 1))] }
+    
+    var selectedChatSession: ChatSession? {
+        chatTabsManager.selectedSession
+    }
+    
+    func cleanup() {
+        // Cancel any streaming chats
+        chatTabsManager.sessions.forEach { $0.cancelStreaming() }
+        // Save sessions before cleanup
+        chatTabsManager.saveSessions()
+        // Terminate the terminal process
+        ptyModel.terminateProcess()
+    }
 }
 
 @MainActor
 final class TabsStore: ObservableObject {
     @Published var tabs: [AppTab]
     @Published var selectedId: UUID
-
+    
     init() {
-        let first = AppTab(title: "Tab 1", chatViewModel: ChatViewModel())
-        self.tabs = [first]
-        self.selectedId = first.id
-    }
-
-    var selected: AppTab? { tabs.first(where: { $0.id == selectedId }) }
-
-    func addTab(copyFrom current: AppTab?) {
-        let newVM = ChatViewModel()
-        if let current {
-            let source = current.selectedChat
-            newVM.apiBaseURL = source.apiBaseURL
-            newVM.apiKey = source.apiKey
-            newVM.model = source.model
-            newVM.providerName = source.providerName
-            // systemPrompt is now automatically generated and cannot be copied
+        // Try to restore previous tabs
+        if let manifest = try? PersistenceService.loadJSON(TabsManifest.self, from: "tabs-manifest.json"),
+           !manifest.tabIds.isEmpty {
+            var restoredTabs: [AppTab] = []
+            for tabId in manifest.tabIds {
+                // Create a ChatTabsManager that loads its sessions for this tab
+                let chatManager = ChatTabsManager(tabId: tabId)
+                let tab = AppTab(id: tabId, title: manifest.tabTitles[tabId.uuidString] ?? "Tab", chatTabsManager: chatManager)
+                restoredTabs.append(tab)
+            }
+            self.tabs = restoredTabs
+            self.selectedId = manifest.selectedTabId ?? restoredTabs.first!.id
+        } else {
+            // Create first tab
+            let first = AppTab(title: "Tab 1")
+            self.tabs = [first]
+            self.selectedId = first.id
         }
-        let tab = AppTab(title: "Tab \(tabs.count+1)", chatViewModel: newVM)
-        tabs.append(tab)
-        selectedId = tab.id
     }
-
+    
+    var selected: AppTab? { tabs.first(where: { $0.id == selectedId }) }
+    
+    var selectedIndex: Int {
+        tabs.firstIndex(where: { $0.id == selectedId }) ?? 0
+    }
+    
+    func selectTab(id: UUID) {
+        if tabs.contains(where: { $0.id == id }) {
+            selectedId = id
+            saveManifest()
+        }
+    }
+    
+    func addTab(copySettingsFrom current: AppTab? = nil) {
+        let newTab = AppTab(title: "Tab \(tabs.count + 1)")
+        
+        // Copy chat settings from current tab's selected session if available
+        if let currentSession = current?.selectedChatSession {
+            if let newSession = newTab.chatTabsManager.sessions.first {
+                newSession.apiBaseURL = currentSession.apiBaseURL
+                newSession.apiKey = currentSession.apiKey
+                newSession.model = currentSession.model
+                newSession.providerName = currentSession.providerName
+                newSession.persistSettings()
+            }
+        }
+        
+        tabs.append(newTab)
+        selectedId = newTab.id
+        saveManifest()
+    }
+    
     func closeTab(id: UUID) {
         guard let idx = tabs.firstIndex(where: { $0.id == id }) else { return }
-        // Cancel any in-flight chat streams in the tab being closed
-        tabs[idx].chats.forEach { $0.cancelStreaming() }
+        
+        // Cleanup the tab being closed
+        tabs[idx].cleanup()
         tabs.remove(at: idx)
+        
         if tabs.isEmpty {
-            addTab(copyFrom: nil)
-        } else if selectedId == id {
-            selectedId = tabs[min(idx, tabs.count-1)].id
-        }
-    }
-
-    // MARK: - Per-tab chat management
-    func addChatToSelectedTab(copyFrom currentChat: ChatViewModel?) {
-        guard let currentTab = selected else { return }
-        let newVM = ChatViewModel()
-        // Copy only provider configuration; do not copy messages
-        if let currentChat {
-            newVM.apiBaseURL = currentChat.apiBaseURL
-            newVM.apiKey = currentChat.apiKey
-            newVM.model = currentChat.model
-            newVM.providerName = currentChat.providerName
-            // systemPrompt is now automatically generated and cannot be copied
-            // Do not reuse availableModels/modelFetchError references; fetch fresh on demand
-        }
-        currentTab.chats.append(newVM)
-        currentTab.selectedChatIndex = currentTab.chats.count - 1
-        // Optionally, initialize with a system message similar to clearChat()
-    }
-    func closeSelectedChat() {
-        guard let currentTab = selected else { return }
-        guard !currentTab.chats.isEmpty else { return }
-        let idx = currentTab.selectedChatIndex
-        let removed = currentTab.chats[idx]
-        removed.cancelStreaming()
-        currentTab.chats.remove(at: idx)
-        currentTab.selectedChatIndex = max(0, min(idx, currentTab.chats.count - 1))
-        if currentTab.chats.isEmpty {
-            // Preserve provider/model settings when recreating the baseline chat
-            let newVM = ChatViewModel()
-            newVM.apiBaseURL = removed.apiBaseURL
-            newVM.apiKey = removed.apiKey
-            newVM.model = removed.model
-            newVM.providerName = removed.providerName
-            // systemPrompt is now automatically generated and cannot be copied
-            newVM.availableModels = removed.availableModels
-            newVM.modelFetchError = removed.modelFetchError
-            currentTab.chats = [newVM]
-            currentTab.selectedChatIndex = 0
-        }
-    }
-
-    func closeChatInSelectedTab(at index: Int) {
-        guard let currentTab = selected else { return }
-        guard index >= 0 && index < currentTab.chats.count else { return }
-        // If this is the only chat, just clear its content instead of removing
-        if currentTab.chats.count == 1 {
-            currentTab.chats[index].clearChat()
-            currentTab.selectedChatIndex = 0
-            return
-        }
-        let removed = currentTab.chats[index]
-        removed.cancelStreaming()
-        currentTab.chats.remove(at: index)
-        if currentTab.chats.isEmpty {
-            // Recreate a fresh chat with the same provider/model configuration
-            let newVM = ChatViewModel()
-            newVM.apiBaseURL = removed.apiBaseURL
-            newVM.apiKey = removed.apiKey
-            newVM.model = removed.model
-            newVM.providerName = removed.providerName
-            // systemPrompt is now automatically generated and cannot be copied
-            newVM.availableModels = removed.availableModels
-            newVM.modelFetchError = removed.modelFetchError
-            currentTab.chats = [newVM]
-            currentTab.selectedChatIndex = 0
+            // Create a new tab if we closed the last one
+            addTab(copySettingsFrom: nil)
         } else {
-            if currentTab.selectedChatIndex >= currentTab.chats.count {
-                currentTab.selectedChatIndex = currentTab.chats.count - 1
-            }
-            // If we closed the currently selected one, move selection to the next valid index
-            if currentTab.selectedChatIndex == index {
-                currentTab.selectedChatIndex = min(index, currentTab.chats.count - 1)
+            // Reindex remaining tab titles
+            reindexTabTitles()
+            
+            if selectedId == id {
+                // Select adjacent tab
+                selectedId = tabs[min(idx, tabs.count - 1)].id
             }
         }
+        
+        saveManifest()
+    }
+    
+    /// Reindex tab titles after deletion to maintain sequential numbering
+    private func reindexTabTitles() {
+        for (index, tab) in tabs.enumerated() {
+            // Only update tabs with default "Tab N" naming pattern
+            if tab.title.hasPrefix("Tab ") {
+                tab.title = "Tab \(index + 1)"
+            }
+        }
+    }
+    
+    func closeCurrentTab() {
+        closeTab(id: selectedId)
+    }
+    
+    // Select next tab (for Cmd+Shift+])
+    func selectNextTab() {
+        guard tabs.count > 1 else { return }
+        let currentIdx = selectedIndex
+        let nextIdx = (currentIdx + 1) % tabs.count
+        selectedId = tabs[nextIdx].id
+    }
+    
+    // Select previous tab (for Cmd+Shift+[)
+    func selectPreviousTab() {
+        guard tabs.count > 1 else { return }
+        let currentIdx = selectedIndex
+        let prevIdx = currentIdx > 0 ? currentIdx - 1 : tabs.count - 1
+        selectedId = tabs[prevIdx].id
+    }
+    
+    // Select tab by number (1-indexed, for Cmd+1-9)
+    func selectTabByNumber(_ num: Int) {
+        let index = num - 1  // Convert to 0-indexed
+        guard index >= 0 && index < tabs.count else { return }
+        selectedId = tabs[index].id
+    }
+    
+    // MARK: - Persistence
+    func saveManifest() {
+        var titles: [String: String] = [:]
+        for tab in tabs {
+            titles[tab.id.uuidString] = tab.title
+        }
+        let manifest = TabsManifest(
+            tabIds: tabs.map { $0.id },
+            selectedTabId: selectedId,
+            tabTitles: titles
+        )
+        try? PersistenceService.saveJSON(manifest, to: "tabs-manifest.json")
+        
+        // Also save each tab's chat sessions
+        for tab in tabs {
+            tab.chatTabsManager.saveSessions()
+        }
+    }
+    
+    func saveAllSessions() {
+        saveManifest()
     }
 }
 
-
+// MARK: - Supporting Types
+private struct TabsManifest: Codable {
+    let tabIds: [UUID]
+    let selectedTabId: UUID?
+    let tabTitles: [String: String]
+}

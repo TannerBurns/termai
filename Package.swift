@@ -21,7 +21,9 @@ let package = Package(
                 .product(name: "Down", package: "Down")
             ],
             path: "Sources/TermAI",
-            resources: []
+            resources: [
+                .copy("Resources")
+            ]
         )
     ]
 )

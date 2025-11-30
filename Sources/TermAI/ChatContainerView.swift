@@ -4,8 +4,6 @@ import SwiftUI
 struct ChatContainerView: View {
     @EnvironmentObject var tabsManager: ChatTabsManager
     let ptyModel: PTYModel
-
-    @State private var refreshID = UUID() // Force refresh when model changes
     
     var body: some View {
         VStack(spacing: 0) {
@@ -29,62 +27,46 @@ struct ChatContainerView: View {
                 }
                 
                 Spacer()
-                
-
             }
-            .padding(8)
-            
-
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial)
             
             // Tab bar below header
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     ForEach(Array(tabsManager.sessions.enumerated()), id: \.element.id) { index, session in
                         let isSelected = session.id == tabsManager.selectedSessionId
                         
-                        HStack(spacing: 4) {
-                            Button(action: {
-                                tabsManager.selectSession(id: session.id)
-                            }) {
-                                Text(session.sessionTitle.isEmpty ? "Chat \(index + 1)" : session.sessionTitle)
-                                    .lineLimit(1)
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.plain)
-                            
-                            Button(action: {
-                                tabsManager.closeSession(at: index)
-                            }) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(.secondary)
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Close Chat")
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule().fill(
-                                isSelected ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.15)
-                            )
+                        ChatTabPill(
+                            session: session,
+                            index: index,
+                            isSelected: isSelected,
+                            onSelect: { tabsManager.selectSession(id: session.id) },
+                            onClose: { tabsManager.closeSession(at: index) }
                         )
                     }
                     
-                    // New tab button
+                    // New chat button
                     Button(action: {
                         _ = tabsManager.createNewSession(copySettingsFrom: tabsManager.selectedSession)
                     }) {
                         Image(systemName: "plus")
                             .font(.caption)
+                            .foregroundColor(.secondary)
+                            .frame(width: 20, height: 20)
+                            .background(
+                                Circle()
+                                    .fill(Color.primary.opacity(0.05))
+                            )
                     }
-                    .buttonStyle(.borderless)
-                    .help("New Chat Tab")
+                    .buttonStyle(.plain)
+                    .help("New Chat Session (⇧⌘T)")
                 }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 6)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
             }
-            .frame(height: 32)
+            .background(.ultraThinMaterial.opacity(0.5))
             
             Divider()
             
@@ -126,6 +108,53 @@ struct ChatContainerView: View {
                 Color.clear
             }
         }
+        .background(.regularMaterial)
+    }
+}
+
+// MARK: - Chat Tab Pill
+private struct ChatTabPill: View {
+    @ObservedObject var session: ChatSession
+    let index: Int
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+    
+    @State private var isHovered: Bool = false
+    @State private var closeHovered: Bool = false
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            Button(action: onSelect) {
+                Text(session.sessionTitle.isEmpty ? "Chat \(index + 1)" : session.sessionTitle)
+                    .lineLimit(1)
+                    .font(.caption)
+                    .foregroundColor(isSelected ? .primary : .secondary)
+            }
+            .buttonStyle(.plain)
+            
+            if isSelected || isHovered {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(closeHovered ? .primary : .secondary)
+                }
+                .buttonStyle(.plain)
+                .onHover { closeHovered = $0 }
+                .help("Close Chat (⇧⌘W)")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(isSelected ? Color.accentColor.opacity(0.2) : (isHovered ? Color.primary.opacity(0.05) : Color.clear))
+        )
+        .overlay(
+            Capsule()
+                .stroke(isSelected ? Color.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+        )
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -186,7 +215,7 @@ private struct SessionHeaderView: View {
                     .frame(width: 72, alignment: .leading)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.gray.opacity(0.15)))
+                    .background(Capsule().fill(.ultraThinMaterial))
             }
             .controlSize(.mini)
             .menuStyle(.borderlessButton)
@@ -241,7 +270,7 @@ private struct SessionHeaderView: View {
                         .layoutPriority(2)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.gray.opacity(0.15)))
+                        .background(Capsule().fill(.ultraThinMaterial))
                 }
             }
             .controlSize(.mini)

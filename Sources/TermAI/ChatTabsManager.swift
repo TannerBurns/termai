@@ -7,7 +7,11 @@ final class ChatTabsManager: ObservableObject {
     @Published var sessions: [ChatSession] = []
     @Published var selectedSessionId: UUID?
     
-    init() {
+    /// Optional tab ID for scoped persistence (when used within an AppTab)
+    private let tabId: UUID?
+    
+    init(tabId: UUID? = nil) {
+        self.tabId = tabId
         // Try to restore previous sessions
         loadSessions()
         
@@ -84,12 +88,19 @@ final class ChatTabsManager: ObservableObject {
     
     // MARK: - Persistence
     
+    private var manifestFileName: String {
+        if let tabId = tabId {
+            return "sessions-manifest-\(tabId.uuidString).json"
+        }
+        return "sessions-manifest.json"
+    }
+    
     func saveSessions() {
         let sessionData = SessionsData(
             sessionIds: sessions.map { $0.id },
             selectedSessionId: selectedSessionId
         )
-        try? PersistenceService.saveJSON(sessionData, to: "sessions-manifest.json")
+        try? PersistenceService.saveJSON(sessionData, to: manifestFileName)
         
         // Also make sure each session saves its settings
         for session in sessions {
@@ -99,7 +110,7 @@ final class ChatTabsManager: ObservableObject {
     }
     
     private func loadSessions() {
-        guard let sessionData = try? PersistenceService.loadJSON(SessionsData.self, from: "sessions-manifest.json") else {
+        guard let sessionData = try? PersistenceService.loadJSON(SessionsData.self, from: manifestFileName) else {
             return
         }
         
