@@ -775,30 +775,46 @@ final class ChatSession: ObservableObject, Identifiable {
         var accumulated = ""
         let index = assistantIndex
         
+        // Throttle UI updates to reduce overhead during streaming
+        let updateInterval: TimeInterval = 0.05  // 50ms between UI updates
+        var lastUpdateTime = Date.distantPast
+        
         streamLoop: for try await line in bytes.lines {
             guard line.hasPrefix("data:") else { continue }
             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if payload == "[DONE]" { break streamLoop }
             guard let data = payload.data(using: .utf8) else { continue }
             
+            var didAccumulate = false
+            
             if let chunk = try? JSONDecoder().decode(OpenAIStreamChunk.self, from: data) {
                 if let delta = chunk.choices.first?.delta?.content, !delta.isEmpty {
                     accumulated += delta
-                    if Task.isCancelled { break streamLoop }
-                    messages[index].content = accumulated
-                    // Force UI update on each chunk
-                    messages = messages
+                    didAccumulate = true
                 }
             } else if let ollama = try? JSONDecoder().decode(OllamaStreamChunk.self, from: data) {
                 if let content = ollama.message?.content ?? ollama.response {
                     accumulated += content
-                    if Task.isCancelled { break streamLoop }
+                    didAccumulate = true
+                }
+            }
+            
+            if didAccumulate {
+                if Task.isCancelled { break streamLoop }
+                
+                // Only update UI if enough time has passed since last update
+                let now = Date()
+                if now.timeIntervalSince(lastUpdateTime) >= updateInterval {
                     messages[index].content = accumulated
-                    // Force UI update on each chunk
                     messages = messages
+                    lastUpdateTime = now
                 }
             }
         }
+        
+        // Ensure final state is always reflected in UI
+        messages[index].content = accumulated
+        messages = messages
         
         return accumulated
     }
@@ -844,7 +860,8 @@ final class ChatSession: ObservableObject, Identifiable {
                     self.availableModels = names
                     if names.isEmpty {
                         self.modelFetchError = "No models found on Ollama"
-                    } else if self.model.isEmpty || !names.contains(self.model) {
+                    } else if self.model.isEmpty {
+                        // Only auto-select if no model is set; preserve user's persisted model
                         self.model = names.first ?? self.model
                     }
                     self.persistSettings()
@@ -878,7 +895,8 @@ final class ChatSession: ObservableObject, Identifiable {
                     self.availableModels = ids
                     if ids.isEmpty {
                         self.modelFetchError = "No models available"
-                    } else if self.model.isEmpty || !ids.contains(self.model) {
+                    } else if self.model.isEmpty {
+                        // Only auto-select if no model is set; preserve user's persisted model
                         self.model = ids.first ?? self.model
                     }
                     self.persistSettings()

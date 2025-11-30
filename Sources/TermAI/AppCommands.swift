@@ -14,9 +14,13 @@ struct AppCommands: Commands {
             .keyboardShortcut("t", modifiers: [.command])
             
             Button("New Chat Session") {
-                _ = tabsStore.selected?.chatTabsManager.createNewSession(
-                    copySettingsFrom: tabsStore.selected?.chatTabsManager.selectedSession
-                )
+                // Ensure we have a selected tab; if not, create one first
+                if tabsStore.selected == nil && !tabsStore.tabs.isEmpty {
+                    tabsStore.selectedId = tabsStore.tabs[0].id
+                }
+                if let chatManager = tabsStore.selected?.chatTabsManager {
+                    _ = chatManager.createNewSession(copySettingsFrom: chatManager.selectedSession)
+                }
             }
             .keyboardShortcut("t", modifiers: [.command, .shift])
             
