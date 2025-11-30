@@ -3,11 +3,12 @@ import AppKit
 
 // Global configuration for verbose agent logging
 struct AgentDebugConfig {
-    static var verboseLogging: Bool = {
-        // Check for --verbose flag in command line arguments
-        return CommandLine.arguments.contains("--verbose") || 
+    static var verboseLogging: Bool {
+        // Check settings, command line flag, or environment variable
+        return AgentSettings.shared.verboseLogging ||
+               CommandLine.arguments.contains("--verbose") || 
                ProcessInfo.processInfo.environment["TERMAI_VERBOSE"] != nil
-    }()
+    }
     
     static func log(_ message: String) {
         #if DEBUG
@@ -567,16 +568,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showSettings() {
-        // Open the SwiftUI Settings scene
+        // Activate the app first
         NSApp.activate(ignoringOtherApps: true)
+        
+        // Try to find and show existing settings window
         for window in NSApp.windows {
-            if window.title.contains("Settings") {
+            // Check various ways the settings window might be identified
+            let title = window.title.lowercased()
+            let identifier = window.identifier?.rawValue.lowercased() ?? ""
+            if title.contains("settings") || title.contains("preferences") ||
+               identifier.contains("settings") || identifier.contains("preferences") ||
+               window.contentViewController?.className.contains("Settings") == true {
                 window.makeKeyAndOrderFront(nil)
                 return
             }
         }
-        // Fallback: present settings scene by toggling the menu command
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        
+        // Simulate Cmd+, keyboard shortcut to open settings
+        // This is the most reliable way to trigger the Settings scene
+        let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: ",",
+            charactersIgnoringModifiers: ",",
+            isARepeat: false,
+            keyCode: 43  // keyCode for comma
+        )
+        if let event = event {
+            NSApp.sendEvent(event)
+        }
     }
 
     @objc private func quitApp() {
