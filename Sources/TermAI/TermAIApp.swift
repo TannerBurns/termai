@@ -348,25 +348,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         
-        // Set Dock/app icon to dedicated Dock asset if available
-        // Try module bundle first (for SPM), then main bundle (for app bundle)
+        // Set Dock/app icon with proper macOS-style rounded rect background
         let dockIcon: NSImage? = {
-            // Try SPM module bundle
-            if let url = Bundle.module.url(forResource: "termAIDock", withExtension: "icns", subdirectory: "Resources"),
-               let img = NSImage(contentsOf: url) {
-                return img
+            // Load the original icon
+            let originalIcon: NSImage? = {
+                if let url = Bundle.module.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
+                   let img = NSImage(contentsOf: url) {
+                    return img
+                }
+                if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png"),
+                   let img = NSImage(contentsOf: url) {
+                    return img
+                }
+                return nil
+            }()
+            
+            guard let original = originalIcon else { return nil }
+            
+            // Standard macOS app icon canvas size
+            let canvasSize: CGFloat = 1024
+            let iconSize = NSSize(width: canvasSize, height: canvasSize)
+            
+            // macOS icons have ~10% padding on each side (icon is ~80% of canvas)
+            let padding: CGFloat = canvasSize * 0.10
+            let visibleSize = canvasSize - (padding * 2)
+            let iconRect = NSRect(x: padding, y: padding, width: visibleSize, height: visibleSize)
+            
+            // macOS uses ~22.37% corner radius relative to the visible icon size
+            let cornerRadius = visibleSize * 0.2237
+            
+            let finalIcon = NSImage(size: iconSize, flipped: false) { fullRect in
+                // Create the rounded rect path for the visible icon area
+                let path = NSBezierPath(roundedRect: iconRect, xRadius: cornerRadius, yRadius: cornerRadius)
+                
+                // Fill with white background
+                NSColor.white.setFill()
+                path.fill()
+                
+                // Clip to the rounded rect and draw the icon
+                NSGraphicsContext.saveGraphicsState()
+                path.addClip()
+                original.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+                NSGraphicsContext.restoreGraphicsState()
+                
+                return true
             }
-            // Try main bundle directly
-            if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "icns"),
-               let img = NSImage(contentsOf: url) {
-                return img
-            }
-            // Try main bundle Resources subdirectory
-            if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "icns", subdirectory: "Resources"),
-               let img = NSImage(contentsOf: url) {
-                return img
-            }
-            return nil
+            
+            return finalIcon
         }()
         
         if let icon = dockIcon {
@@ -394,19 +422,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let btn = item.button {
             btn.title = ""
-            // Prefer dedicated toolbar icns, then dock/app icon, then legacy assets
-            let iconImage: NSImage? = findIcon(named: "termAIToolbar")
-                ?? findIcon(named: "termAIDock")
-                ?? findIcon(named: "TermAI")
-                ?? findPNG(named: "termai")
-                ?? NSApp.applicationIconImage
+            // Use termAIDock icon as monochrome template for menu bar
+            let originalIcon: NSImage? = {
+                // Try termAIDock.png from module bundle
+                if let url = Bundle.module.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
+                   let img = NSImage(contentsOf: url) {
+                    return img
+                }
+                // Try from main bundle
+                if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png"),
+                   let img = NSImage(contentsOf: url) {
+                    return img
+                }
+                return nil
+            }()
             
-            if let icon = iconImage {
-                icon.isTemplate = false
-                icon.size = NSSize(width: 18, height: 18)
-                btn.image = icon
+            if let original = originalIcon {
+                // Create a monochrome template version at menu bar size
+                let size = NSSize(width: 18, height: 18)
+                let templateIcon = NSImage(size: size, flipped: false) { rect in
+                    original.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0)
+                    return true
+                }
+                templateIcon.isTemplate = true
+                btn.image = templateIcon
                 btn.imagePosition = .imageOnly
-                btn.imageScaling = .scaleProportionallyDown
             }
         }
         
