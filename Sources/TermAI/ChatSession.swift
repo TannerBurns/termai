@@ -1,6 +1,28 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Chat Message Types
+
+struct AgentEvent: Codable, Equatable {
+    var kind: String // "status", "step", "summary"
+    var title: String
+    var details: String? = nil
+    var command: String? = nil
+    var output: String? = nil
+    var collapsed: Bool? = true
+}
+
+struct ChatMessage: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
+    var role: String
+    var content: String
+    var terminalContext: String? = nil
+    var terminalContextMeta: TerminalContextMeta? = nil
+    var agentEvent: AgentEvent? = nil
+}
+
+// MARK: - Chat Session
+
 /// A completely self-contained chat session with its own state, messages, and streaming
 @MainActor
 final class ChatSession: ObservableObject, Identifiable {

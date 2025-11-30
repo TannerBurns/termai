@@ -68,48 +68,65 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     override func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
         super.rangeChanged(source: source, startY: startY, endY: endY)
         let selection = self.getSelection() ?? ""
-        // Update lightweight state immediately without heavy buffer copies
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self, let model = self.bridgeModel else { return }
-            model.hasSelection = !selection.isEmpty
-            model.visibleRows = self.terminal.rows
-        }
-        // Only perform heavy buffer processing when actively capturing command output
-        guard let model = bridgeModel, (model.captureActive || model.lastSentCommandForCapture != nil) else { return }
+        guard let model = bridgeModel else { return }
+        
+        // Always get the terminal buffer for last output tracking
         let data = self.getTerminal().getBufferAsData()
         let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+        
+        let isAgentCapture = model.captureActive || model.lastSentCommandForCapture != nil
+        
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let model = self.bridgeModel else { return }
-            // Determine last output chunk
+            
+            // Update lightweight state
+            model.hasSelection = !selection.isEmpty
+            model.visibleRows = self.terminal.rows
+            
+            // Always try to extract CWD from prompt or title
+            if let extractedCwd = Self.extractCwdFromBuffer(text) {
+                model.currentWorkingDirectory = extractedCwd
+            }
+            
+            // Always compute last output chunk for the "Add Last Output" button
             var newChunk = ""
-            if let start = model.lastOutputStartOffset, start <= text.count {
+            if let start = model.lastOutputStartOffset, start < text.count {
                 let idx = text.index(text.startIndex, offsetBy: start)
                 newChunk = String(text[idx...])
             }
-            var trimmedChunk = Self.trimPrompt(from: newChunk)
-            if let lastCmd = model.lastSentCommandForCapture, !lastCmd.isEmpty {
-                trimmedChunk = Self.trimEcho(of: lastCmd, from: trimmedChunk)
+            
+            // For normal use, just clean up the output minimally
+            var trimmedChunk = Self.cleanOutput(from: newChunk)
+            
+            // Only do agent-specific processing (echo trim, marker extraction) when in capture mode
+            if isAgentCapture {
+                if let lastCmd = model.lastSentCommandForCapture, !lastCmd.isEmpty {
+                    trimmedChunk = Self.trimEcho(of: lastCmd, from: trimmedChunk)
+                }
+                // Extract and remove both exit code and cwd markers if present
+                let rcProcessed = Self.stripExitCodeMarker(from: trimmedChunk)
+                trimmedChunk = rcProcessed.cleaned
+                if let rc = rcProcessed.code { model.lastExitCode = rc }
+                let cwdProcessed = Self.stripCwdMarker(from: trimmedChunk)
+                trimmedChunk = cwdProcessed.cleaned
+                if let cwd = cwdProcessed.cwd, !cwd.isEmpty {
+                    model.currentWorkingDirectory = cwd
+                }
+                model.previousBuffer = text
+                model.collectedOutput = text
             }
-            // Extract and remove both exit code and cwd markers if present
-            let rcProcessed = Self.stripExitCodeMarker(from: trimmedChunk)
-            trimmedChunk = rcProcessed.cleaned
-            if let rc = rcProcessed.code { model.lastExitCode = rc }
-            let cwdProcessed = Self.stripCwdMarker(from: trimmedChunk)
-            trimmedChunk = cwdProcessed.cleaned
-            if let cwd = cwdProcessed.cwd, !cwd.isEmpty {
-                model.currentWorkingDirectory = cwd
-            }
-            if !trimmedChunk.isEmpty {
-                model.lastOutputChunk = trimmedChunk
+            
+            // Always update lastOutputChunk for UI buttons (keep raw if cleaned is empty)
+            let finalChunk = trimmedChunk.isEmpty ? newChunk.trimmingCharacters(in: .whitespacesAndNewlines) : trimmedChunk
+            if !finalChunk.isEmpty {
+                model.lastOutputChunk = finalChunk
                 // Also compute line range based on viewport start
                 if let startRow = model.lastOutputStartViewportRow {
                     let rows = self.terminal.rows
-                    let chunkLines = trimmedChunk.split(separator: "\n", omittingEmptySubsequences: false).count
+                    let chunkLines = finalChunk.split(separator: "\n", omittingEmptySubsequences: false).count
                     model.lastOutputLineRange = (start: max(0, startRow), end: min(rows - 1, max(0, startRow + chunkLines - 1)))
                 }
             }
-            model.previousBuffer = text
-            model.collectedOutput = text
         }
     }
 
@@ -121,6 +138,96 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
         super.send(source: source, data: data)
     }
 
+    /// Extract CWD from terminal buffer by looking for common prompt patterns
+    private static func extractCwdFromBuffer(_ buffer: String) -> String? {
+        // Look for the last line that looks like a prompt with a path
+        let lines = buffer.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        
+        for line in lines.reversed() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // Common prompt patterns: "user@host:~/path$" or "~/path %"
+            // Look for ~ or / followed by path characters before $ or %
+            if let match = trimmed.range(of: #"[~\/][^\s$%#]*"#, options: .regularExpression) {
+                let path = String(trimmed[match])
+                // Expand ~ to home directory
+                if path.hasPrefix("~") {
+                    let home = FileManager.default.homeDirectoryForCurrentUser.path
+                    return home + path.dropFirst()
+                } else if path.hasPrefix("/") {
+                    return path
+                }
+            }
+            
+            // Also try to match OSC sequences that set working directory
+            // Format: \x1b]7;file://hostname/path\x07 or \x1b]7;file:///path\x07
+            if let oscRange = trimmed.range(of: #"\x1b\]7;file://[^\x07]*\x07"#, options: .regularExpression) {
+                let oscContent = String(trimmed[oscRange])
+                if let pathStart = oscContent.range(of: "file://")?.upperBound {
+                    var pathPart = String(oscContent[pathStart...])
+                    // Remove trailing bell character
+                    pathPart = pathPart.replacingOccurrences(of: "\u{07}", with: "")
+                    // Skip hostname if present (look for second /)
+                    if !pathPart.hasPrefix("/") {
+                        if let slashIdx = pathPart.firstIndex(of: "/") {
+                            pathPart = String(pathPart[slashIdx...])
+                        }
+                    }
+                    if !pathPart.isEmpty {
+                        // URL decode the path
+                        return pathPart.removingPercentEncoding ?? pathPart
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Clean output without being too aggressive - just remove trailing prompt lines
+    private static func cleanOutput(from chunk: String) -> String {
+        var lines = chunk.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        
+        // Remove trailing empty lines and prompt lines
+        while let last = lines.last {
+            let t = last.trimmingCharacters(in: .whitespaces)
+            // Only remove if it's clearly a prompt or empty
+            if t.isEmpty {
+                lines.removeLast()
+            } else if Self.looksLikePrompt(t) {
+                lines.removeLast()
+            } else {
+                break
+            }
+        }
+        
+        // Remove leading empty lines
+        while let first = lines.first, first.trimmingCharacters(in: .whitespaces).isEmpty {
+            lines.removeFirst()
+        }
+        
+        return lines.joined(separator: "\n")
+    }
+    
+    /// Check if a line looks like a shell prompt
+    private static func looksLikePrompt(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // Common prompt endings
+        if trimmed.hasSuffix("$") || trimmed.hasSuffix("%") || trimmed.hasSuffix("#") ||
+           trimmed.hasSuffix("$ ") || trimmed.hasSuffix("% ") || trimmed.hasSuffix("# ") {
+            // Make sure it's not just output that happens to end with these
+            // Prompts typically have user@host or path patterns
+            if trimmed.contains("@") || trimmed.contains("~") || trimmed.contains(":") {
+                return true
+            }
+            // Short lines ending with prompt chars are likely prompts
+            if trimmed.count < 80 {
+                return true
+            }
+        }
+        return false
+    }
+    
     private static func trimPrompt(from chunk: String) -> String {
         var lines = chunk.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         while let last = lines.last {
@@ -279,7 +386,18 @@ struct SwiftTermView: NSViewRepresentable {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let escaped = home.replacingOccurrences(of: "\"", with: "\\\"")
         let cmd = "cd \"\(escaped)\"; exec /bin/zsh -l"
-        term.startProcess(executable: "/bin/zsh", args: ["-lc", cmd])
+        
+        // Build environment with color support enabled
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "xterm-256color"     // Full color support
+        env["CLICOLOR"] = "1"              // Enable colors for ls, etc.
+        env["CLICOLOR_FORCE"] = "1"        // Force colors even if not a TTY
+        env["COLORTERM"] = "truecolor"     // Indicate true color support
+        env["LSCOLORS"] = "GxFxCxDxBxegedabagaced"  // macOS ls colors
+        env["LS_COLORS"] = "di=1;36:ln=1;35:so=1;32:pi=1;33:ex=1;31:bd=34;46:cd=34;43:su=30;41:sg=30;46:tw=30;42:ow=34;43"  // GNU ls colors
+        
+        let envArray = env.map { "\($0.key)=\($0.value)" }
+        term.startProcess(executable: "/bin/zsh", args: ["-lc", cmd], environment: envArray)
         // Apply initial theme
         if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {
             term.apply(theme: theme)
