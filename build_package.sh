@@ -102,6 +102,14 @@ if [[ -n "$TBAR_SRC" && -f "$TBAR_SRC" ]]; then
   cp "$TBAR_SRC" "$APP_DIR/Contents/Resources/termAIToolbar.icns"
 fi
 
+# Copy PNG files needed for programmatic icon generation
+if [[ -f "$ROOT/Icons/termAIDock.png" ]]; then
+  cp "$ROOT/Icons/termAIDock.png" "$APP_DIR/Contents/Resources/termAIDock.png"
+fi
+if [[ -f "$ROOT/Icons/termAIToolbar.png" ]]; then
+  cp "$ROOT/Icons/termAIToolbar.png" "$APP_DIR/Contents/Resources/termAIToolbar.png"
+fi
+
 if [[ -n "$DEVELOPER_ID" ]]; then
   step 4 "Signing with Developer ID…"
   codesign --force --deep --options runtime --timestamp --sign "$DEVELOPER_ID" "$APP_DIR"
