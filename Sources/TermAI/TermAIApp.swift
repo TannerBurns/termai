@@ -196,17 +196,29 @@ struct AppTabPill: View {
 struct AppTabContentView: View {
     @ObservedObject var tab: AppTab
     @State private var showChat: Bool = true
-    @State private var chatWidthRatio: CGFloat = 0.35  // Chat takes 35% by default
+    @State private var terminalWidth: CGFloat = 0
     @State private var isDragging: Bool = false
+    @State private var dragStartWidth: CGFloat = 0
     
     private let minChatWidth: CGFloat = 380
     private let minTerminalWidth: CGFloat = 400
+    private let dividerWidth: CGFloat = 16
     
     var body: some View {
         GeometryReader { geometry in
             let totalWidth = geometry.size.width
-            let chatWidth = showChat ? max(totalWidth * chatWidthRatio, minChatWidth) : 0
-            let terminalWidth = showChat ? max(totalWidth - chatWidth, minTerminalWidth) : totalWidth
+            
+            // Initialize terminal width if not set
+            let effectiveTerminalWidth: CGFloat = {
+                if terminalWidth == 0 {
+                    // Default: terminal takes 65% of space
+                    return max(minTerminalWidth, (totalWidth - dividerWidth) * 0.65)
+                }
+                return terminalWidth
+            }()
+            
+            let chatWidth = showChat ? max(minChatWidth, totalWidth - effectiveTerminalWidth - dividerWidth) : 0
+            let actualTerminalWidth = showChat ? max(minTerminalWidth, totalWidth - chatWidth - dividerWidth) : totalWidth
             
             HStack(spacing: 0) {
                 // Terminal pane (owned by this tab)
@@ -219,19 +231,24 @@ struct AppTabContentView: View {
                     onToggleChat: { showChat.toggle() }
                 )
                 .environmentObject(tab.ptyModel)
-                .frame(width: terminalWidth)
+                .frame(width: actualTerminalWidth)
                 
                 // Resizable divider and chat pane
                 if showChat {
                     // Draggable divider
                     ResizableDivider(isDragging: $isDragging)
                         .gesture(
-                            DragGesture(minimumDistance: 1)
+                            DragGesture(minimumDistance: 0, coordinateSpace: .global)
                                 .onChanged { value in
-                                    isDragging = true
-                                    let newChatWidth = totalWidth - value.location.x
-                                    let clampedWidth = max(minChatWidth, min(newChatWidth, totalWidth - minTerminalWidth))
-                                    chatWidthRatio = clampedWidth / totalWidth
+                                    if !isDragging {
+                                        // Capture starting width when drag begins
+                                        isDragging = true
+                                        dragStartWidth = actualTerminalWidth
+                                    }
+                                    // Calculate new terminal width based on drag translation
+                                    let newWidth = dragStartWidth + value.translation.width
+                                    let maxTerminalWidth = totalWidth - minChatWidth - dividerWidth
+                                    terminalWidth = max(minTerminalWidth, min(newWidth, maxTerminalWidth))
                                 }
                                 .onEnded { _ in
                                     isDragging = false
@@ -243,6 +260,20 @@ struct AppTabContentView: View {
                         .frame(width: chatWidth)
                 }
             }
+            .onAppear {
+                // Set initial terminal width
+                if terminalWidth == 0 {
+                    terminalWidth = max(minTerminalWidth, (totalWidth - dividerWidth) * 0.65)
+                }
+            }
+            .onChange(of: geometry.size.width) { newWidth in
+                // Adjust terminal width proportionally when window resizes
+                if !isDragging && terminalWidth > 0 {
+                    let ratio = terminalWidth / totalWidth
+                    let maxTerminalWidth = newWidth - minChatWidth - dividerWidth
+                    terminalWidth = max(minTerminalWidth, min(newWidth * ratio, maxTerminalWidth))
+                }
+            }
         }
     }
 }
@@ -252,27 +283,35 @@ struct ResizableDivider: View {
     @Binding var isDragging: Bool
     @State private var isHovered: Bool = false
     
+    // Wide hit area for easy grabbing
+    private let hitAreaWidth: CGFloat = 16
+    
+    private var isActive: Bool { isDragging || isHovered }
+    
     var body: some View {
-        Rectangle()
-            .fill(isDragging || isHovered ? Color.accentColor.opacity(0.6) : Color.clear)
-            .frame(width: isDragging || isHovered ? 4 : 1)
-            .background(Color.primary.opacity(0.1))
-            .overlay(
-                // Drag handle indicator
-                VStack(spacing: 2) {
-                    ForEach(0..<3, id: \.self) { _ in
-                        Capsule()
-                            .fill(Color.secondary.opacity(isDragging || isHovered ? 0.8 : 0.3))
-                            .frame(width: 4, height: 4)
-                    }
+        ZStack {
+            // Invisible hit area (wide, easy to grab)
+            Color.clear
+                .frame(width: hitAreaWidth)
+                .contentShape(Rectangle())
+            
+            // Visible divider line
+            Rectangle()
+                .fill(isActive ? Color.accentColor : Color.primary.opacity(0.15))
+                .frame(width: isActive ? 3 : 1)
+            
+            // Drag handle indicator (dots)
+            VStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle()
+                        .fill(isActive ? Color.accentColor : Color.secondary.opacity(0.4))
+                        .frame(width: 5, height: 5)
                 }
-                .opacity(isDragging || isHovered ? 1 : 0)
-            )
-            .contentShape(Rectangle().size(width: 12, height: .infinity))
-            .onHover { isHovered = $0 }
-            .cursor(NSCursor.resizeLeftRight)
-            .animation(.easeInOut(duration: 0.15), value: isDragging)
-            .animation(.easeInOut(duration: 0.15), value: isHovered)
+            }
+        }
+        .frame(width: hitAreaWidth)
+        .onHover { isHovered = $0 }
+        .cursor(NSCursor.resizeLeftRight)
     }
 }
 
@@ -350,13 +389,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         
         // Set Dock/app icon with proper macOS-style rounded rect background
         let dockIcon: NSImage? = {
-            // Load the original icon
+            // Load the original icon - check multiple bundle locations
             let originalIcon: NSImage? = {
+                // SPM module bundle (swift run)
                 if let url = Bundle.module.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
                    let img = NSImage(contentsOf: url) {
                     return img
                 }
+                // Main bundle directly (app bundle)
                 if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png"),
+                   let img = NSImage(contentsOf: url) {
+                    return img
+                }
+                // Main bundle Resources subdirectory
+                if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
                    let img = NSImage(contentsOf: url) {
                     return img
                 }
@@ -424,13 +470,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             btn.title = ""
             // Use termAIDock icon as monochrome template for menu bar
             let originalIcon: NSImage? = {
-                // Try termAIDock.png from module bundle
+                // SPM module bundle (swift run)
                 if let url = Bundle.module.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
                    let img = NSImage(contentsOf: url) {
                     return img
                 }
-                // Try from main bundle
+                // Main bundle directly (app bundle)
                 if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png"),
+                   let img = NSImage(contentsOf: url) {
+                    return img
+                }
+                // Main bundle Resources subdirectory
+                if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
                    let img = NSImage(contentsOf: url) {
                     return img
                 }

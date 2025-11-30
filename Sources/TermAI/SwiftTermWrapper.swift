@@ -43,6 +43,10 @@ import SwiftTerm
 private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     weak var bridgeModel: PTYModel?
     
+    // Debounce timer for non-agent buffer processing
+    private var debounceWorkItem: DispatchWorkItem?
+    private let debounceInterval: TimeInterval = 0.15  // 150ms debounce
+    
     func markOutputStart() {
         let buffer = self.getTerminal().getBufferAsData()
         let text = String(data: buffer, encoding: .utf8) ?? String(data: buffer, encoding: .isoLatin1) ?? ""
@@ -55,13 +59,15 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     }
     
     func terminateShell() {
-        // Send exit command to the shell
+        // Send exit command to the shell for graceful shutdown
         self.send(txt: "exit\n")
-        // Give it a moment to process, then force terminate if needed
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            // If process is still running after exit command, we can't force it
-            // since we don't have access to the internal process variable
-            // The exit command should handle most cases
+        // Give it a moment to process, then force terminate if still running
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            // Use the internal process property's terminate method (sends SIGTERM)
+            if self.process.running {
+                self.process.terminate()
+            }
         }
     }
 
@@ -76,6 +82,21 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
         
         let isAgentCapture = model.captureActive || model.lastSentCommandForCapture != nil
         
+        // For agent mode, process immediately without debounce
+        if isAgentCapture {
+            processBufferUpdate(selection: selection, text: text, isAgentCapture: true)
+        } else {
+            // For normal use, debounce the heavy processing
+            debounceWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.processBufferUpdate(selection: selection, text: text, isAgentCapture: false)
+            }
+            debounceWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: workItem)
+        }
+    }
+    
+    private func processBufferUpdate(selection: String, text: String, isAgentCapture: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let model = self.bridgeModel else { return }
             
@@ -380,7 +401,7 @@ struct SwiftTermView: NSViewRepresentable {
         }
         // Provide a helper for marking where the next output begins for programmatic commands
         model.markNextOutputStart = { [weak term] in
-            (term as? BridgedLocalProcessTerminalView)?.markOutputStart()
+            term?.markOutputStart()
         }
         // Start shell in user's home directory by injecting cd via login shell
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -406,8 +427,13 @@ struct SwiftTermView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
-        if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {
-            nsView.apply(theme: theme)
+        // Only apply theme when it has changed
+        let currentThemeId = model.themeId
+        if context.coordinator.lastAppliedThemeId != currentThemeId {
+            if let theme = TerminalTheme.presets.first(where: { $0.id == currentThemeId }) ?? TerminalTheme.presets.first {
+                nsView.apply(theme: theme)
+                context.coordinator.lastAppliedThemeId = currentThemeId
+            }
         }
     }
 
@@ -415,6 +441,8 @@ struct SwiftTermView: NSViewRepresentable {
 
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate, TerminalViewDelegate {
         let model: PTYModel
+        var lastAppliedThemeId: String? = nil
+        
         init(model: PTYModel) { self.model = model }
 
         // LocalProcessTerminalViewDelegate
