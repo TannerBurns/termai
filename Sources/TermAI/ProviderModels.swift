@@ -89,59 +89,70 @@ struct ModelDefinition: Identifiable, Equatable {
     let displayName: String
     let provider: CloudProvider
     let supportsReasoning: Bool
+    /// Context window size in tokens
+    let contextSize: Int
     
     static func == (lhs: ModelDefinition, rhs: ModelDefinition) -> Bool {
         lhs.id == rhs.id && lhs.provider == rhs.provider
+    }
+    
+    /// Get context size for a model by ID, with fallback to TokenEstimator
+    static func contextSize(for modelId: String) -> Int {
+        if let model = CuratedModels.find(id: modelId) {
+            return model.contextSize
+        }
+        // Fallback to TokenEstimator for unknown models
+        return TokenEstimator.contextLimit(for: modelId)
     }
 }
 
 // MARK: - Curated Model Lists
 
 struct CuratedModels {
-    /// OpenAI models with reasoning effort support info
+    /// OpenAI models with reasoning effort support info and context sizes
     static let openAI: [ModelDefinition] = [
-        // GPT-5 series (with reasoning)
-        ModelDefinition(id: "gpt-5.1", displayName: "GPT-5.1", provider: .openai, supportsReasoning: true),
-        ModelDefinition(id: "gpt-5", displayName: "GPT-5", provider: .openai, supportsReasoning: true),
-        ModelDefinition(id: "gpt-5-mini", displayName: "GPT-5 Mini", provider: .openai, supportsReasoning: true),
-        ModelDefinition(id: "gpt-5-nano", displayName: "GPT-5 Nano", provider: .openai, supportsReasoning: true),
+        // GPT-5 series (with reasoning) - 1M context
+        ModelDefinition(id: "gpt-5.1", displayName: "GPT-5.1", provider: .openai, supportsReasoning: true, contextSize: 1_000_000),
+        ModelDefinition(id: "gpt-5", displayName: "GPT-5", provider: .openai, supportsReasoning: true, contextSize: 1_000_000),
+        ModelDefinition(id: "gpt-5-mini", displayName: "GPT-5 Mini", provider: .openai, supportsReasoning: true, contextSize: 1_000_000),
+        ModelDefinition(id: "gpt-5-nano", displayName: "GPT-5 Nano", provider: .openai, supportsReasoning: true, contextSize: 1_000_000),
         
-        // O-series reasoning models
-        ModelDefinition(id: "o4-mini", displayName: "o4-mini", provider: .openai, supportsReasoning: true),
-        ModelDefinition(id: "o3", displayName: "o3", provider: .openai, supportsReasoning: true),
-        ModelDefinition(id: "o3-mini", displayName: "o3-mini", provider: .openai, supportsReasoning: true),
-        ModelDefinition(id: "o1", displayName: "o1", provider: .openai, supportsReasoning: true),
-        ModelDefinition(id: "o1-mini", displayName: "o1-mini", provider: .openai, supportsReasoning: true),
-        ModelDefinition(id: "o1-preview", displayName: "o1-preview", provider: .openai, supportsReasoning: true),
+        // O-series reasoning models - 200K context
+        ModelDefinition(id: "o4-mini", displayName: "o4-mini", provider: .openai, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "o3", displayName: "o3", provider: .openai, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "o3-mini", displayName: "o3-mini", provider: .openai, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "o1", displayName: "o1", provider: .openai, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "o1-mini", displayName: "o1-mini", provider: .openai, supportsReasoning: true, contextSize: 128_000),
+        ModelDefinition(id: "o1-preview", displayName: "o1-preview", provider: .openai, supportsReasoning: true, contextSize: 128_000),
         
-        // GPT-4.1 series (no reasoning)
-        ModelDefinition(id: "gpt-4.1", displayName: "GPT-4.1", provider: .openai, supportsReasoning: false),
-        ModelDefinition(id: "gpt-4.1-mini", displayName: "GPT-4.1 Mini", provider: .openai, supportsReasoning: false),
-        ModelDefinition(id: "gpt-4.1-nano", displayName: "GPT-4.1 Nano", provider: .openai, supportsReasoning: false),
+        // GPT-4.1 series (no reasoning) - 1M context
+        ModelDefinition(id: "gpt-4.1", displayName: "GPT-4.1", provider: .openai, supportsReasoning: false, contextSize: 1_000_000),
+        ModelDefinition(id: "gpt-4.1-mini", displayName: "GPT-4.1 Mini", provider: .openai, supportsReasoning: false, contextSize: 1_000_000),
+        ModelDefinition(id: "gpt-4.1-nano", displayName: "GPT-4.1 Nano", provider: .openai, supportsReasoning: false, contextSize: 1_000_000),
         
-        // GPT-4o series (no reasoning)
-        ModelDefinition(id: "gpt-4o", displayName: "GPT-4o", provider: .openai, supportsReasoning: false),
-        ModelDefinition(id: "gpt-4o-mini", displayName: "GPT-4o Mini", provider: .openai, supportsReasoning: false),
+        // GPT-4o series (no reasoning) - 128K context
+        ModelDefinition(id: "gpt-4o", displayName: "GPT-4o", provider: .openai, supportsReasoning: false, contextSize: 128_000),
+        ModelDefinition(id: "gpt-4o-mini", displayName: "GPT-4o Mini", provider: .openai, supportsReasoning: false, contextSize: 128_000),
         
-        // GPT-4 Turbo
-        ModelDefinition(id: "gpt-4-turbo", displayName: "GPT-4 Turbo", provider: .openai, supportsReasoning: false),
+        // GPT-4 Turbo - 128K context
+        ModelDefinition(id: "gpt-4-turbo", displayName: "GPT-4 Turbo", provider: .openai, supportsReasoning: false, contextSize: 128_000),
     ]
     
-    /// Anthropic models with extended thinking support info
+    /// Anthropic models with extended thinking support info and context sizes
     static let anthropic: [ModelDefinition] = [
-        // Claude 4 series
-        ModelDefinition(id: "claude-sonnet-4-5", displayName: "Claude Sonnet 4.5", provider: .anthropic, supportsReasoning: true),
-        ModelDefinition(id: "claude-opus-4-5", displayName: "Claude Opus 4.5", provider: .anthropic, supportsReasoning: true),
-        ModelDefinition(id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5", provider: .anthropic, supportsReasoning: true),
-        ModelDefinition(id: "claude-opus-4", displayName: "Claude Opus 4", provider: .anthropic, supportsReasoning: true), 
-        ModelDefinition(id: "claude-sonnet-4", displayName: "Claude Sonnet 4", provider: .anthropic, supportsReasoning: true),
+        // Claude 4 series - 200K context
+        ModelDefinition(id: "claude-sonnet-4-5", displayName: "Claude Sonnet 4.5", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "claude-opus-4-5", displayName: "Claude Opus 4.5", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "claude-opus-4", displayName: "Claude Opus 4", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "claude-sonnet-4", displayName: "Claude Sonnet 4", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
         
-        // Claude 3.7 series
-        ModelDefinition(id: "claude-3-7-sonnet", displayName: "Claude Sonnet 3.7", provider: .anthropic, supportsReasoning: true),
+        // Claude 3.7 series - 200K context
+        ModelDefinition(id: "claude-3-7-sonnet", displayName: "Claude Sonnet 3.7", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
         
-        // Claude 3.5 series (no extended thinking)
-        ModelDefinition(id: "claude-3-5-sonnet", displayName: "Claude Sonnet 3.5", provider: .anthropic, supportsReasoning: false),
-        ModelDefinition(id: "claude-3-5-haiku", displayName: "Claude Haiku 3.5", provider: .anthropic, supportsReasoning: false),
+        // Claude 3.5 series (no extended thinking) - 200K context
+        ModelDefinition(id: "claude-3-5-sonnet", displayName: "Claude Sonnet 3.5", provider: .anthropic, supportsReasoning: false, contextSize: 200_000),
+        ModelDefinition(id: "claude-3-5-haiku", displayName: "Claude Haiku 3.5", provider: .anthropic, supportsReasoning: false, contextSize: 200_000),
     ]
     
     /// All curated models

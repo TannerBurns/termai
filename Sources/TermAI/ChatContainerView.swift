@@ -5,7 +5,7 @@ struct ChatContainerView: View {
     @EnvironmentObject var tabsManager: ChatTabsManager
     @StateObject private var historyManager = ChatHistoryManager.shared
     @ObservedObject private var processManager = ProcessManager.shared
-    let ptyModel: PTYModel
+    @ObservedObject var ptyModel: PTYModel
     
     // Command approval state
     @State private var pendingApproval: PendingCommandApproval? = nil
@@ -84,6 +84,10 @@ struct ChatContainerView: View {
                             },
                             onDelete: { entry in
                                 historyManager.deleteEntry(id: entry.id)
+                            },
+                            onClearAll: {
+                                historyManager.clearAllEntries()
+                                showingHistoryPopover = false
                             }
                         )
                     }
@@ -127,9 +131,10 @@ struct ChatContainerView: View {
                 .onReceive(NotificationCenter.default.publisher(for: .TermAIExecuteCommand)) { note in
                     // When a command is executed, schedule a capture and publish a finish event for the selected session
                     guard let cmd = note.userInfo?["command"] as? String else { return }
-                    // Capture after a small delay to accumulate output
+                    // Capture after a configurable delay to accumulate output
                     // Wait longer to ensure markers are processed
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    let captureDelay = AgentSettings.shared.commandCaptureDelay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + captureDelay) {
                         // Grab last output chunk and exit code from the terminal
                         let output = ptyModel.lastOutputChunk
                         let rc = ptyModel.lastExitCode
@@ -513,6 +518,7 @@ private struct SessionHeaderView: View {
                     ForEach(session.availableModels, id: \.self) { modelId in
                         Button(action: {
                             session.model = modelId
+                            session.updateContextLimit()
                             session.persistSettings()
                         }) {
                             HStack {
@@ -536,7 +542,7 @@ private struct SessionHeaderView: View {
                         
                         Button("Refresh Models") {
                             Task {
-                                await session.fetchAvailableModels()
+                                await session.fetchAvailableModels(forceRefresh: true)
                             }
                         }
                     }
@@ -593,8 +599,10 @@ private struct ChatHistoryPopover: View {
     let entries: [ChatHistoryEntry]
     let onRestore: (ChatHistoryEntry) -> Void
     let onDelete: (ChatHistoryEntry) -> Void
+    let onClearAll: () -> Void
     
     @State private var hoveredEntry: UUID? = nil
+    @State private var showingClearConfirmation: Bool = false
     @Environment(\.colorScheme) var colorScheme
     
     private let dateFormatter: RelativeDateTimeFormatter = {
@@ -612,6 +620,20 @@ private struct ChatHistoryPopover: View {
                 Text("Chat History")
                     .font(.headline)
                 Spacer()
+                
+                if entries.count > 1 {
+                    Button(action: { showingClearConfirmation = true }) {
+                        Text("Clear All")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear all chat history")
+                    
+                    Text("·")
+                        .foregroundColor(.secondary.opacity(0.5))
+                }
+                
                 Text("\(entries.count) saved")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -660,6 +682,14 @@ private struct ChatHistoryPopover: View {
         }
         .frame(width: 320)
         .background(colorScheme == .dark ? Color(white: 0.1) : Color.white)
+        .alert("Clear All History?", isPresented: $showingClearConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear All", role: .destructive) {
+                onClearAll()
+            }
+        } message: {
+            Text("This will permanently delete all \(entries.count) saved chat sessions. This action cannot be undone.")
+        }
     }
 }
 
@@ -972,24 +1002,33 @@ struct AgentChecklistPopover: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            HStack {
+            HStack(spacing: 10) {
                 Image(systemName: "checklist")
                     .foregroundColor(.blue)
                 Text("Agent Progress")
                     .font(.headline)
                 Spacer()
                 
-                // Progress badge
+                // Progress badge with donut chart
                 if let checklist = checklist {
-                    Text("\(checklist.completedCount)/\(checklist.items.count)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule()
-                                .fill(Color.secondary.opacity(0.15))
+                    HStack(spacing: 6) {
+                        ProgressDonut(
+                            completed: checklist.completedCount,
+                            total: checklist.items.count,
+                            size: 18,
+                            lineWidth: 3
                         )
+                        
+                        Text("\(checklist.completedCount)/\(checklist.items.count)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(Color.secondary.opacity(0.1))
+                    )
                 } else if estimatedSteps > 0 {
                     Text("Step \(currentStep)/~\(estimatedSteps)")
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -1160,5 +1199,273 @@ private struct ChecklistItemRow: View {
                 : (isHovered ? (colorScheme == .dark ? Color.white.opacity(0.03) : Color.black.opacity(0.02)) : Color.clear)
         )
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Context Usage Indicator
+
+/// Circular progress indicator showing context window usage
+struct ContextUsageIndicator: View {
+    @ObservedObject var session: ChatSession
+    @State private var isHovered: Bool = false
+    @State private var isPulsing: Bool = false
+    @Environment(\.colorScheme) var colorScheme
+    
+    private var usagePercent: Double {
+        session.contextUsagePercent
+    }
+    
+    private var usageColor: Color {
+        switch usagePercent {
+        case 0..<0.6:
+            return .green
+        case 0.6..<0.8:
+            return .yellow
+        case 0.8..<0.9:
+            return .orange
+        default:
+            return .red
+        }
+    }
+    
+    private var formattedTokens: String {
+        let current = session.currentContextTokens
+        let limit = session.effectiveContextLimit
+        
+        // Format with K suffix for thousands
+        func format(_ n: Int) -> String {
+            if n >= 1_000_000 {
+                return String(format: "%.1fM", Double(n) / 1_000_000)
+            } else if n >= 1_000 {
+                return String(format: "%.0fK", Double(n) / 1_000)
+            }
+            return "\(n)"
+        }
+        
+        return "\(format(current)) / \(format(limit))"
+    }
+    
+    private var percentText: String {
+        String(format: "%.0f%%", usagePercent * 100)
+    }
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            // Circular progress ring
+            ZStack {
+                // Background ring
+                Circle()
+                    .stroke(usageColor.opacity(0.2), lineWidth: 2)
+                    .frame(width: 16, height: 16)
+                
+                // Progress ring
+                Circle()
+                    .trim(from: 0, to: usagePercent)
+                    .stroke(usageColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .frame(width: 16, height: 16)
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeInOut(duration: 0.3), value: usagePercent)
+                
+                // Pulse animation when high usage
+                if usagePercent > 0.8 && isPulsing {
+                    Circle()
+                        .stroke(usageColor.opacity(0.3), lineWidth: 2)
+                        .frame(width: 16, height: 16)
+                        .scaleEffect(isPulsing ? 1.3 : 1.0)
+                        .opacity(isPulsing ? 0 : 0.5)
+                }
+            }
+            
+            // Token count text (shown on hover or when high usage)
+            if isHovered || usagePercent > 0.8 {
+                Text(formattedTokens)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .transition(.opacity.combined(with: .scale))
+            }
+            
+            // Summarized indicator
+            if session.recentlySummarized {
+                HStack(spacing: 2) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 8))
+                    Text("Summarized")
+                        .font(.system(size: 8))
+                }
+                .foregroundColor(.purple)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule()
+                        .fill(Color.purple.opacity(0.15))
+                )
+                .transition(.opacity.combined(with: .scale))
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            Capsule()
+                .fill(isHovered ? usageColor.opacity(0.1) : Color.clear)
+        )
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.2), value: isHovered)
+        .animation(.easeInOut(duration: 0.3), value: session.recentlySummarized)
+        .help("Context: \(formattedTokens) tokens (\(percentText))\(session.summarizationCount > 0 ? "\nSummarized \(session.summarizationCount) time(s)" : "")")
+        .onAppear {
+            // Start pulse animation for high usage
+            if usagePercent > 0.8 {
+                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                    isPulsing = true
+                }
+            }
+        }
+        .onChange(of: usagePercent) { newValue in
+            if newValue > 0.8 && !isPulsing {
+                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                    isPulsing = true
+                }
+            } else if newValue <= 0.8 {
+                isPulsing = false
+            }
+        }
+    }
+}
+
+// MARK: - Context Usage Popover (Detailed View)
+
+struct ContextUsagePopover: View {
+    @ObservedObject var session: ChatSession
+    @Environment(\.colorScheme) var colorScheme
+    
+    private var usagePercent: Double {
+        session.contextUsagePercent
+    }
+    
+    private var usageColor: Color {
+        switch usagePercent {
+        case 0..<0.6:
+            return .green
+        case 0.6..<0.8:
+            return .yellow
+        case 0.8..<0.9:
+            return .orange
+        default:
+            return .red
+        }
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Image(systemName: "cpu")
+                    .foregroundColor(usageColor)
+                Text("Context Usage")
+                    .font(.headline)
+                Spacer()
+                Text(String(format: "%.1f%%", usagePercent * 100))
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundColor(usageColor)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            // Progress bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.15))
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [usageColor.opacity(0.8), usageColor],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: geo.size.width * usagePercent)
+                        .animation(.easeInOut(duration: 0.3), value: usagePercent)
+                }
+            }
+            .frame(height: 6)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            
+            // Stats
+            VStack(spacing: 8) {
+                StatRow(label: "Current", value: formatTokens(session.currentContextTokens))
+                StatRow(label: "Limit", value: formatTokens(session.effectiveContextLimit))
+                StatRow(label: "Available", value: formatTokens(max(0, session.effectiveContextLimit - session.currentContextTokens)))
+                
+                if session.summarizationCount > 0 {
+                    Divider()
+                        .padding(.vertical, 4)
+                    
+                    HStack {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.caption)
+                            .foregroundColor(.purple)
+                        Text("Summarized \(session.summarizationCount) time(s)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        if let date = session.lastSummarizationDate {
+                            Text(date, style: .relative)
+                                .font(.caption2)
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
+                    }
+                }
+                
+                if session.providerType.isLocal && session.customLocalContextSize != nil {
+                    Divider()
+                        .padding(.vertical, 4)
+                    
+                    HStack {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.caption)
+                            .foregroundColor(.blue)
+                        Text("Custom context size")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 12)
+        }
+        .frame(width: 280)
+        .background(.ultraThinMaterial)
+    }
+    
+    private func formatTokens(_ count: Int) -> String {
+        if count >= 1_000_000 {
+            return String(format: "%.2fM tokens", Double(count) / 1_000_000)
+        } else if count >= 1_000 {
+            return String(format: "%.1fK tokens", Double(count) / 1_000)
+        }
+        return "\(count) tokens"
+    }
+}
+
+private struct StatRow: View {
+    let label: String
+    let value: String
+    
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundColor(.primary)
+        }
     }
 }

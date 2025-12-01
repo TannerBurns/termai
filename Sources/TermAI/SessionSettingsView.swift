@@ -56,7 +56,7 @@ extension View {
 
 // MARK: - Provider Badge View
 struct ProviderBadge: View {
-    let provider: ChatSession.LocalProvider
+    let provider: LocalLLMProvider
     let isSelected: Bool
     
     var icon: String {
@@ -269,8 +269,8 @@ struct SessionSettingsView: View {
     @State private var connectionStatus: ConnectionStatus = .unknown
     @State private var isTestingConnection: Bool = false
     
-    private var selectedLocalProvider: ChatSession.LocalProvider? {
-        ChatSession.LocalProvider(rawValue: session.providerName)
+    private var selectedLocalProvider: LocalLLMProvider? {
+        LocalLLMProvider(rawValue: session.providerName)
     }
     
     private var isCloudProvider: Bool {
@@ -282,6 +282,7 @@ struct SessionSettingsView: View {
     }
     
     @ObservedObject private var apiKeyManager = CloudAPIKeyManager.shared
+    @ObservedObject private var agentSettings = AgentSettings.shared
     
     var body: some View {
         ScrollView {
@@ -309,6 +310,11 @@ struct SessionSettingsView: View {
                 
                 // Generation Settings Card
                 generationSettingsCard
+                
+                // Context Size Card (only for local providers)
+                if !isCloudProvider {
+                    contextSizeCard
+                }
             }
             .padding(20)
         }
@@ -418,8 +424,8 @@ struct SessionSettingsView: View {
                     .foregroundColor(.secondary)
                 
                 HStack(spacing: 12) {
-                    ForEach([ChatSession.LocalProvider.ollama, .lmStudio, .vllm], id: \.rawValue) { provider in
-                        let isSelected = session.providerType == .local(LocalLLMProvider(rawValue: provider.rawValue)!)
+                    ForEach([LocalLLMProvider.ollama, .lmStudio, .vllm], id: \.rawValue) { provider in
+                        let isSelected = session.providerType == .local(provider)
                         
                         ProviderBadge(
                             provider: provider,
@@ -690,34 +696,27 @@ struct SessionSettingsView: View {
                             Divider()
                         }
                         
-                        ForEach(session.availableModels, id: \.self) { modelId in
-                            Button(action: {
-                                session.model = modelId
-                                session.persistSettings()
-                            }) {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(displayName(for: modelId))
-                                        if isCloudProvider && displayName(for: modelId) != modelId {
-                                            Text(modelId)
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                        }
-                                    }
-                                    
-                                    Spacer()
-                                    
-                                    if CuratedModels.supportsReasoning(modelId: modelId) {
-                                        Image(systemName: "brain")
-                                            .font(.caption)
-                                            .foregroundColor(.purple)
-                                    }
-                                    
-                                    if session.model == modelId {
-                                        Image(systemName: "checkmark")
-                                    }
+                        // Favorites section
+                        let favoriteModels = session.availableModels.filter { agentSettings.isFavorite($0) }
+                        if !favoriteModels.isEmpty {
+                            Section {
+                                ForEach(favoriteModels, id: \.self) { modelId in
+                                    modelMenuButton(for: modelId, isFavorite: true)
                                 }
+                            } header: {
+                                Label("Favorites", systemImage: "star.fill")
                             }
+                            
+                            Divider()
+                        }
+                        
+                        // All models section
+                        Section {
+                            ForEach(session.availableModels, id: \.self) { modelId in
+                                modelMenuButton(for: modelId, isFavorite: agentSettings.isFavorite(modelId))
+                            }
+                        } header: {
+                            Text("All Models")
                         }
                     } label: {
                         HStack {
@@ -726,9 +725,16 @@ struct SessionSettingsView: View {
                                 .foregroundColor(.secondary)
                             
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(session.model.isEmpty ? "Select a model..." : displayName(for: session.model))
-                                    .font(.system(size: 13, weight: session.model.isEmpty ? .regular : .medium))
-                                    .foregroundColor(session.model.isEmpty ? .secondary : .primary)
+                                HStack(spacing: 4) {
+                                    if !session.model.isEmpty && agentSettings.isFavorite(session.model) {
+                                        Image(systemName: "star.fill")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.yellow)
+                                    }
+                                    Text(session.model.isEmpty ? "Select a model..." : displayName(for: session.model))
+                                        .font(.system(size: 13, weight: session.model.isEmpty ? .regular : .medium))
+                                        .foregroundColor(session.model.isEmpty ? .secondary : .primary)
+                                }
                                 
                                 if !session.model.isEmpty && isCloudProvider && displayName(for: session.model) != session.model {
                                     Text(session.model)
@@ -761,6 +767,7 @@ struct SessionSettingsView: View {
                         )
                     }
                     .menuStyle(.borderlessButton)
+                    .help("Click the star icon to toggle favorite")
                     
                     // Refresh button (only for local providers)
                     if !isCloudProvider {
@@ -844,6 +851,58 @@ struct SessionSettingsView: View {
     
     private func displayName(for modelId: String) -> String {
         CuratedModels.find(id: modelId)?.displayName ?? modelId
+    }
+    
+    /// Creates a menu button for model selection with favorite toggle
+    @ViewBuilder
+    private func modelMenuButton(for modelId: String, isFavorite: Bool) -> some View {
+        Button(action: {
+            session.model = modelId
+            session.updateContextLimit()
+            session.persistSettings()
+        }) {
+            HStack {
+                // Favorite indicator - only show star if favorited
+                if isFavorite {
+                    Image(systemName: "star.fill")
+                        .font(.caption)
+                        .foregroundColor(.yellow)
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(displayName(for: modelId))
+                    if isCloudProvider && displayName(for: modelId) != modelId {
+                        Text(modelId)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Spacer()
+                
+                // Reasoning/thinking indicator
+                if CuratedModels.supportsReasoning(modelId: modelId) {
+                    Image(systemName: "brain")
+                        .font(.caption)
+                        .foregroundColor(.purple)
+                }
+                
+                // Toggle favorite button
+                Button(action: {
+                    agentSettings.toggleFavorite(modelId)
+                }) {
+                    Image(systemName: isFavorite ? "star.slash" : "star")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(isFavorite ? "Remove from favorites" : "Add to favorites")
+                
+                if session.model == modelId {
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
     }
     
     // MARK: - Generation Settings Card
@@ -980,6 +1039,155 @@ struct SessionSettingsView: View {
             }
         }
         .settingsCard()
+    }
+    
+    // MARK: - Context Size Card
+    private var contextSizeCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                SettingsSectionHeader("Context Window", subtitle: "Set the context size for your local model")
+                Spacer()
+                
+                // Current usage indicator
+                if session.currentContextTokens > 0 {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(contextUsageColor)
+                            .frame(width: 6, height: 6)
+                        Text(String(format: "%.0f%% used", session.contextUsagePercent * 100))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            
+            VStack(alignment: .leading, spacing: 12) {
+                // Custom context size toggle
+                Toggle(isOn: Binding(
+                    get: { session.customLocalContextSize != nil },
+                    set: { enabled in
+                        if enabled {
+                            session.customLocalContextSize = session.contextLimitTokens
+                        } else {
+                            session.customLocalContextSize = nil
+                            session.updateContextLimit()
+                        }
+                        session.persistSettings()
+                    }
+                )) {
+                    HStack {
+                        Text("Use custom context size")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                
+                if session.customLocalContextSize != nil {
+                    // Context size input
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Context Size (tokens)")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            TextField("", value: Binding(
+                                get: { session.customLocalContextSize ?? 32000 },
+                                set: { newValue in
+                                    session.customLocalContextSize = newValue
+                                    session.updateContextLimit()
+                                    session.persistSettings()
+                                }
+                            ), format: .number)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(width: 80)
+                            .multilineTextAlignment(.trailing)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.primary.opacity(0.05))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                            )
+                        }
+                        
+                        // Preset buttons
+                        HStack(spacing: 8) {
+                            Text("Presets:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            ForEach([4_096, 8_192, 16_384, 32_768, 65_536, 131_072], id: \.self) { size in
+                                Button(action: {
+                                    session.customLocalContextSize = size
+                                    session.updateContextLimit()
+                                    session.persistSettings()
+                                }) {
+                                    Text(formatContextSize(size))
+                                        .font(.system(size: 10, weight: .medium))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 4)
+                                                .fill(session.customLocalContextSize == size 
+                                                      ? Color.accentColor.opacity(0.15) 
+                                                      : Color.primary.opacity(0.05))
+                                        )
+                                        .foregroundColor(session.customLocalContextSize == size 
+                                                        ? .accentColor 
+                                                        : .primary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                
+                // Current model's detected context size
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 10))
+                    if session.customLocalContextSize != nil {
+                        Text("Auto-detected size for '\(session.model.isEmpty ? "unknown model" : session.model)': \(formatContextSize(TokenEstimator.contextLimit(for: session.model)))")
+                    } else {
+                        Text("Using auto-detected context size: \(formatContextSize(session.contextLimitTokens))")
+                    }
+                }
+                .font(.system(size: 11))
+                .foregroundColor(.secondary.opacity(0.8))
+                
+                // Help text
+                Text("Set a custom context size if your local model supports a different context window than detected. Common sizes: 4K, 8K, 32K, 128K.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .settingsCard()
+    }
+    
+    private var contextUsageColor: Color {
+        let percent = session.contextUsagePercent
+        switch percent {
+        case 0..<0.6: return .green
+        case 0.6..<0.8: return .yellow
+        case 0.8..<0.9: return .orange
+        default: return .red
+        }
+    }
+    
+    private func formatContextSize(_ size: Int) -> String {
+        if size >= 1_000_000 {
+            return String(format: "%.0fM", Double(size) / 1_000_000)
+        } else if size >= 1_000 {
+            return String(format: "%.0fK", Double(size) / 1_000)
+        }
+        return "\(size)"
     }
     
     // MARK: - Actions

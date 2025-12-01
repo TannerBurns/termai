@@ -5,12 +5,18 @@ struct MarkdownRenderer: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             ForEach(parseBlocks(text), id: \.self) { block in
                 switch block {
                 case .paragraph(let p):
                     ParagraphView(text: p)
                         .padding(.vertical, 2)
+                case .header(let level, let text):
+                    HeaderView(level: level, text: text)
+                        .padding(.top, level == 1 ? 8 : 4)
+                        .padding(.bottom, 2)
+                case .listItem(let text):
+                    ListItemView(text: text)
                 case .code(let lang, let code, let isClosed):
                     CodeBlockView(language: lang, code: code, isClosed: isClosed)
                         .padding(.vertical, 4)
@@ -24,8 +30,39 @@ struct MarkdownRenderer: View {
 
     private enum Block: Hashable {
         case paragraph(String)
+        case header(level: Int, text: String)
+        case listItem(String)
         case code(language: String?, content: String, isClosed: Bool)
         case table(headers: [String], rows: [[String]])
+    }
+    
+    /// Check if a line is a markdown header
+    private func isHeader(_ line: String) -> (level: Int, text: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("#") else { return nil }
+        var level = 0
+        var idx = trimmed.startIndex
+        while idx < trimmed.endIndex && trimmed[idx] == "#" && level < 6 {
+            level += 1
+            idx = trimmed.index(after: idx)
+        }
+        guard level > 0, idx < trimmed.endIndex, trimmed[idx] == " " else { return nil }
+        let text = String(trimmed[trimmed.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
+        return (level, text)
+    }
+    
+    /// Check if a line is a markdown list item
+    private func isListItem(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // Unordered list: starts with -, *, or + followed by space
+        if (trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ")) {
+            return String(trimmed.dropFirst(2))
+        }
+        // Ordered list: starts with number followed by . or ) and space
+        if let match = trimmed.range(of: #"^\d+[.)]\s+"#, options: .regularExpression) {
+            return String(trimmed[match.upperBound...])
+        }
+        return nil
     }
 
     private func parseBlocks(_ input: String) -> [Block] {
@@ -87,6 +124,14 @@ struct MarkdownRenderer: View {
                 }
             } else if inCode {
                 codeLines.append(line)
+            } else if let header = isHeader(line) {
+                // Headers are always separate blocks
+                flushParagraph()
+                result.append(.header(level: header.level, text: header.text))
+            } else if let listText = isListItem(line) {
+                // List items are separate blocks
+                flushParagraph()
+                result.append(.listItem(listText))
             } else {
                 if line.trimmingCharacters(in: .whitespaces).isEmpty {
                     // paragraph break
@@ -115,8 +160,43 @@ private struct ParagraphView: View {
     }
 }
 
+private struct HeaderView: View {
+    let level: Int
+    let text: String
+    
+    var body: some View {
+        MarkdownText(text: text)
+            .font(fontForLevel)
+            .fontWeight(level <= 2 ? .bold : .semibold)
+    }
+    
+    private var fontForLevel: Font {
+        switch level {
+        case 1: return .title
+        case 2: return .title2
+        case 3: return .title3
+        case 4: return .headline
+        default: return .subheadline
+        }
+    }
+}
+
+private struct ListItemView: View {
+    let text: String
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("•")
+                .foregroundColor(.secondary)
+            MarkdownText(text: text)
+        }
+        .padding(.leading, 4)
+    }
+}
+
 private struct CodeBlockView: View {
     @EnvironmentObject private var ptyModel: PTYModel
+    @Environment(\.colorScheme) private var colorScheme
     let language: String?
     let code: String
     let isClosed: Bool
@@ -189,6 +269,12 @@ private struct CodeBlockView: View {
             }
     }
     
+    /// Returns syntax-highlighted code as a Text view
+    private var highlightedCode: Text {
+        let highlighter = MultiLanguageHighlighter(colorScheme: colorScheme)
+        return highlighter.highlight(code, language: language)
+    }
+    
     var body: some View {
         let isShell = language?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).matchesAny(["bash", "sh", "shell", "zsh"]) == true
         
@@ -224,9 +310,9 @@ private struct CodeBlockView: View {
                 .padding(.bottom, 4)
             }
             
-            // Code block
+            // Code block with syntax highlighting
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
+                highlightedCode
                     .font(.system(size: 12, weight: .regular, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(.horizontal, 10)

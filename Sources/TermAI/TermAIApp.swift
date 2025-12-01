@@ -34,6 +34,9 @@ struct AgentDebugConfig {
         
         try? fileManager.createDirectory(at: logsDir, withIntermediateDirectories: true)
         
+        // Cleanup old log files (older than 7 days)
+        cleanupOldLogs(in: logsDir, olderThanDays: 7)
+        
         let dateString = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
             .replacingOccurrences(of: ".", with: "-")
@@ -46,6 +49,27 @@ struct AgentDebugConfig {
         log("=== TermAI Agent Log Started ===")
         log("Log file: \(logFile.path)")
         log("Settings: maxIterations=\(AgentSettings.shared.maxIterations), enablePlanning=\(AgentSettings.shared.enablePlanning), enableReflection=\(AgentSettings.shared.enableReflection)")
+    }
+    
+    /// Delete log files older than the specified number of days
+    private static func cleanupOldLogs(in directory: URL, olderThanDays days: Int) {
+        let fileManager = FileManager.default
+        let cutoffDate = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? Date()
+        
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.creationDateKey],
+            options: .skipsHiddenFiles
+        ) else { return }
+        
+        for file in files where file.pathExtension == "log" {
+            guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
+                  let creationDate = attributes[.creationDate] as? Date else { continue }
+            
+            if creationDate < cutoffDate {
+                try? fileManager.removeItem(at: file)
+            }
+        }
     }
     
     static func log(_ message: String) {

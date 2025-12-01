@@ -10,7 +10,7 @@ struct ChatTabContentView: View {
     @State private var userHasScrolledUp: Bool = false
     
     let tabIndex: Int
-    let ptyModel: PTYModel
+    @ObservedObject var ptyModel: PTYModel
     
     var body: some View {
         VStack(spacing: 0) {
@@ -94,7 +94,8 @@ struct ChatTabContentView: View {
                 messageText: $messageText,
                 sending: sending,
                 isStreaming: session.streamingMessageId != nil,
-                cwd: ptyModel.currentWorkingDirectory,
+                cwd: effectiveCwd,
+                gitInfo: ptyModel.gitInfo,
                 onSend: send,
                 onStop: { session.cancelStreaming() }
             )
@@ -114,7 +115,26 @@ struct ChatTabContentView: View {
             session.loadSettings()
             session.loadMessages()
             Task { await session.fetchOllamaModels() }
+            // Initialize session CWD from terminal if not set
+            if session.lastKnownCwd.isEmpty {
+                session.lastKnownCwd = ptyModel.currentWorkingDirectory
+            }
         }
+        .onChange(of: ptyModel.currentWorkingDirectory) { newCwd in
+            // Sync session CWD with terminal when not running agent
+            // This allows the session to track user's manual cd commands
+            if !session.isAgentRunning {
+                session.lastKnownCwd = newCwd
+            }
+        }
+    }
+    
+    /// The effective CWD to display - prefers session's tracked CWD, falls back to terminal
+    private var effectiveCwd: String {
+        if !session.lastKnownCwd.isEmpty {
+            return session.lastKnownCwd
+        }
+        return ptyModel.currentWorkingDirectory
     }
     
     private func send() {
@@ -129,6 +149,109 @@ struct ChatTabContentView: View {
                 sending = false
             }
         }
+    }
+}
+
+// MARK: - CWD Badge
+private struct CwdBadge: View {
+    let path: String
+    let displayPath: String
+    
+    @State private var isHovered: Bool = false
+    @State private var showCopied: Bool = false
+    
+    var body: some View {
+        Button(action: copyPath) {
+            HStack(spacing: 4) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 9))
+                Text(showCopied ? "Copied!" : displayPath)
+                    .lineLimit(1)
+            }
+            .font(.caption2)
+            .foregroundColor(isHovered ? .primary : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(Color.primary.opacity(isHovered ? 0.08 : 0.04))
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help(path)  // Shows full path tooltip on hover (after ~1s)
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
+        .animation(.easeInOut(duration: 0.15), value: showCopied)
+    }
+    
+    private func copyPath() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+        showCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            showCopied = false
+        }
+    }
+}
+
+// MARK: - Git Info Badge
+private struct GitInfoBadge: View {
+    let gitInfo: GitInfo
+    
+    @State private var isHovered: Bool = false
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            // Branch icon and name
+            HStack(spacing: 3) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 9))
+                Text(gitInfo.branch)
+                    .lineLimit(1)
+            }
+            .foregroundColor(isHovered ? .primary : .secondary)
+            
+            // Dirty indicator
+            if gitInfo.isDirty {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 5, height: 5)
+                    .help("Uncommitted changes")
+            }
+            
+            // Ahead/behind counts
+            if gitInfo.hasUpstreamDelta {
+                HStack(spacing: 2) {
+                    if gitInfo.ahead > 0 {
+                        HStack(spacing: 1) {
+                            Text("↑")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("\(gitInfo.ahead)")
+                        }
+                        .foregroundColor(.green)
+                        .help("\(gitInfo.ahead) commit(s) ahead of upstream")
+                    }
+                    if gitInfo.behind > 0 {
+                        HStack(spacing: 1) {
+                            Text("↓")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("\(gitInfo.behind)")
+                        }
+                        .foregroundColor(.red)
+                        .help("\(gitInfo.behind) commit(s) behind upstream")
+                    }
+                }
+            }
+        }
+        .font(.caption2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule()
+                .fill(Color.primary.opacity(isHovered ? 0.08 : 0.04))
+        )
+        .onHover { isHovered = $0 }
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
     }
 }
 
@@ -202,6 +325,7 @@ private struct ChatInputArea: View {
     let sending: Bool
     let isStreaming: Bool
     let cwd: String
+    let gitInfo: GitInfo?
     let onSend: () -> Void
     let onStop: () -> Void
     
@@ -245,25 +369,17 @@ private struct ChatInputArea: View {
                     )
             )
             
-            // Bottom bar with CWD, stop button, and send button
-            HStack(spacing: 12) {
-                // Current working directory
+            // Bottom bar with CWD, git info, stop button, and send button
+            HStack(spacing: 8) {
+                // Current working directory with hover tooltip
                 if !cwd.isEmpty {
-                    HStack(spacing: 4) {
-                        Image(systemName: "folder.fill")
-                            .font(.system(size: 9))
-                        Text(shortenPath(cwd))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(Color.primary.opacity(0.04))
-                    )
+                    CwdBadge(path: cwd, displayPath: displayPath(cwd))
+                }
+                
+                // Git info badge (synced with session directory)
+                if let gitInfo = gitInfo {
+                    GitInfoBadge(gitInfo: gitInfo)
+                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
                 }
                 
                 Spacer()
@@ -319,6 +435,7 @@ private struct ChatInputArea: View {
                 .animation(.easeInOut(duration: 0.15), value: messageText.isEmpty)
             }
             .animation(.easeInOut(duration: 0.2), value: isStreaming)
+            .animation(.easeInOut(duration: 0.2), value: gitInfo?.branch)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -331,6 +448,46 @@ private struct ChatInputArea: View {
             return "~" + path.dropFirst(home.count)
         }
         return path
+    }
+    
+    /// Display path with smart truncation - shows last directory component with ellipsis prefix if long
+    private func displayPath(_ path: String) -> String {
+        // Remove trailing slash (from tab completion) before processing
+        let trimmedPath = path.hasSuffix("/") ? String(path.dropLast()) : path
+        let shortened = shortenPath(trimmedPath)
+        let maxLength = 35
+        
+        if shortened.count <= maxLength {
+            return shortened
+        }
+        
+        // Show ellipsis + last portion of path
+        // Filter out empty components (handles paths with trailing slashes)
+        let components = shortened.components(separatedBy: "/").filter { !$0.isEmpty }
+        if components.count > 1 {
+            // Try to show last 2 components
+            let lastTwo = components.suffix(2).joined(separator: "/")
+            if lastTwo.count <= maxLength - 3 {
+                return "…/" + lastTwo
+            }
+            // Otherwise just show last component
+            if let last = components.last {
+                if last.count <= maxLength - 3 {
+                    return "…/" + last
+                }
+                // Truncate even the last component if too long
+                return "…/" + String(last.prefix(maxLength - 4)) + "…"
+            }
+        } else if let single = components.first {
+            // Single component (like "~" or root directory name)
+            if single.count <= maxLength {
+                return single
+            }
+            return String(single.prefix(maxLength - 1)) + "…"
+        }
+        
+        // Fallback: truncate with ellipsis
+        return String(shortened.prefix(maxLength - 1)) + "…"
     }
 }
 
@@ -517,6 +674,9 @@ private struct ChatMessageBubble: View {
     let isStreaming: Bool
     let ptyModel: PTYModel
     
+    @State private var isHovering = false
+    @State private var showCopied = false
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Role label with modern styling
@@ -605,6 +765,55 @@ private struct ChatMessageBubble: View {
                                 .padding(8)
                         }
                     }
+                    .overlay(alignment: .topTrailing) {
+                        if message.role != "user" && (isHovering || showCopied) && !isStreaming {
+                            Button(action: copyRawContent) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
+                                        .font(.system(size: 10))
+                                    if showCopied {
+                                        Text("Copied")
+                                            .font(.system(size: 10, weight: .medium))
+                                    }
+                                }
+                                .foregroundColor(showCopied ? .green : .secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(
+                                    Capsule()
+                                        .fill(.ultraThinMaterial)
+                                )
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Copy raw message")
+                            .padding(8)
+                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        }
+                    }
+                    .onHover { hovering in
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            isHovering = hovering
+                        }
+                    }
+            }
+        }
+    }
+    
+    private func copyRawContent() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.content, forType: .string)
+        
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showCopied = true
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showCopied = false
             }
         }
     }
@@ -824,6 +1033,132 @@ private struct AgentEventView: View {
     }
 }
 
+// MARK: - Progress Donut Chart
+
+struct ProgressDonut: View {
+    let completed: Int
+    let total: Int
+    let size: CGFloat
+    let lineWidth: CGFloat
+    
+    private var progress: Double {
+        guard total > 0 else { return 0 }
+        return min(Double(completed) / Double(total), 1.0)
+    }
+    
+    var body: some View {
+        ZStack {
+            // Background track
+            Circle()
+                .stroke(
+                    Color.secondary.opacity(0.2),
+                    lineWidth: lineWidth
+                )
+            
+            // Progress arc
+            Circle()
+                .trim(from: 0, to: progress)
+                .stroke(
+                    AngularGradient(
+                        gradient: Gradient(colors: [
+                            Color.blue.opacity(0.7),
+                            Color.blue,
+                            Color.cyan.opacity(0.9)
+                        ]),
+                        center: .center,
+                        startAngle: .degrees(0),
+                        endAngle: .degrees(360 * progress)
+                    ),
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.3), value: progress)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+// MARK: - Agent Mode Toggle
+
+struct AgentModeToggle: View {
+    @Binding var isEnabled: Bool
+    @State private var isHovering: Bool = false
+    
+    private let activeColor = Color(red: 0.1, green: 0.85, blue: 0.65)  // Neon mint/cyan
+    private let inactiveColor = Color.secondary.opacity(0.5)
+    
+    var body: some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                isEnabled.toggle()
+            }
+        }) {
+            HStack(spacing: 4) {
+                // Animated icon
+                ZStack {
+                    // Glow effect when active
+                    if isEnabled {
+                        Circle()
+                            .fill(activeColor.opacity(0.35))
+                            .frame(width: 14, height: 14)
+                            .blur(radius: 3)
+                    }
+                    
+                    // Icon background
+                    Circle()
+                        .fill(isEnabled ? activeColor : inactiveColor.opacity(0.3))
+                        .frame(width: 12, height: 12)
+                    
+                    // Icon
+                    Image(systemName: isEnabled ? "bolt.fill" : "bolt")
+                        .font(.system(size: 6, weight: .bold))
+                        .foregroundColor(isEnabled ? .black.opacity(0.8) : .secondary)
+                        .scaleEffect(isEnabled ? 1.0 : 0.85)
+                }
+                .frame(width: 14, height: 14)
+                
+                // Label - matches .caption used in ChatTabPill
+                Text("Agent")
+                    .font(.caption)
+                    .foregroundColor(isEnabled ? activeColor : .secondary)
+                
+                // Status indicator dot
+                Circle()
+                    .fill(isEnabled ? activeColor : inactiveColor)
+                    .frame(width: 5, height: 5)
+                    .opacity(isEnabled ? 1 : 0.5)
+                    .scaleEffect(isEnabled ? 1 : 0.8)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(isEnabled 
+                        ? activeColor.opacity(isHovering ? 0.2 : 0.15)
+                        : Color.primary.opacity(isHovering ? 0.05 : 0)
+                    )
+            )
+            .overlay(
+                Capsule()
+                    .stroke(
+                        isEnabled 
+                            ? activeColor.opacity(isHovering ? 0.5 : 0.3)
+                            : Color.clear,
+                        lineWidth: 1
+                    )
+            )
+            .shadow(
+                color: isEnabled ? activeColor.opacity(0.2) : .clear,
+                radius: isHovering ? 4 : 2,
+                x: 0, y: 0
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: isHovering)
+    }
+}
+
 // MARK: - Agent Controls Bar (Per-Chat)
 
 struct AgentControlsBar: View {
@@ -838,23 +1173,33 @@ struct AgentControlsBar: View {
                 HStack(spacing: 8) {
                     // Progress indicator - clickable to show checklist popover
                     Button(action: { showingChecklistPopover.toggle() }) {
-                        HStack(spacing: 4) {
-                            ProgressView()
-                                .scaleEffect(0.5)
-                                .frame(width: 10, height: 10)
-                            
-                            // Use actual checklist count if available, otherwise estimated steps
-                            let totalSteps = session.agentChecklist?.items.count ?? session.agentEstimatedSteps
+                        HStack(spacing: 6) {
+                            // Use unified step tracking from session (checklist when available, phase otherwise)
+                            let totalSteps = session.agentEstimatedSteps
                             let completedSteps = session.agentChecklist?.completedCount ?? 0
                             
+                            // Show donut chart when we have step info, otherwise show spinner
                             if totalSteps > 0 {
-                                Text("\(completedSteps)/\(totalSteps) done")
-                                    .font(.system(size: 10, design: .monospaced))
+                                ProgressDonut(
+                                    completed: completedSteps,
+                                    total: totalSteps,
+                                    size: 14,
+                                    lineWidth: 2.5
+                                )
+                                
+                                Text("\(completedSteps)/\(totalSteps)")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
                                     .foregroundColor(.secondary)
-                            } else if session.agentCurrentStep > 0 {
-                                Text("Step \(session.agentCurrentStep)")
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(.secondary)
+                            } else {
+                                ProgressView()
+                                    .scaleEffect(0.5)
+                                    .frame(width: 10, height: 10)
+                                
+                                if session.agentCurrentStep > 0 {
+                                    Text("Step \(session.agentCurrentStep)")
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                }
                             }
                             
                             if !session.agentPhase.isEmpty {
@@ -918,22 +1263,21 @@ struct AgentControlsBar: View {
                     .buttonStyle(.plain)
                     .help("Stop agent execution")
                 }
-                
-                Spacer()
             } else {
                 // Show agent toggle when not running
-                Toggle(isOn: Binding(
-                    get: { session.agentModeEnabled },
-                    set: { session.agentModeEnabled = $0; session.persistSettings() }
-                )) {
-                    Text("Agent").font(.caption2)
-                }
-                .toggleStyle(.switch)
-                .controlSize(.mini)
+                AgentModeToggle(
+                    isEnabled: Binding(
+                        get: { session.agentModeEnabled },
+                        set: { session.agentModeEnabled = $0; session.persistSettings() }
+                    )
+                )
                 .help("When enabled, the assistant can run terminal commands automatically.")
-                
-                Spacer()
             }
+            
+            Spacer()
+            
+            // Context usage indicator (per-chat) - always visible
+            ContextUsageIndicator(session: session)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

@@ -137,20 +137,34 @@ final class ProcessManager: ObservableObject {
     /// Count of running processes (for badge)
     var runningCount: Int { runningProcesses.count }
     
-    private var processes: [Int32: ManagedProcess] = [:]
+    // Thread safety handled manually via queue - opt out of actor isolation
+    nonisolated(unsafe) private var processes: [Int32: ManagedProcess] = [:]
     private let queue = DispatchQueue(label: "com.termai.processmanager")
     private var refreshTimer: Timer?
     
     private init() {
-        // Start a timer to refresh process status periodically
-        startRefreshTimer()
+        // Timer will be started on-demand when processes are added
     }
     
-    private func startRefreshTimer() {
+    /// Start the refresh timer if not already running and there are processes
+    private func startRefreshTimerIfNeeded() {
+        guard refreshTimer == nil else { return }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshProcessList()
             }
+        }
+    }
+    
+    /// Stop the refresh timer if no processes are running
+    private func stopRefreshTimerIfEmpty() {
+        var isEmpty = false
+        queue.sync {
+            isEmpty = processes.isEmpty
+        }
+        if isEmpty {
+            refreshTimer?.invalidate()
+            refreshTimer = nil
         }
     }
     
@@ -194,6 +208,9 @@ final class ProcessManager: ObservableObject {
         }
         
         runningProcesses = updatedList.sorted { $0.startTime > $1.startTime }
+        
+        // Stop timer if no processes remain
+        stopRefreshTimerIfEmpty()
     }
     
     nonisolated func startProcess(command: String, cwd: String?, waitForOutput: String? = nil, timeout: TimeInterval = 5.0) async -> (pid: Int32, initialOutput: String, error: String?) {
@@ -277,8 +294,9 @@ final class ProcessManager: ObservableObject {
         let finalOutput = managedProcess.getOutput()
         let finalError = managedProcess.getError()
         
-        // Update the published list on main actor
+        // Update the published list on main actor and start timer if needed
         await MainActor.run {
+            self.startRefreshTimerIfNeeded()
             self.refreshProcessList()
         }
         
@@ -561,7 +579,11 @@ struct ReadFileTool: AgentTool {
         let url = URL(fileURLWithPath: expandedPath)
         
         guard FileManager.default.fileExists(atPath: expandedPath) else {
-            return .failure("File not found: \(path)")
+            // Provide helpful error with both original and resolved path
+            if path != expandedPath {
+                return .failure("File not found: '\(path)' (resolved to: '\(expandedPath)'). Use an absolute path like '/full/path/to/file' if CWD is unknown.")
+            }
+            return .failure("File not found: '\(path)'. Use an absolute path if needed.")
         }
         
         do {
@@ -701,7 +723,11 @@ struct EditFileTool: AgentTool {
         
         // Check file exists
         guard FileManager.default.fileExists(atPath: expandedPath) else {
-            return .failure("File not found: \(path)")
+            // Provide helpful error with both original and resolved path
+            if path != expandedPath {
+                return .failure("File not found: '\(path)' (resolved to: '\(expandedPath)'). Use an absolute path like '/full/path/to/file' if CWD is unknown.")
+            }
+            return .failure("File not found: '\(path)'. Use an absolute path if needed.")
         }
         
         // Extract session ID for file coordination
@@ -800,7 +826,11 @@ struct InsertLinesTool: AgentTool {
         let expandedPath = resolvePath(path, cwd: cwd)
         
         guard FileManager.default.fileExists(atPath: expandedPath) else {
-            return .failure("File not found: \(path)")
+            // Provide helpful error with both original and resolved path
+            if path != expandedPath {
+                return .failure("File not found: '\(path)' (resolved to: '\(expandedPath)'). Use an absolute path like '/full/path/to/file' if CWD is unknown.")
+            }
+            return .failure("File not found: '\(path)'. Use an absolute path if needed.")
         }
         
         // Extract session ID for file coordination
@@ -892,7 +922,11 @@ struct DeleteLinesTool: AgentTool {
         let expandedPath = resolvePath(path, cwd: cwd)
         
         guard FileManager.default.fileExists(atPath: expandedPath) else {
-            return .failure("File not found: \(path)")
+            // Provide helpful error with both original and resolved path
+            if path != expandedPath {
+                return .failure("File not found: '\(path)' (resolved to: '\(expandedPath)'). Use an absolute path like '/full/path/to/file' if CWD is unknown.")
+            }
+            return .failure("File not found: '\(path)'. Use an absolute path if needed.")
         }
         
         // Extract session ID for file coordination
@@ -977,7 +1011,11 @@ struct ListDirectoryTool: AgentTool {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: expandedPath, isDirectory: &isDirectory),
               isDirectory.boolValue else {
-            return .failure("Directory not found: \(path)")
+            // Provide helpful error with both original and resolved path
+            if path != expandedPath {
+                return .failure("Directory not found: '\(path)' (resolved to: '\(expandedPath)'). Use an absolute path like '/full/path/to/dir' if CWD is unknown.")
+            }
+            return .failure("Directory not found: '\(path)'. Use an absolute path if needed.")
         }
         
         do {
@@ -995,9 +1033,20 @@ struct ListDirectoryTool: AgentTool {
             }
             
             var output: [String] = []
+            let baseURL = URL(fileURLWithPath: expandedPath).standardized
             for item in contents.sorted(by: { $0.path < $1.path }) {
                 let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-                let relativePath = item.path.replacingOccurrences(of: expandedPath, with: "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                // Use proper path relativization instead of string replacement
+                let itemStandardized = item.standardized
+                let relativePath: String
+                if itemStandardized.path.hasPrefix(baseURL.path + "/") {
+                    relativePath = String(itemStandardized.path.dropFirst(baseURL.path.count + 1))
+                } else if itemStandardized.path == baseURL.path {
+                    relativePath = "."
+                } else {
+                    // Fallback to just the filename if paths don't match
+                    relativePath = item.lastPathComponent
+                }
                 let suffix = isDir ? "/" : ""
                 output.append("\(relativePath)\(suffix)")
             }
@@ -1124,7 +1173,11 @@ struct SearchFilesTool: AgentTool {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: expandedPath, isDirectory: &isDirectory),
               isDirectory.boolValue else {
-            return .failure("Directory not found: \(path)")
+            // Provide helpful error with both original and resolved path
+            if path != expandedPath {
+                return .failure("Directory not found: '\(path)' (resolved to: '\(expandedPath)'). Use an absolute path like '/full/path/to/dir' if CWD is unknown.")
+            }
+            return .failure("Directory not found: '\(path)'. Use an absolute path if needed.")
         }
         
         // Convert glob pattern to a simple check
@@ -1224,7 +1277,7 @@ struct CheckProcessTool: AgentTool {
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         // List all processes
         if args["list"]?.lowercased() == "true" {
-            let processes = ProcessManager.shared.listProcesses()
+            let processes = await MainActor.run { ProcessManager.shared.listProcesses() }
             if processes.isEmpty {
                 return .success("No managed background processes")
             }
@@ -1240,7 +1293,7 @@ struct CheckProcessTool: AgentTool {
         
         // Check by PID
         if let pidStr = args["pid"], let pid = Int32(pidStr) {
-            let result = ProcessManager.shared.checkProcess(pid: pid)
+            let result = await MainActor.run { ProcessManager.shared.checkProcess(pid: pid) }
             
             var output = "Process \(pid): \(result.running ? "RUNNING" : "NOT RUNNING")"
             if !result.output.isEmpty {
@@ -1255,7 +1308,7 @@ struct CheckProcessTool: AgentTool {
         
         // Check by port
         if let portStr = args["port"], let port = Int(portStr) {
-            let result = ProcessManager.shared.checkProcessByPort(port: port)
+            let result = await MainActor.run { ProcessManager.shared.checkProcessByPort(port: port) }
             
             var output = "Port \(port): \(result.running ? "IN USE" : "FREE")"
             if let pid = result.pid {
@@ -1281,8 +1334,8 @@ struct StopProcessTool: AgentTool {
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         // Stop all processes
         if args["all"]?.lowercased() == "true" {
-            ProcessManager.shared.stopAllProcessesSync()
             await MainActor.run {
+                ProcessManager.shared.stopAllProcessesSync()
                 ProcessManager.shared.refreshProcessList()
             }
             return .success("Stopped all managed background processes")
@@ -1293,7 +1346,8 @@ struct StopProcessTool: AgentTool {
             return .failure("Missing required argument: pid")
         }
         
-        if ProcessManager.shared.stopProcessSync(pid: pid) {
+        let success = await MainActor.run { ProcessManager.shared.stopProcessSync(pid: pid) }
+        if success {
             await MainActor.run {
                 ProcessManager.shared.refreshProcessList()
             }
