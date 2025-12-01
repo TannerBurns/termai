@@ -406,6 +406,7 @@ private struct ChatTabPill: View {
 // Separate view that observes the session for real-time updates (provider/model only)
 private struct SessionHeaderView: View {
     @ObservedObject var session: ChatSession
+    @ObservedObject private var agentSettings = AgentSettings.shared
     
     private var availableCloudProviders: [CloudProvider] {
         CloudAPIKeyManager.shared.availableProviders
@@ -516,23 +517,24 @@ private struct SessionHeaderView: View {
                         .disabled(true)
                 } else {
                     ForEach(session.availableModels, id: \.self) { modelId in
+                        let isFavorite = agentSettings.isFavorite(modelId)
+                        let isReasoning = CuratedModels.supportsReasoning(modelId: modelId)
+                        let isSelected = modelId == session.model
+                        
                         Button(action: {
                             session.model = modelId
                             session.updateContextLimit()
                             session.persistSettings()
                         }) {
-                            HStack {
-                                Text(displayName(for: modelId))
-                                
-                                if CuratedModels.supportsReasoning(modelId: modelId) {
-                                    Image(systemName: "brain")
-                                        .font(.caption2)
-                                        .foregroundColor(.purple)
-                                }
-                                
-                                if modelId == session.model {
-                                    Image(systemName: "checkmark")
-                                }
+                            // Star prefix for favorites, checkmark suffix for selected
+                            let prefix = isFavorite ? "★ " : ""
+                            let suffix = isSelected ? " ✓" : ""
+                            
+                            if isReasoning {
+                                // Use enhanced brain icon for reasoning models
+                                ReasoningBrainLabel(prefix + displayName(for: modelId) + suffix, size: .small)
+                            } else {
+                                Text(prefix + displayName(for: modelId) + suffix)
                             }
                         }
                     }
@@ -561,17 +563,25 @@ private struct SessionHeaderView: View {
                         .background(Capsule().fill(Color.orange.opacity(0.15)))
                 } else {
                     HStack(spacing: 4) {
-                        Image(systemName: "cpu")
+                        // Show enhanced brain for reasoning models, cpu for others
+                        if session.currentModelSupportsReasoning {
+                            ReasoningBrainIcon(size: .small, showGlow: true)
+                        } else {
+                            Image(systemName: "cpu")
                             .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        
                         Text(displayName(for: session.model))
                             .font(.caption2)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         
-                        if session.currentModelSupportsReasoning {
-                            Image(systemName: "brain")
-                                .font(.system(size: 9))
-                                .foregroundColor(.purple)
+                        // Favorite indicator - RIGHT of model name
+                        if agentSettings.isFavorite(session.model) {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.yellow)
                         }
                     }
                     .frame(minWidth: 200, maxWidth: .infinity, alignment: .leading)
@@ -581,6 +591,7 @@ private struct SessionHeaderView: View {
                     .background(Capsule().fill(.ultraThinMaterial))
                 }
             }
+            .id(agentSettings.favoriteModels) // Force menu refresh when favorites change
             .controlSize(.mini)
             .menuStyle(.borderlessButton)
             .help("Click to change model")

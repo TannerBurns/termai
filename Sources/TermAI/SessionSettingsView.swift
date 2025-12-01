@@ -720,21 +720,20 @@ struct SessionSettingsView: View {
                         }
                     } label: {
                         HStack {
-                            Image(systemName: "cpu")
+                            // Show enhanced brain for reasoning models, cpu for others
+                            if session.currentModelSupportsReasoning {
+                                ReasoningBrainIcon(size: .medium, showGlow: true)
+                                    .help("Supports reasoning/thinking")
+                            } else {
+                                Image(systemName: "cpu")
                                 .font(.system(size: 14))
-                                .foregroundColor(.secondary)
+                                    .foregroundColor(.secondary)
+                            }
                             
                             VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 4) {
-                                    if !session.model.isEmpty && agentSettings.isFavorite(session.model) {
-                                        Image(systemName: "star.fill")
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.yellow)
-                                    }
-                                    Text(session.model.isEmpty ? "Select a model..." : displayName(for: session.model))
-                                        .font(.system(size: 13, weight: session.model.isEmpty ? .regular : .medium))
-                                        .foregroundColor(session.model.isEmpty ? .secondary : .primary)
-                                }
+                                Text(session.model.isEmpty ? "Select a model..." : displayName(for: session.model))
+                                    .font(.system(size: 13, weight: session.model.isEmpty ? .regular : .medium))
+                                    .foregroundColor(session.model.isEmpty ? .secondary : .primary)
                                 
                                 if !session.model.isEmpty && isCloudProvider && displayName(for: session.model) != session.model {
                                     Text(session.model)
@@ -745,11 +744,11 @@ struct SessionSettingsView: View {
                             
                             Spacer()
                             
-                            if session.currentModelSupportsReasoning {
-                                Image(systemName: "brain")
-                                    .font(.caption)
-                                    .foregroundColor(.purple)
-                                    .help("Supports reasoning/thinking")
+                            // Favorite indicator - RIGHT of model name
+                            if !session.model.isEmpty && agentSettings.isFavorite(session.model) {
+                                Image(systemName: "star.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.yellow)
                             }
                             
                             Image(systemName: "chevron.up.chevron.down")
@@ -767,7 +766,7 @@ struct SessionSettingsView: View {
                         )
                     }
                     .menuStyle(.borderlessButton)
-                    .help("Click the star icon to toggle favorite")
+                    .help("Click a model to see options including favorite toggle")
                     
                     // Refresh button (only for local providers)
                     if !isCloudProvider {
@@ -853,20 +852,36 @@ struct SessionSettingsView: View {
         CuratedModels.find(id: modelId)?.displayName ?? modelId
     }
     
-    /// Creates a menu button for model selection with favorite toggle
+    /// Creates a menu button for model selection with favorite toggle via submenu
     @ViewBuilder
     private func modelMenuButton(for modelId: String, isFavorite: Bool) -> some View {
+        Menu {
+            // Select this model
         Button(action: {
             session.model = modelId
             session.updateContextLimit()
             session.persistSettings()
         }) {
-            HStack {
-                // Favorite indicator - only show star if favorited
+                Label("Select", systemImage: "checkmark.circle")
+            }
+            
+            Divider()
+            
+            // Toggle favorite
+            Button(action: {
+                agentSettings.toggleFavorite(modelId)
+            }) {
                 if isFavorite {
-                    Image(systemName: "star.fill")
-                        .font(.caption)
-                        .foregroundColor(.yellow)
+                    Label("Remove from Favorites", systemImage: "star.slash")
+                } else {
+                    Label("Add to Favorites", systemImage: "star")
+                }
+            }
+        } label: {
+            HStack {
+                // Show enhanced brain for reasoning models (in menu items)
+                if CuratedModels.supportsReasoning(modelId: modelId) {
+                    ReasoningBrainIcon(size: .small)
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
@@ -880,23 +895,12 @@ struct SessionSettingsView: View {
                 
                 Spacer()
                 
-                // Reasoning/thinking indicator
-                if CuratedModels.supportsReasoning(modelId: modelId) {
-                    Image(systemName: "brain")
-                        .font(.caption)
-                        .foregroundColor(.purple)
+                // Favorite indicator - RIGHT of model name
+                if isFavorite {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(.yellow)
                 }
-                
-                // Toggle favorite button
-                Button(action: {
-                    agentSettings.toggleFavorite(modelId)
-                }) {
-                    Image(systemName: isFavorite ? "star.slash" : "star")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help(isFavorite ? "Remove from favorites" : "Add to favorites")
                 
                 if session.model == modelId {
                     Image(systemName: "checkmark")

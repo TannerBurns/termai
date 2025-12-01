@@ -94,6 +94,7 @@ struct ChatTabContentView: View {
                 messageText: $messageText,
                 sending: sending,
                 isStreaming: session.streamingMessageId != nil,
+                isAgentRunning: session.isAgentRunning,
                 cwd: effectiveCwd,
                 gitInfo: ptyModel.gitInfo,
                 onSend: send,
@@ -140,9 +141,17 @@ struct ChatTabContentView: View {
     private func send() {
         let text = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        sending = true
         messageText = ""
         userHasScrolledUp = false  // Reset scroll state on new message
+        
+        // If agent is running, queue as feedback instead of starting new message
+        if session.isAgentRunning {
+            session.queueUserFeedback(text)
+            return
+        }
+        
+        // Normal flow - start new message
+        sending = true
         Task {
             await session.sendUserMessage(text)
             await MainActor.run {
@@ -324,6 +333,7 @@ private struct ChatInputArea: View {
     @Binding var messageText: String
     let sending: Bool
     let isStreaming: Bool
+    let isAgentRunning: Bool
     let cwd: String
     let gitInfo: GitInfo?
     let onSend: () -> Void
@@ -331,14 +341,19 @@ private struct ChatInputArea: View {
     
     @State private var isFocused: Bool = false
     
+    /// Input should only be disabled during the brief sending moment, not during agent execution
+    private var isInputDisabled: Bool {
+        sending && !isAgentRunning
+    }
+    
     var body: some View {
         VStack(spacing: 8) {
             // Text input with modern styling
             ZStack(alignment: .topLeading) {
                 if messageText.isEmpty {
-                    Text("Type your message...")
+                    Text(isAgentRunning ? "Add feedback for the agent..." : "Type your message...")
                         .font(.system(size: 13))
-                        .foregroundColor(.secondary.opacity(0.6))
+                        .foregroundColor(isAgentRunning ? Color.blue.opacity(0.6) : .secondary.opacity(0.6))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 10)
                 }
@@ -346,9 +361,9 @@ private struct ChatInputArea: View {
                 ChatTextEditor(
                     text: $messageText,
                     isFocused: $isFocused,
-                    isDisabled: sending,
+                    isDisabled: isInputDisabled,
                     onSubmit: {
-                        if !sending && !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if !isInputDisabled && !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             onSend()
                         }
                     }
@@ -364,7 +379,9 @@ private struct ChatInputArea: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 14)
                     .stroke(
-                        isFocused ? Color.accentColor.opacity(0.5) : Color.primary.opacity(0.08),
+                        isAgentRunning
+                            ? Color.blue.opacity(isFocused ? 0.6 : 0.3)
+                            : (isFocused ? Color.accentColor.opacity(0.5) : Color.primary.opacity(0.08)),
                         lineWidth: isFocused ? 2 : 1
                     )
             )
@@ -384,10 +401,10 @@ private struct ChatInputArea: View {
                 
                 Spacer()
                 
-                // Keyboard hint
-                Text("⏎ send · ⇧⏎ newline")
+                // Keyboard hint - shows feedback mode when agent is running
+                Text(isAgentRunning ? "⏎ send feedback · ⇧⏎ newline" : "⏎ send · ⇧⏎ newline")
                     .font(.caption2)
-                    .foregroundColor(.secondary.opacity(0.5))
+                    .foregroundColor(isAgentRunning ? .blue.opacity(0.6) : .secondary.opacity(0.5))
                 
                 // Stop button (visible during streaming)
                 if isStreaming {
@@ -410,12 +427,12 @@ private struct ChatInputArea: View {
                 // Send button
                 Button(action: onSend) {
                     Group {
-                        if sending && !isStreaming {
+                        if isInputDisabled && !isStreaming {
                             ProgressView()
                                 .controlSize(.small)
                                 .tint(.white)
                         } else {
-                            Image(systemName: "arrow.up")
+                            Image(systemName: isAgentRunning ? "arrow.up.message" : "arrow.up")
                                 .font(.system(size: 12, weight: .bold))
                         }
                     }
@@ -423,7 +440,7 @@ private struct ChatInputArea: View {
                     .background(
                         Circle()
                             .fill(
-                                messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sending
+                                messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isInputDisabled
                                     ? Color.secondary.opacity(0.3)
                                     : Color.accentColor
                             )
@@ -431,7 +448,7 @@ private struct ChatInputArea: View {
                     .foregroundColor(.white)
                 }
                 .buttonStyle(.plain)
-                .disabled(sending || messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(isInputDisabled || messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .animation(.easeInOut(duration: 0.15), value: messageText.isEmpty)
             }
             .animation(.easeInOut(duration: 0.2), value: isStreaming)
