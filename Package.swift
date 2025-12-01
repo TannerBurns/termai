@@ -10,15 +10,13 @@ let package = Package(
         .executable(name: "TermAI", targets: ["TermAI"])
     ],
     dependencies: [
-        .package(path: "Vendor/SwiftTerm"),
-        .package(path: "Vendor/Down")
+        .package(path: "Vendor/SwiftTerm")
     ],
     targets: [
         .executableTarget(
             name: "TermAI",
             dependencies: [
-                .product(name: "SwiftTerm", package: "SwiftTerm"),
-                .product(name: "Down", package: "Down")
+                .product(name: "SwiftTerm", package: "SwiftTerm")
             ],
             path: "Sources/TermAI",
             resources: [
@@ -27,5 +25,3 @@ let package = Package(
         )
     ]
 )
-
-

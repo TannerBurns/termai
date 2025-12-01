@@ -123,3 +123,4 @@ private struct TerminalActionButton: View {
         .onHover { isHovered = $0 }
     }
 }
+

@@ -1,6 +1,56 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Token Estimation
+
+/// Utility for estimating token counts from text
+enum TokenEstimator {
+    /// Average characters per token (conservative estimate for English text)
+    /// GPT models average ~4 chars/token, Claude ~3.5 chars/token
+    private static let charsPerToken: Double = 3.8
+    
+    /// Estimate token count from text
+    static func estimateTokens(_ text: String) -> Int {
+        Int(ceil(Double(text.count) / charsPerToken))
+    }
+    
+    /// Estimate tokens from a collection of strings
+    static func estimateTokens(_ texts: [String]) -> Int {
+        texts.reduce(0) { $0 + estimateTokens($1) }
+    }
+    
+    /// Get the context window limit for a model (in tokens)
+    static func contextLimit(for modelId: String) -> Int {
+        // GPT-5 series
+        if modelId.contains("gpt-5") { return 128_000 }
+        
+        // GPT-4 series
+        if modelId.contains("gpt-4o") || modelId.contains("gpt-4.1") { return 128_000 }
+        if modelId.contains("gpt-4-turbo") { return 128_000 }
+        
+        // O-series reasoning models
+        if modelId.hasPrefix("o4") || modelId.hasPrefix("o3") || modelId.hasPrefix("o1") { return 200_000 }
+        
+        // Claude 4.x series
+        if modelId.contains("claude-opus-4") || modelId.contains("claude-sonnet-4") || modelId.contains("claude-haiku-4") {
+            return 200_000
+        }
+        
+        // Claude 3.7/3.5 series
+        if modelId.contains("claude-3-7") || modelId.contains("claude-3-5") { return 200_000 }
+        
+        // Default for unknown models (conservative)
+        return 32_000
+    }
+    
+    /// Get recommended max context usage (leaving room for response)
+    static func maxContextUsage(for modelId: String) -> Int {
+        let limit = contextLimit(for: modelId)
+        // Reserve 25% for response generation
+        return Int(Double(limit) * 0.75)
+    }
+}
+
 // MARK: - Chat Message Types
 
 struct AgentEvent: Codable, Equatable {
@@ -134,15 +184,67 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var agentModeEnabled: Bool = false
     @Published var agentContextLog: [String] = []
     @Published var lastKnownCwd: String = ""
-    @Published var isAgentRunning: Bool = false
-    @Published var agentCurrentStep: Int = 0
-    @Published var agentEstimatedSteps: Int = 0
-    @Published var agentPhase: String = ""
     @Published var agentChecklist: TaskChecklist? = nil
     
-    // File coordination state
-    @Published var isWaitingForFileLock: Bool = false
-    @Published var waitingForFile: String? = nil
+    // Agent execution state machine
+    @Published var agentExecutionPhase: AgentExecutionPhase = .idle
+    
+    // User feedback queue - allows users to provide input while agent is running
+    @Published var pendingUserFeedback: [String] = []
+    
+    // Computed properties - unified tracking using checklist as source of truth when available
+    var isAgentRunning: Bool { agentExecutionPhase.isActive }
+    
+    /// Current step: completed checklist items + 1 (for the current in-progress item), or phase step
+    var agentCurrentStep: Int {
+        if let checklist = agentChecklist {
+            // Use checklist progress: completed + in-progress count
+            let completed = checklist.completedCount
+            let inProgress = checklist.items.filter { $0.status == .inProgress }.count
+            return completed + inProgress
+        }
+        return agentExecutionPhase.currentStep
+    }
+    
+    /// Estimated total steps: checklist item count when available, or phase estimate
+    var agentEstimatedSteps: Int {
+        if let checklist = agentChecklist {
+            return checklist.items.count
+        }
+        return agentExecutionPhase.estimatedSteps
+    }
+    
+    /// Phase description - shows simpler label when checklist provides the progress info
+    var agentPhase: String {
+        // When we have a checklist, show a simpler phase label (donut chart shows the numbers)
+        if agentChecklist != nil {
+            switch agentExecutionPhase {
+            case .executing:
+                return "Executing"
+            case .reflecting:
+                return "Reflecting"
+            case .verifying:
+                return "Verifying"
+            case .summarizing:
+                return "Summarizing"
+            case .waitingForApproval:
+                return "Awaiting approval"
+            case .waitingForFileLock(let file):
+                return "Waiting for \(URL(fileURLWithPath: file).lastPathComponent)"
+            default:
+                return agentExecutionPhase.description
+            }
+        }
+        return agentExecutionPhase.description
+    }
+    var isWaitingForFileLock: Bool {
+        if case .waitingForFileLock = agentExecutionPhase { return true }
+        return false
+    }
+    var waitingForFile: String? {
+        if case .waitingForFileLock(let file) = agentExecutionPhase { return file }
+        return nil
+    }
     
     // Agent cancellation
     private var agentCancelled: Bool = false
@@ -164,6 +266,34 @@ final class ChatSession: ObservableObject, Identifiable {
     // Provider type tracking
     @Published var providerType: ProviderType = .local(.ollama)
     
+    // Context usage tracking
+    @Published var currentContextTokens: Int = 0
+    @Published var contextLimitTokens: Int = 32_000
+    @Published var lastSummarizationDate: Date? = nil
+    @Published var summarizationCount: Int = 0
+    /// User-defined context size for local models (nil = use auto-detected/default)
+    @Published var customLocalContextSize: Int? = nil
+    
+    /// Effective context limit considering custom size for local models
+    var effectiveContextLimit: Int {
+        if providerType.isLocal, let custom = customLocalContextSize {
+            return custom
+        }
+        return contextLimitTokens
+    }
+    
+    /// Context usage as a percentage (0.0 to 1.0)
+    var contextUsagePercent: Double {
+        guard effectiveContextLimit > 0 else { return 0 }
+        return min(1.0, Double(currentContextTokens) / Double(effectiveContextLimit))
+    }
+    
+    /// Whether summarization occurred recently (within last 5 seconds)
+    var recentlySummarized: Bool {
+        guard let lastDate = lastSummarizationDate else { return false }
+        return Date().timeIntervalSince(lastDate) < 5.0
+    }
+    
     // System info and prompt
     private let systemInfo: SystemInfo = SystemInfo.gather()
     var systemPrompt: String {
@@ -177,24 +307,6 @@ final class ChatSession: ObservableObject, Identifiable {
     
     // Private streaming state
     private var streamingTask: Task<Void, Never>? = nil
-    
-    // MARK: - Local Providers (kept for backward compatibility)
-    enum LocalProvider: String {
-        case ollama = "Ollama"
-        case lmStudio = "LM Studio"
-        case vllm = "vLLM"
-        
-        var defaultBaseURL: URL {
-            switch self {
-            case .ollama:
-                return URL(string: "http://localhost:11434/v1")!
-            case .lmStudio:
-                return URL(string: "http://localhost:1234/v1")!
-            case .vllm:
-                return URL(string: "http://localhost:8000/v1")!
-            }
-        }
-    }
     
     // MARK: - Cloud Provider Helpers
     
@@ -259,6 +371,7 @@ final class ChatSession: ObservableObject, Identifiable {
         streamingMessageId = nil
         messages = []
         sessionTitle = ""  // Reset title when clearing chat
+        resetContextTracking()  // Reset context tracking state
         persistMessages()
         persistSettings()  // Persist the cleared title
     }
@@ -273,13 +386,10 @@ final class ChatSession: ObservableObject, Identifiable {
     func cancelAgent() {
         AgentDebugConfig.log("[Agent] Cancel requested by user")
         agentCancelled = true
-        isAgentRunning = false
-        agentPhase = "Cancelled"
+        transitionToPhase(.cancelled)
         
         // Release any file locks held by this session
         FileLockManager.shared.releaseAllLocks(for: self.id)
-        isWaitingForFileLock = false
-        waitingForFile = nil
         
         // Add a message indicating cancellation
         messages.append(ChatMessage(
@@ -296,6 +406,45 @@ final class ChatSession: ObservableObject, Identifiable {
         ))
         messages = messages
         persistMessages()
+    }
+    
+    /// Queue user feedback while agent is running
+    /// The feedback will be incorporated into the agent's next decision point
+    func queueUserFeedback(_ text: String) {
+        guard isAgentRunning else {
+            AgentDebugConfig.log("[Agent] Feedback ignored - agent not running")
+            return
+        }
+        
+        pendingUserFeedback.append(text)
+        AgentDebugConfig.log("[Agent] User feedback queued: \(text.prefix(100))...")
+        
+        // Add a visible message showing the user's feedback
+        messages.append(ChatMessage(
+            role: "user",
+            content: text,
+            agentEvent: AgentEvent(
+                kind: "status",
+                title: "Feedback for agent",
+                details: text,
+                command: nil,
+                output: nil,
+                collapsed: false
+            )
+        ))
+        messages = messages
+        persistMessages()
+    }
+    
+    /// Consume and return any pending user feedback
+    /// Returns nil if no feedback is pending, otherwise returns all feedback joined
+    func consumePendingFeedback() -> String? {
+        guard !pendingUserFeedback.isEmpty else { return nil }
+        
+        let feedback = pendingUserFeedback.joined(separator: "\n\n")
+        pendingUserFeedback.removeAll()
+        AgentDebugConfig.log("[Agent] Consuming user feedback: \(feedback.prefix(100))...")
+        return feedback
     }
     
     /// Append a user message without triggering model streaming (used by Agent mode)
@@ -337,6 +486,9 @@ final class ChatSession: ObservableObject, Identifiable {
         messages.append(ChatMessage(role: "assistant", content: ""))
         streamingMessageId = messages[assistantIndex].id
         
+        // Update context usage tracking
+        updateContextUsage()
+        
         // Force UI update
         messages = messages
         
@@ -357,6 +509,7 @@ final class ChatSession: ObservableObject, Identifiable {
             }
             await MainActor.run {
                 self.streamingMessageId = nil
+                self.updateContextUsage()  // Update context after response
                 self.persistMessages()
             }
         }
@@ -512,17 +665,31 @@ final class ChatSession: ObservableObject, Identifiable {
         }
     }
     
+    /// Transition the agent to a new execution phase
+    private func transitionToPhase(_ newPhase: AgentExecutionPhase) {
+        let oldPhase = agentExecutionPhase
+        if oldPhase.canTransition(to: newPhase) {
+            agentExecutionPhase = newPhase
+            AgentDebugConfig.log("[Agent] Phase: \(oldPhase) -> \(newPhase)")
+        } else {
+            AgentDebugConfig.log("[Agent] Invalid transition: \(oldPhase) -> \(newPhase)")
+            // Force transition anyway for now, but log the issue
+            agentExecutionPhase = newPhase
+        }
+        
+        // Update context usage when transitioning to terminal states
+        if newPhase.isTerminal || newPhase == .idle {
+            updateContextUsage()
+        }
+    }
+    
     private func runAgentOrchestration(for userPrompt: String) async {
-        // Reset cancellation state and mark agent as running
+        // Reset cancellation state and transition to starting phase
         agentCancelled = false
-        isAgentRunning = true
-        agentCurrentStep = 0
-        agentEstimatedSteps = 0
-        agentPhase = "Starting"
+        transitionToPhase(.starting)
         defer { 
-            isAgentRunning = false 
-            if agentPhase != "Cancelled" {
-                agentPhase = ""
+            if !agentExecutionPhase.isTerminal {
+                transitionToPhase(.idle)
             }
         }
         
@@ -536,6 +703,8 @@ final class ChatSession: ObservableObject, Identifiable {
         
         // Check cancellation before first API call
         if checkCancelled(location: "before decision") { return }
+        
+        transitionToPhase(.deciding)
         
         // Ask the model whether to run commands or reply
         let decisionPrompt = """
@@ -581,7 +750,7 @@ final class ChatSession: ObservableObject, Identifiable {
         }
         
         // Generate a concrete goal
-        agentPhase = "Setting goal"
+        transitionToPhase(.settingGoal)
         let goalPrompt = """
         Convert the user's request below into a concise actionable goal a shell-capable agent should accomplish.
         Reply as JSON: {"goal":"short goal phrase"}.
@@ -597,9 +766,10 @@ final class ChatSession: ObservableObject, Identifiable {
         // Clear any stale data from previous agent runs
         AgentToolRegistry.shared.clearSession()
         
-        // Agent context maintained as a growing log we pass to the model
+        // Agent context maintained as a growing log of tool/command outputs
+        // NOTE: Don't add GOAL/CHECKLIST here - they're shown separately in the step prompt
+        // Adding them here causes confusion with outdated state in the context
         agentContextLog = []
-        agentContextLog.append("GOAL: \(goal.goal ?? "")")
         
         // Planning phase (if enabled)
         var agentPlan: [String] = []
@@ -608,7 +778,7 @@ final class ChatSession: ObservableObject, Identifiable {
         
         if AgentSettings.shared.enablePlanning {
             if checkCancelled(location: "before planning") { return }
-            agentPhase = "Planning"
+            transitionToPhase(.planning)
             let planPrompt = """
             Create a numbered plan (3-10 steps) to achieve this goal.
             Each step should be a concrete action that can be verified.
@@ -628,7 +798,6 @@ final class ChatSession: ObservableObject, Identifiable {
             if let steps = planResult.plan, !steps.isEmpty {
                 agentPlan = steps
                 estimatedSteps = planResult.estimatedCommands ?? steps.count
-                agentEstimatedSteps = estimatedSteps
                 
                 // Create the task checklist from the plan
                 agentChecklist = TaskChecklist(from: steps, goal: goal.goal ?? "")
@@ -648,7 +817,8 @@ final class ChatSession: ObservableObject, Identifiable {
                         checklistItems: agentChecklist!.items
                     )
                 ))
-                agentContextLog.append("CHECKLIST:\n\(checklistDisplay)")
+                // NOTE: Don't add checklist to agentContextLog - it's shown separately in step prompt
+                // and would show stale state as the checklist updates
             } else {
                 messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Plan", details: "Could not generate plan, proceeding with adaptive execution", command: nil, output: nil, collapsed: true)))
             }
@@ -692,6 +862,7 @@ final class ChatSession: ObservableObject, Identifiable {
         var recentCommands: [String] = []  // Track recent commands for stuck detection
         var currentPlanStep = 0
         var emptyResponseCount = 0  // Track consecutive empty LLM responses
+        var unknownToolCount = 0  // Track consecutive unknown tool calls to prevent loops
         let reflectionInterval = AgentSettings.shared.reflectionInterval
         let stuckThreshold = AgentSettings.shared.stuckDetectionThreshold
         
@@ -702,12 +873,39 @@ final class ChatSession: ObservableObject, Identifiable {
                 break stepLoop
             }
             
+            // Check for user feedback at start of iteration
+            if let feedback = consumePendingFeedback() {
+                // Add feedback to context log so it's included in the next prompt
+                agentContextLog.append("USER FEEDBACK (received during execution): \(feedback)")
+                messages.append(ChatMessage(
+                    role: "assistant",
+                    content: "",
+                    agentEvent: AgentEvent(
+                        kind: "status",
+                        title: "Incorporating user feedback",
+                        details: "The agent will consider your feedback in its next action.",
+                        command: nil,
+                        output: nil,
+                        collapsed: true
+                    )
+                ))
+                messages = messages
+                persistMessages()
+            }
+            
             iterations += 1
-            agentCurrentStep = iterations
-            agentPhase = "Step \(iterations)"
+            transitionToPhase(.executing(step: iterations, estimatedTotal: estimatedSteps))
+            
+            // Update context usage for real-time tracking (don't persist every iteration)
+            updateContextUsage(persist: false)
             
             // Periodic reflection (if enabled)
             if AgentSettings.shared.enableReflection && iterations > 1 && iterations % reflectionInterval == 0 {
+                // Check for user feedback before reflection
+                if let feedback = consumePendingFeedback() {
+                    agentContextLog.append("USER FEEDBACK (before reflection): \(feedback)")
+                }
+                
                 // Build checklist status for reflection
                 let checklistStatus = agentChecklist?.displayString ?? (agentPlan.isEmpty ? "No plan" : agentPlan.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "; "))
                 
@@ -790,10 +988,12 @@ final class ChatSession: ObservableObject, Identifiable {
                 }
             }
             
-            // Build context with summarization if needed
+            // Build context with summarization if needed (only at 95% of context limit)
             var contextBlob = agentContextLog.joined(separator: "\n")
-            if contextBlob.count > AgentSettings.shared.maxContextSize {
-                // Summarize older context
+            let contextTokens = TokenEstimator.estimateTokens(contextBlob)
+            let summarizationThreshold = Int(Double(effectiveContextLimit) * 0.95)
+            if contextTokens > summarizationThreshold {
+                // Summarize older context when approaching context limit
                 contextBlob = await summarizeContext(agentContextLog, maxSize: AgentSettings.shared.maxContextSize)
             }
             
@@ -876,13 +1076,70 @@ final class ChatSession: ObservableObject, Identifiable {
             let workingOnChecklistItem = step.checklistItem
             
             // Mark checklist item as in progress
-            if let itemId = workingOnChecklistItem, agentChecklist != nil {
-                agentChecklist!.markInProgress(itemId)
+            if let itemId = workingOnChecklistItem, var checklist = agentChecklist {
+                checklist.markInProgress(itemId)
+                agentChecklist = checklist  // Explicit reassignment triggers @Published
                 updateChecklistMessage()
             }
             
             // Check if this is a tool call rather than a shell command
             if toolToUse != "command" && !toolToUse.isEmpty {
+                
+                // Special handling for "done" tool - LLM is signaling completion
+                // This prevents infinite loops where the LLM keeps calling "done"
+                if toolToUse == "done" || toolToUse == "complete" || toolToUse == "finish" {
+                    AgentDebugConfig.log("[Agent] Detected completion signal via tool='\(toolToUse)', running assessment...")
+                    
+                    // Run a goal assessment to verify if we're actually done
+                    let checklistStatus = (self.agentChecklist?.items ?? []).map { 
+                        let status = $0.status == .completed ? "✓" : ($0.status == .failed ? "✗" : "○")
+                        return "\(status) \($0.description)"
+                    }.joined(separator: "\n")
+                    
+                    let completedCount = (self.agentChecklist?.items ?? []).filter { $0.status == .completed }.count
+                    let totalCount = self.agentChecklist?.items.count ?? 0
+                    
+                    let assessPrompt = """
+                    The agent is signaling completion. Verify if the GOAL is actually achieved.
+                    The goal is ONLY complete if ALL checklist items are marked ✓ (completed).
+                    Reply JSON: {"done":true|false, "reason":"short explanation"}.
+                    GOAL: \(goal.goal ?? "")
+                    CHECKLIST (\(completedCount)/\(totalCount) completed):
+                    \(checklistStatus)
+                    RECENT CONTEXT:\n\(agentContextLog.suffix(10).joined(separator: "\n"))
+                    """
+                    
+                    let assess = await callOneShotJSON(prompt: assessPrompt)
+                    if checkCancelled(location: "after done-tool assess") { break stepLoop }
+                    AgentDebugConfig.log("[Agent] Done-tool assessment: \(assess.raw)")
+                    
+                    if assess.done == true {
+                        // Actually complete - summarize and finish
+                        transitionToPhase(.summarizing)
+                        let summaryPrompt = """
+                        Summarize concisely what was done to achieve the goal and the result. Reply markdown.
+                        GOAL: \(goal.goal ?? "")
+                        CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
+                        """
+                        let summaryText = await callOneShotText(prompt: summaryPrompt)
+                        messages.append(ChatMessage(role: "assistant", content: summaryText))
+                        messages = messages
+                        persistMessages()
+                        transitionToPhase(.completed)
+                        break stepLoop
+                    } else {
+                        // Not actually done - add context to help LLM understand what's still needed
+                        let incompleteItems = (self.agentChecklist?.items ?? []).filter { $0.status != .completed }
+                        let itemsList = incompleteItems.map { "- \($0.description)" }.joined(separator: "\n")
+                        
+                        agentContextLog.append("COMPLETION CHECK: Not done yet. Remaining items:\n\(itemsList)")
+                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Not yet complete", details: "Still need to complete:\n\(itemsList)", command: nil, output: nil, collapsed: false)))
+                        messages = messages
+                        persistMessages()
+                        continue stepLoop
+                    }
+                }
+                
                 // Execute agent tool
                 messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "step", title: step.step ?? "Using tool: \(toolToUse)", details: "Args: \(toolArgs)", command: nil, output: nil, collapsed: true)))
                 messages = messages
@@ -895,11 +1152,11 @@ final class ChatSession: ObservableObject, Identifiable {
                     
                     // Check if this is a file operation and show waiting status if needed
                     let isFileOp = ["write_file", "edit_file", "insert_lines", "delete_lines"].contains(toolToUse)
+                    let previousPhase = agentExecutionPhase
                     if isFileOp, let path = toolArgs["path"] {
                         // Check if we'll need to wait for this file
                         if let lockHolder = FileLockManager.shared.lockHolder(for: path), lockHolder != self.id {
-                            self.isWaitingForFileLock = true
-                            self.waitingForFile = path
+                            transitionToPhase(.waitingForFileLock(file: path))
                             messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "⏳ Waiting for file access", details: "Another session is editing: \(URL(fileURLWithPath: path).lastPathComponent)", command: nil, output: nil, collapsed: false)))
                             messages = messages
                             persistMessages()
@@ -908,9 +1165,10 @@ final class ChatSession: ObservableObject, Identifiable {
                     
                     let result = await tool.execute(args: argsWithSession, cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd)
                     
-                    // Clear waiting state
-                    self.isWaitingForFileLock = false
-                    self.waitingForFile = nil
+                    // Restore execution phase if we were waiting
+                    if case .waitingForFileLock = agentExecutionPhase {
+                        agentExecutionPhase = previousPhase
+                    }
                     
                     if checkCancelled(location: "after tool execution") { break stepLoop }
                     
@@ -924,12 +1182,13 @@ final class ChatSession: ObservableObject, Identifiable {
                     persistMessages()
                     
                     // Update checklist item status
-                    if let itemId = workingOnChecklistItem, agentChecklist != nil {
+                    if let itemId = workingOnChecklistItem, var checklist = agentChecklist {
                         if result.success {
-                            agentChecklist!.markCompleted(itemId, note: "Done")
+                            checklist.markCompleted(itemId, note: "Done")
                         } else {
-                            agentChecklist!.markFailed(itemId, note: result.error?.prefix(50).description)
+                            checklist.markFailed(itemId, note: result.error?.prefix(50).description)
                         }
+                        agentChecklist = checklist  // Explicit reassignment triggers @Published
                         updateChecklistMessage()
                     }
                     
@@ -958,6 +1217,7 @@ final class ChatSession: ObservableObject, Identifiable {
                         
                         if assessResult.done == true {
                             AgentDebugConfig.log("[Agent] Goal completed after tool: \(assessResult.raw)")
+                            transitionToPhase(.summarizing)
                             let summaryPrompt = """
                             Summarize concisely what was done to achieve the goal and the result. Reply markdown.
                             GOAL: \(goal.goal ?? "")
@@ -967,14 +1227,30 @@ final class ChatSession: ObservableObject, Identifiable {
                             messages.append(ChatMessage(role: "assistant", content: summaryText))
                             messages = messages
                             persistMessages()
+                            transitionToPhase(.completed)
                             break stepLoop
                         }
                     }
+                    // Reset unknown tool counter on successful tool call
+                    unknownToolCount = 0
                 } else {
-                    agentContextLog.append("TOOL: \(toolToUse) - not found")
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Unknown tool: \(toolToUse)", details: "Available tools: \(AgentToolRegistry.shared.allTools().map { $0.name }.joined(separator: ", "))", command: nil, output: nil, collapsed: true)))
+                    // Unknown tool - track and prevent infinite loops
+                    unknownToolCount += 1
+                    AgentDebugConfig.log("[Agent] Unknown tool '\(toolToUse)' (attempt \(unknownToolCount))")
+                    
+                    agentContextLog.append("TOOL: \(toolToUse) - not found. Use one of: read_file, write_file, edit_file, insert_lines, delete_lines, list_dir, search_files, run_background, check_process, stop_process, http_request, or 'command' for shell commands.")
+                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Unknown tool: \(toolToUse)", details: "Available tools: \(AgentToolRegistry.shared.allTools().map { $0.name }.joined(separator: ", ")), or use 'command' for shell commands", command: nil, output: nil, collapsed: true)))
                     messages = messages
                     persistMessages()
+                    
+                    // Fail-safe: stop if we get too many unknown tool calls in a row
+                    if unknownToolCount >= 3 {
+                        AgentDebugConfig.log("[Agent] Too many unknown tool calls, stopping")
+                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent stopped", details: "Unable to continue - the model keeps requesting unavailable tools. Please rephrase your request.", command: nil, output: nil, collapsed: false)))
+                        messages = messages
+                        persistMessages()
+                        break stepLoop
+                    }
                 }
                 
                 continue stepLoop
@@ -1001,8 +1277,9 @@ final class ChatSession: ObservableObject, Identifiable {
                 continue stepLoop
             }
             
-            // Reset empty response counter on successful action
+            // Reset counters on successful action (command execution)
             emptyResponseCount = 0
+            unknownToolCount = 0
             
             messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "step", title: stepDescription.isEmpty ? "Next step" : stepDescription, details: nil, command: commandToRun, output: nil, collapsed: true)))
             messages = messages
@@ -1044,6 +1321,13 @@ final class ChatSession: ObservableObject, Identifiable {
                 recentCommands.append(commandToRun)
                 if recentCommands.count > 10 { recentCommands.removeFirst() }
                 
+                // Track tool call execution
+                TokenUsageTracker.shared.recordToolCall(
+                    provider: providerName,
+                    model: model,
+                    command: commandToRun
+                )
+                
                 if let out = capturedOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     // Store in buffer for search
                     AgentToolRegistry.shared.storeOutput(out, command: commandToRun)
@@ -1059,6 +1343,25 @@ final class ChatSession: ObservableObject, Identifiable {
             if agentCancelled {
                 AgentDebugConfig.log("[Agent] Cancelled after command execution")
                 break stepLoop
+            }
+            
+            // Check for user feedback after command execution
+            if let feedback = consumePendingFeedback() {
+                agentContextLog.append("USER FEEDBACK (after command): \(feedback)")
+                messages.append(ChatMessage(
+                    role: "assistant",
+                    content: "",
+                    agentEvent: AgentEvent(
+                        kind: "status",
+                        title: "Received user feedback",
+                        details: "Adjusting next action based on your input.",
+                        command: nil,
+                        output: nil,
+                        collapsed: true
+                    )
+                ))
+                messages = messages
+                persistMessages()
             }
             
             // Advance plan step if command succeeded
@@ -1081,6 +1384,20 @@ final class ChatSession: ObservableObject, Identifiable {
             let analysis = await callOneShotJSON(prompt: analyzePrompt)
             if checkCancelled(location: "after analysis") { break stepLoop }
             AgentDebugConfig.log("[Agent] Analysis: \(analysis.raw)")
+            
+            // Update checklist item status for shell commands (mirrors tool execution logic)
+            if let itemId = workingOnChecklistItem, var checklist = agentChecklist {
+                let outcome = analysis.outcome?.lowercased() ?? ""
+                if outcome == "success" {
+                    checklist.markCompleted(itemId, note: "Done")
+                } else if outcome == "fail" {
+                    checklist.markFailed(itemId, note: analysis.reason?.prefix(50).description)
+                }
+                // "uncertain" leaves it in progress for now
+                agentChecklist = checklist  // Explicit reassignment triggers @Published
+                updateChecklistMessage()
+            }
+            
             if analysis.next == "fix", let fixed = analysis.fixed_command?.trimmingCharacters(in: .whitespacesAndNewlines), !fixed.isEmpty, fixAttempts < maxFixAttempts {
                 fixAttempts += 1
                 messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Fixing command and retrying", details: fixed, command: fixed, output: nil, collapsed: false)))
@@ -1137,6 +1454,7 @@ final class ChatSession: ObservableObject, Identifiable {
                 messages = messages
                 persistMessages()
                 if quickAssess.done == true {
+                    transitionToPhase(.summarizing)
                     let summaryPrompt = """
                     Summarize concisely what was done to achieve the goal and the result. Reply markdown.
                     GOAL: \(goal.goal ?? "")
@@ -1147,6 +1465,7 @@ final class ChatSession: ObservableObject, Identifiable {
                     messages.append(ChatMessage(role: "assistant", content: summaryText))
                     messages = messages
                     persistMessages()
+                    transitionToPhase(.completed)
                     break stepLoop
                 }
             }
@@ -1181,7 +1500,7 @@ final class ChatSession: ObservableObject, Identifiable {
             if assess.done == true {
                 // Run verification phase if enabled
                 if AgentSettings.shared.enableVerificationPhase {
-                    agentPhase = "Verifying"
+                    transitionToPhase(.verifying)
                     messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "🔍 Verification Phase", details: "Running final verification before completing...", command: nil, output: nil, collapsed: false)))
                     messages = messages
                     persistMessages()
@@ -1213,6 +1532,7 @@ final class ChatSession: ObservableObject, Identifiable {
                 }
                 
                 // Summarize actions
+                transitionToPhase(.summarizing)
                 let summaryPrompt = """
                 Summarize concisely what was done to achieve the goal and the result. Reply markdown.
                 GOAL: \(goal.goal ?? "")
@@ -1222,6 +1542,7 @@ final class ChatSession: ObservableObject, Identifiable {
                 messages.append(ChatMessage(role: "assistant", content: summaryText))
                 messages = messages
                 persistMessages()
+                transitionToPhase(.completed)
                 break stepLoop
             } else {
                 // Only ask about continuing if we've done many iterations (to avoid API call overhead)
@@ -1255,42 +1576,6 @@ final class ChatSession: ObservableObject, Identifiable {
         }
     }
     
-    private struct JSONDecision: Decodable { let action: String?; let reason: String? }
-    private struct JSONGoal: Decodable { let goal: String? }
-    private struct JSONPlan: Decodable { let plan: [String]?; let estimated_commands: Int? }
-    
-    // Custom wrapper to handle tool_args that may contain mixed types (strings, ints, bools)
-    private struct JSONStep: Decodable {
-        let step: String?
-        let command: String?
-        let tool: String?
-        let tool_args: [String: String]?
-        let checklist_item: Int?
-        
-        private enum CodingKeys: String, CodingKey {
-            case step, command, tool, tool_args, checklist_item
-        }
-        
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            step = try container.decodeIfPresent(String.self, forKey: .step)
-            command = try container.decodeIfPresent(String.self, forKey: .command)
-            tool = try container.decodeIfPresent(String.self, forKey: .tool)
-            checklist_item = try container.decodeIfPresent(Int.self, forKey: .checklist_item)
-            
-            // Try to decode tool_args, converting any non-string values to strings
-            if let rawArgs = try? container.decodeIfPresent([String: AnyCodable].self, forKey: .tool_args) {
-                var stringArgs: [String: String] = [:]
-                for (key, value) in rawArgs {
-                    stringArgs[key] = value.stringValue
-                }
-                tool_args = stringArgs
-            } else {
-                tool_args = nil
-            }
-        }
-    }
-    
     // Helper to decode any JSON value and convert to string
     private struct AnyCodable: Decodable {
         let value: Any
@@ -1314,13 +1599,90 @@ final class ChatSession: ObservableObject, Identifiable {
         }
     }
     
-    private struct JSONAssess: Decodable { let done: Bool?; let reason: String? }
-    private struct JSONCont: Decodable { let decision: String?; let reason: String? }
-    private struct JSONAnalyze: Decodable { let outcome: String?; let reason: String?; let next: String?; let fixed_command: String? }
-    private struct JSONReflection: Decodable { let progress_percent: Int?; let on_track: Bool?; let completed: [String]?; let remaining: [String]?; let should_adjust: Bool?; let new_approach: String? }
-    private struct JSONStuckRecovery: Decodable { let is_stuck: Bool?; let new_approach: String?; let should_stop: Bool? }
-    
-    private struct RawJSON: Decodable { }
+    /// Unified Codable struct for all agent JSON responses - decoded in a single pass
+    private struct UnifiedAgentJSON: Decodable {
+        // Decision fields
+        let action: String?
+        let reason: String?
+        
+        // Goal/Plan fields
+        let goal: String?
+        let plan: [String]?
+        let estimated_commands: Int?
+        
+        // Step/Command fields
+        let step: String?
+        let command: String?
+        let tool: String?
+        var tool_args: [String: String]?
+        let checklist_item: Int?
+        
+        // Assessment fields
+        let done: Bool?
+        let decision: String?
+        let outcome: String?
+        let next: String?
+        let fixed_command: String?
+        
+        // Reflection fields
+        let progress_percent: Int?
+        let on_track: Bool?
+        let completed: [String]?
+        let remaining: [String]?
+        let should_adjust: Bool?
+        let new_approach: String?
+        
+        // Stuck recovery fields
+        let is_stuck: Bool?
+        let should_stop: Bool?
+        
+        private enum CodingKeys: String, CodingKey {
+            case action, reason, goal, plan, estimated_commands
+            case step, command, tool, tool_args, checklist_item
+            case done, decision, outcome, next, fixed_command
+            case progress_percent, on_track, completed, remaining, should_adjust, new_approach
+            case is_stuck, should_stop
+        }
+        
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            
+            // Decode simple fields
+            action = try container.decodeIfPresent(String.self, forKey: .action)
+            reason = try container.decodeIfPresent(String.self, forKey: .reason)
+            goal = try container.decodeIfPresent(String.self, forKey: .goal)
+            plan = try container.decodeIfPresent([String].self, forKey: .plan)
+            estimated_commands = try container.decodeIfPresent(Int.self, forKey: .estimated_commands)
+            step = try container.decodeIfPresent(String.self, forKey: .step)
+            command = try container.decodeIfPresent(String.self, forKey: .command)
+            tool = try container.decodeIfPresent(String.self, forKey: .tool)
+            checklist_item = try container.decodeIfPresent(Int.self, forKey: .checklist_item)
+            done = try container.decodeIfPresent(Bool.self, forKey: .done)
+            decision = try container.decodeIfPresent(String.self, forKey: .decision)
+            outcome = try container.decodeIfPresent(String.self, forKey: .outcome)
+            next = try container.decodeIfPresent(String.self, forKey: .next)
+            fixed_command = try container.decodeIfPresent(String.self, forKey: .fixed_command)
+            progress_percent = try container.decodeIfPresent(Int.self, forKey: .progress_percent)
+            on_track = try container.decodeIfPresent(Bool.self, forKey: .on_track)
+            completed = try container.decodeIfPresent([String].self, forKey: .completed)
+            remaining = try container.decodeIfPresent([String].self, forKey: .remaining)
+            should_adjust = try container.decodeIfPresent(Bool.self, forKey: .should_adjust)
+            new_approach = try container.decodeIfPresent(String.self, forKey: .new_approach)
+            is_stuck = try container.decodeIfPresent(Bool.self, forKey: .is_stuck)
+            should_stop = try container.decodeIfPresent(Bool.self, forKey: .should_stop)
+            
+            // Handle tool_args with mixed types
+            if let rawArgs = try? container.decodeIfPresent([String: AnyCodable].self, forKey: .tool_args) {
+                var stringArgs: [String: String] = [:]
+                for (key, value) in rawArgs {
+                    stringArgs[key] = value.stringValue
+                }
+                tool_args = stringArgs
+            } else {
+                tool_args = nil
+            }
+        }
+    }
     
     /// Parsed JSON response from the agent
     struct AgentJSONResponse {
@@ -1372,49 +1734,31 @@ final class ChatSession: ObservableObject, Identifiable {
         let data = compact.data(using: .utf8) ?? Data()
         var response = AgentJSONResponse(raw: compact)
         
-        if let obj = try? JSONDecoder().decode(JSONDecision.self, from: data) { 
-            response.action = obj.action
-            response.reason = obj.reason 
-        }
-        if let obj = try? JSONDecoder().decode(JSONGoal.self, from: data) { 
-            response.goal = obj.goal 
-        }
-        if let obj = try? JSONDecoder().decode(JSONPlan.self, from: data) { 
-            response.plan = obj.plan
-            response.estimatedCommands = obj.estimated_commands
-        }
-        if let obj = try? JSONDecoder().decode(JSONStep.self, from: data) { 
-            response.step = obj.step
-            response.command = obj.command
-            response.tool = obj.tool
-            response.toolArgs = obj.tool_args
-            response.checklistItem = obj.checklist_item
-        }
-        if let obj = try? JSONDecoder().decode(JSONAssess.self, from: data) { 
-            response.done = obj.done
-            response.reason = obj.reason ?? response.reason 
-        }
-        if let obj = try? JSONDecoder().decode(JSONCont.self, from: data) { 
-            response.decision = obj.decision
-            response.reason = obj.reason ?? response.reason 
-        }
-        if let obj = try? JSONDecoder().decode(JSONAnalyze.self, from: data) { 
-            response.outcome = obj.outcome
-            response.next = obj.next
-            response.fixed_command = obj.fixed_command 
-        }
-        if let obj = try? JSONDecoder().decode(JSONReflection.self, from: data) {
-            response.progressPercent = obj.progress_percent
-            response.onTrack = obj.on_track
-            response.completed = obj.completed
-            response.remaining = obj.remaining
-            response.shouldAdjust = obj.should_adjust
-            response.newApproach = obj.new_approach
-        }
-        if let obj = try? JSONDecoder().decode(JSONStuckRecovery.self, from: data) {
-            response.isStuck = obj.is_stuck
-            response.newApproach = obj.new_approach ?? response.newApproach
-            response.shouldStop = obj.should_stop
+        // Decode all fields in a single pass using the unified struct
+        if let unified = try? JSONDecoder().decode(UnifiedAgentJSON.self, from: data) {
+            response.action = unified.action
+            response.reason = unified.reason
+            response.goal = unified.goal
+            response.plan = unified.plan
+            response.estimatedCommands = unified.estimated_commands
+            response.step = unified.step
+            response.command = unified.command
+            response.tool = unified.tool
+            response.toolArgs = unified.tool_args
+            response.checklistItem = unified.checklist_item
+            response.done = unified.done
+            response.decision = unified.decision
+            response.outcome = unified.outcome
+            response.next = unified.next
+            response.fixed_command = unified.fixed_command
+            response.progressPercent = unified.progress_percent
+            response.onTrack = unified.on_track
+            response.completed = unified.completed
+            response.remaining = unified.remaining
+            response.shouldAdjust = unified.should_adjust
+            response.newApproach = unified.new_approach
+            response.isStuck = unified.is_stuck
+            response.shouldStop = unified.should_stop
         }
         
         return response
@@ -1496,17 +1840,62 @@ final class ChatSession: ObservableObject, Identifiable {
             RequestBody.Message(role: "user", content: prompt)
         ]
         let req = RequestBody(model: model, messages: messages, stream: false, temperature: 0.2)
+        
+        // Estimate prompt tokens for usage tracking
+        let promptText = agentSystemPrompt + prompt
+        let estimatedPromptTokens = TokenEstimator.estimateTokens(promptText)
+        
         do {
             request.httpBody = try JSONEncoder().encode(req)
             let (data, _) = try await URLSession.shared.data(for: request)
-            // Try OpenAI-like
+            
+            // Response structures for parsing
+            struct Usage: Decodable { let prompt_tokens: Int?; let completion_tokens: Int? }
             struct Choice: Decodable { struct Message: Decodable { let content: String }; let message: Message }
-            struct Resp: Decodable { let choices: [Choice] }
-            if let decoded = try? JSONDecoder().decode(Resp.self, from: data), let content = decoded.choices.first?.message.content { return content }
-            // Try Ollama-like
-            struct OR: Decodable { struct Message: Decodable { let content: String? }; let message: Message?; let response: String? }
-            if let o = try? JSONDecoder().decode(OR.self, from: data) { return o.message?.content ?? o.response ?? String(data: data, encoding: .utf8) ?? "" }
-            return String(data: data, encoding: .utf8) ?? ""
+            struct Resp: Decodable { let choices: [Choice]; let usage: Usage? }
+            struct OR: Decodable { 
+                struct Message: Decodable { let content: String? }
+                let message: Message?
+                let response: String?
+                let prompt_eval_count: Int?
+                let eval_count: Int?
+            }
+            
+            var content: String = ""
+            var promptTokens: Int? = nil
+            var completionTokens: Int? = nil
+            
+            // Try OpenAI-like format
+            if let decoded = try? JSONDecoder().decode(Resp.self, from: data), 
+               let text = decoded.choices.first?.message.content {
+                content = text
+                promptTokens = decoded.usage?.prompt_tokens
+                completionTokens = decoded.usage?.completion_tokens
+            }
+            // Try Ollama-like format
+            else if let o = try? JSONDecoder().decode(OR.self, from: data) {
+                content = o.message?.content ?? o.response ?? String(data: data, encoding: .utf8) ?? ""
+                promptTokens = o.prompt_eval_count
+                completionTokens = o.eval_count
+            } else {
+                content = String(data: data, encoding: .utf8) ?? ""
+            }
+            
+            // Record usage (use estimates if not provided by API)
+            let finalPromptTokens = promptTokens ?? estimatedPromptTokens
+            let finalCompletionTokens = completionTokens ?? TokenEstimator.estimateTokens(content)
+            let isEstimated = promptTokens == nil || completionTokens == nil
+            
+            TokenUsageTracker.shared.recordUsage(
+                provider: providerName,
+                model: model,
+                promptTokens: finalPromptTokens,
+                completionTokens: finalCompletionTokens,
+                isEstimated: isEstimated,
+                requestType: .planning
+            )
+            
+            return content
         } catch {
             return "{\"error\":\"\(error.localizedDescription)\"}"
         }
@@ -1541,12 +1930,35 @@ final class ChatSession: ObservableObject, Identifiable {
             bodyDict["temperature"] = 0.2
         }
         
+        // Estimate prompt tokens for fallback
+        let promptText = agentSystemPrompt + prompt
+        let estimatedPromptTokens = TokenEstimator.estimateTokens(promptText)
+        
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
             let (data, _) = try await URLSession.shared.data(for: request)
+            
+            // Response structure with usage
+            struct Usage: Decodable { let prompt_tokens: Int; let completion_tokens: Int }
             struct Choice: Decodable { struct Message: Decodable { let content: String }; let message: Message }
-            struct Resp: Decodable { let choices: [Choice] }
-            if let decoded = try? JSONDecoder().decode(Resp.self, from: data), let content = decoded.choices.first?.message.content {
+            struct Resp: Decodable { let choices: [Choice]; let usage: Usage? }
+            
+            if let decoded = try? JSONDecoder().decode(Resp.self, from: data), 
+               let content = decoded.choices.first?.message.content {
+                // Record usage from response or estimate
+                let promptTokens = decoded.usage?.prompt_tokens ?? estimatedPromptTokens
+                let completionTokens = decoded.usage?.completion_tokens ?? TokenEstimator.estimateTokens(content)
+                let isEstimated = decoded.usage == nil
+                
+                TokenUsageTracker.shared.recordUsage(
+                    provider: "OpenAI",
+                    model: model,
+                    promptTokens: promptTokens,
+                    completionTokens: completionTokens,
+                    isEstimated: isEstimated,
+                    requestType: .planning
+                )
+                
                 return content
             }
             return String(data: data, encoding: .utf8) ?? ""
@@ -1577,17 +1989,36 @@ final class ChatSession: ObservableObject, Identifiable {
             ]
         ]
         
+        // Estimate prompt tokens for fallback
+        let promptText = agentSystemPrompt + prompt
+        let estimatedPromptTokens = TokenEstimator.estimateTokens(promptText)
+        
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
             let (data, _) = try await URLSession.shared.data(for: request)
             
-            // Anthropic response format
+            // Anthropic response format with usage
+            struct Usage: Decodable { let input_tokens: Int; let output_tokens: Int }
             struct ContentBlock: Decodable { let type: String; let text: String? }
-            struct AnthropicResponse: Decodable { let content: [ContentBlock] }
+            struct AnthropicResponse: Decodable { let content: [ContentBlock]; let usage: Usage? }
             
             if let decoded = try? JSONDecoder().decode(AnthropicResponse.self, from: data),
                let textBlock = decoded.content.first(where: { $0.type == "text" }),
                let text = textBlock.text {
+                // Record usage from response or estimate
+                let promptTokens = decoded.usage?.input_tokens ?? estimatedPromptTokens
+                let completionTokens = decoded.usage?.output_tokens ?? TokenEstimator.estimateTokens(text)
+                let isEstimated = decoded.usage == nil
+                
+                TokenUsageTracker.shared.recordUsage(
+                    provider: "Anthropic",
+                    model: model,
+                    promptTokens: promptTokens,
+                    completionTokens: completionTokens,
+                    isEstimated: isEstimated,
+                    requestType: .planning
+                )
+                
                 return text
             }
             return String(data: data, encoding: .utf8) ?? ""
@@ -1597,25 +2028,41 @@ final class ChatSession: ObservableObject, Identifiable {
     }
     
     /// Summarize context when it exceeds size limits
+    /// Uses token estimation with 95% threshold for more accurate context management
     private func summarizeContext(_ contextLog: [String], maxSize: Int) async -> String {
         let fullContext = contextLog.joined(separator: "\n")
         
-        // If already under limit, return as-is
-        if fullContext.count <= maxSize {
+        // Calculate limits using token estimation with 95% threshold
+        let currentTokens = TokenEstimator.estimateTokens(fullContext)
+        let tokenThreshold = Int(Double(effectiveContextLimit) * 0.95)
+        let maxChars = maxSize
+        
+        // Use token-based limit as primary, with character limit as fallback
+        let tokenBasedCharLimit = Int(Double(tokenThreshold) * 3.8)
+        let effectiveLimit = min(maxChars, tokenBasedCharLimit)
+        
+        // If already under 95% threshold, return as-is
+        if currentTokens <= tokenThreshold {
             return fullContext
         }
         
-        // Keep most recent entries intact
-        let recentCount = min(contextLog.count, 10)
+        // Record that summarization is occurring
+        await MainActor.run { recordSummarization() }
+        
+        // Keep most recent entries intact (preserve more if model supports larger context)
+        let recentCount = min(contextLog.count, effectiveContextLimit > 100_000 ? 15 : 10)
         let recentEntries = contextLog.suffix(recentCount)
         let olderEntries = contextLog.dropLast(recentCount)
         
         if olderEntries.isEmpty {
             // All entries are recent, just truncate
-            return String(fullContext.suffix(maxSize))
+            return String(fullContext.suffix(effectiveLimit))
         }
         
         // Summarize older entries
+        let olderText = olderEntries.joined(separator: "\n")
+        let olderLimit = min(olderText.count, effectiveLimit / 2)
+        
         let summarizePrompt = """
         Summarize the following agent execution context, preserving:
         - Key commands that were run and their outcomes
@@ -1625,13 +2072,16 @@ final class ChatSession: ObservableObject, Identifiable {
         Be concise but preserve critical information.
         
         CONTEXT TO SUMMARIZE:
-        \(olderEntries.joined(separator: "\n").prefix(maxSize / 2))
+        \(String(olderText.prefix(olderLimit)))
         """
         
         let summary = await callOneShotText(prompt: summarizePrompt)
         let summarized = "[SUMMARIZED HISTORY]\n\(summary)\n\n[RECENT ACTIVITY]\n\(recentEntries.joined(separator: "\n"))"
         
-        return String(summarized.suffix(maxSize))
+        // Update context usage after summarization
+        await MainActor.run { updateContextUsage() }
+        
+        return String(summarized.suffix(effectiveLimit))
     }
     
     /// Summarize long command output
@@ -1668,11 +2118,24 @@ final class ChatSession: ObservableObject, Identifiable {
     
     private func lastExitCodeString() -> String {
         // We don't have direct access to PTYModel here; rely on last recorded value from context if present.
-        // As a simple fallback, look for the last "OUTPUT: __TERMAI_RC__=N" line we injected into agentContextLog.
-        if let line = agentContextLog.last(where: { $0.contains("__TERMAI_RC__=") }) {
-            if let idx = line.lastIndex(of: "=") {
-                let num = line[line.index(after: idx)...]
-                return String(num)
+        // Look for "__TERMAI_RC__=N" pattern and extract just the number
+        for line in agentContextLog.reversed() {
+            if let range = line.range(of: "__TERMAI_RC__=") {
+                // Extract only the numeric characters immediately following the marker
+                var numStr = ""
+                var idx = range.upperBound
+                while idx < line.endIndex {
+                    let char = line[idx]
+                    if char.isNumber || (numStr.isEmpty && char == "-") {
+                        numStr.append(char)
+                    } else {
+                        break  // Stop at first non-numeric character
+                    }
+                    idx = line.index(after: idx)
+                }
+                if !numStr.isEmpty {
+                    return numStr
+                }
             }
         }
         return "unknown"
@@ -1887,6 +2350,13 @@ final class ChatSession: ObservableObject, Identifiable {
             agentContextLog.append("OUTPUT: \(processedOutput)")
         }
         
+        // Track tool call execution
+        TokenUsageTracker.shared.recordToolCall(
+            provider: providerName,
+            model: model,
+            command: approvedCommand
+        )
+        
         return output
     }
     
@@ -2044,24 +2514,34 @@ final class ChatSession: ObservableObject, Identifiable {
                     return
                 }
                 
-                // Response format structs
+                // Response format structs with usage
+                struct OpenAIUsage: Decodable { let prompt_tokens: Int; let completion_tokens: Int }
                 struct OpenAIChoice: Decodable {
                     struct Message: Decodable { let content: String }
                     let message: Message
                 }
-                struct OpenAIResponse: Decodable { let choices: [OpenAIChoice] }
+                struct OpenAIResponse: Decodable { let choices: [OpenAIChoice]; let usage: OpenAIUsage? }
                 
                 struct OllamaResponse: Decodable {
                     struct Message: Decodable { let content: String }
                     let message: Message?
                     let response: String?
+                    let prompt_eval_count: Int?
+                    let eval_count: Int?
                 }
                 
-                // Anthropic response format
+                // Anthropic response format with usage
+                struct AnthropicUsage: Decodable { let input_tokens: Int; let output_tokens: Int }
                 struct AnthropicContentBlock: Decodable { let type: String; let text: String? }
-                struct AnthropicResponse: Decodable { let content: [AnthropicContentBlock] }
+                struct AnthropicResponse: Decodable { let content: [AnthropicContentBlock]; let usage: AnthropicUsage? }
                 
                 var generatedTitle: String? = nil
+                var promptTokens: Int? = nil
+                var completionTokens: Int? = nil
+                
+                // Estimate prompt tokens for fallback
+                let systemPromptForTitle = "You are a helpful assistant that generates concise titles."
+                let estimatedPromptTokens = TokenEstimator.estimateTokens(systemPromptForTitle + titlePrompt)
                 
                 // Parse based on provider
                 if case .cloud(let cloudProvider) = self.providerType, cloudProvider == .anthropic {
@@ -2070,6 +2550,8 @@ final class ChatSession: ObservableObject, Identifiable {
                        let textBlock = decoded.content.first(where: { $0.type == "text" }),
                        let text = textBlock.text {
                         generatedTitle = text
+                        promptTokens = decoded.usage?.input_tokens
+                        completionTokens = decoded.usage?.output_tokens
                     }
                 } else {
                     // Try OpenAI format first
@@ -2077,12 +2559,16 @@ final class ChatSession: ObservableObject, Identifiable {
                         let decoded = try JSONDecoder().decode(OpenAIResponse.self, from: data)
                         if let title = decoded.choices.first?.message.content {
                             generatedTitle = title
+                            promptTokens = decoded.usage?.prompt_tokens
+                            completionTokens = decoded.usage?.completion_tokens
                         }
                     } catch {
                         // Try Ollama format
                         do {
                             let decoded = try JSONDecoder().decode(OllamaResponse.self, from: data)
                             generatedTitle = decoded.message?.content ?? decoded.response
+                            promptTokens = decoded.prompt_eval_count
+                            completionTokens = decoded.eval_count
                         } catch {
                             // Failed to decode both formats
                         }
@@ -2090,6 +2576,27 @@ final class ChatSession: ObservableObject, Identifiable {
                 }
                 
                 if let title = generatedTitle {
+                    // Record usage for title generation
+                    let finalPromptTokens = promptTokens ?? estimatedPromptTokens
+                    let finalCompletionTokens = completionTokens ?? TokenEstimator.estimateTokens(title)
+                    let isEstimated = promptTokens == nil || completionTokens == nil
+                    
+                    let providerForTracking: String
+                    if case .cloud(let cloudProvider) = self.providerType {
+                        providerForTracking = cloudProvider == .anthropic ? "Anthropic" : "OpenAI"
+                    } else {
+                        providerForTracking = self.providerName
+                    }
+                    
+                    TokenUsageTracker.shared.recordUsage(
+                        provider: providerForTracking,
+                        model: self.model,
+                        promptTokens: finalPromptTokens,
+                        completionTokens: finalCompletionTokens,
+                        isEstimated: isEstimated,
+                        requestType: .titleGeneration
+                    )
+                    
                     await MainActor.run { [weak self] in
                         self?.sessionTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
                         self?.titleGenerationError = nil  // Clear any error on success
@@ -2183,7 +2690,17 @@ final class ChatSession: ObservableObject, Identifiable {
         )
         request.httpBody = try JSONEncoder().encode(req)
         
-        return try await streamSSEResponse(request: request, assistantIndex: assistantIndex)
+        // Calculate prompt tokens for estimation (local providers don't return usage)
+        let promptText = allMessages.map { $0.content }.joined(separator: "\n")
+        let estimatedPromptTokens = TokenEstimator.estimateTokens(promptText)
+        
+        return try await streamSSEResponse(
+            request: request,
+            assistantIndex: assistantIndex,
+            provider: providerName,
+            modelName: model,
+            estimatedPromptTokens: estimatedPromptTokens
+        )
     }
     
     // MARK: - OpenAI Streaming
@@ -2204,7 +2721,8 @@ final class ChatSession: ObservableObject, Identifiable {
         var bodyDict: [String: Any] = [
             "model": model,
             "messages": allMessages.map { ["role": $0.role, "content": $0.content] },
-            "stream": true
+            "stream": true,
+            "stream_options": ["include_usage": true]  // Request usage data in streaming response
         ]
         
         // Handle temperature and max tokens based on whether model supports reasoning
@@ -2225,7 +2743,17 @@ final class ChatSession: ObservableObject, Identifiable {
         
         request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
         
-        return try await streamSSEResponse(request: request, assistantIndex: assistantIndex)
+        // Calculate prompt tokens for estimation
+        let promptText = allMessages.map { $0.content }.joined(separator: "\n")
+        let estimatedPromptTokens = TokenEstimator.estimateTokens(promptText)
+        
+        return try await streamSSEResponse(
+            request: request,
+            assistantIndex: assistantIndex,
+            provider: "OpenAI",
+            modelName: model,
+            estimatedPromptTokens: estimatedPromptTokens
+        )
     }
     
     // MARK: - Anthropic Streaming
@@ -2279,7 +2807,11 @@ final class ChatSession: ObservableObject, Identifiable {
         
         request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
         
-        return try await streamAnthropicResponse(request: request, assistantIndex: assistantIndex)
+        return try await streamAnthropicResponse(
+            request: request,
+            assistantIndex: assistantIndex,
+            modelName: model
+        )
     }
     
     // MARK: - Message Building Helper
@@ -2343,7 +2875,13 @@ final class ChatSession: ObservableObject, Identifiable {
     }
     
     // MARK: - SSE Response Streaming (OpenAI-compatible)
-    private func streamSSEResponse(request: URLRequest, assistantIndex: Int) async throws -> String {
+    private func streamSSEResponse(
+        request: URLRequest,
+        assistantIndex: Int,
+        provider: String? = nil,
+        modelName: String? = nil,
+        estimatedPromptTokens: Int? = nil
+    ) async throws -> String {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
@@ -2361,6 +2899,10 @@ final class ChatSession: ObservableObject, Identifiable {
         var accumulated = ""
         let index = assistantIndex
         
+        // Token usage tracking
+        var promptTokens: Int? = nil
+        var completionTokens: Int? = nil
+        
         // Throttle UI updates to reduce overhead during streaming
         let updateInterval: TimeInterval = 0.05  // 50ms between UI updates
         var lastUpdateTime = Date.distantPast
@@ -2377,6 +2919,11 @@ final class ChatSession: ObservableObject, Identifiable {
                 if let delta = chunk.choices.first?.delta?.content, !delta.isEmpty {
                     accumulated += delta
                     didAccumulate = true
+                }
+                // Capture usage from final chunk (OpenAI sends usage in last chunk with stream_options)
+                if let usage = chunk.usage {
+                    promptTokens = usage.prompt_tokens
+                    completionTokens = usage.completion_tokens
                 }
             } else if let ollama = try? JSONDecoder().decode(OllamaStreamChunk.self, from: data) {
                 if let content = ollama.message?.content ?? ollama.response {
@@ -2402,11 +2949,30 @@ final class ChatSession: ObservableObject, Identifiable {
         messages[index].content = accumulated
         messages = messages
         
+        // Record token usage
+        if let provider = provider, let modelName = modelName {
+            let finalPromptTokens = promptTokens ?? estimatedPromptTokens ?? 0
+            let finalCompletionTokens = completionTokens ?? TokenEstimator.estimateTokens(accumulated)
+            let isEstimated = promptTokens == nil || completionTokens == nil
+            
+            TokenUsageTracker.shared.recordUsage(
+                provider: provider,
+                model: modelName,
+                promptTokens: finalPromptTokens,
+                completionTokens: finalCompletionTokens,
+                isEstimated: isEstimated
+            )
+        }
+        
         return accumulated
     }
     
     // MARK: - Anthropic Response Streaming
-    private func streamAnthropicResponse(request: URLRequest, assistantIndex: Int) async throws -> String {
+    private func streamAnthropicResponse(
+        request: URLRequest,
+        assistantIndex: Int,
+        modelName: String
+    ) async throws -> String {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
@@ -2423,6 +2989,10 @@ final class ChatSession: ObservableObject, Identifiable {
         
         var accumulated = ""
         let index = assistantIndex
+        
+        // Token usage tracking
+        var inputTokens: Int? = nil
+        var outputTokens: Int? = nil
         
         // Throttle UI updates
         let updateInterval: TimeInterval = 0.05
@@ -2444,6 +3014,18 @@ final class ChatSession: ObservableObject, Identifiable {
             guard line.hasPrefix("data:") else { continue }
             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             guard let data = payload.data(using: .utf8) else { continue }
+            
+            // Try to parse message_start for input tokens
+            if let messageStart = try? JSONDecoder().decode(AnthropicMessageStart.self, from: data),
+               let usage = messageStart.message?.usage {
+                inputTokens = usage.input_tokens
+            }
+            
+            // Try to parse message_delta for output tokens
+            if let messageDelta = try? JSONDecoder().decode(AnthropicMessageDelta.self, from: data),
+               let usage = messageDelta.usage {
+                outputTokens = usage.output_tokens
+            }
             
             // Parse event type from previous line or inline
             if let event = try? JSONDecoder().decode(ContentBlockDelta.self, from: data),
@@ -2475,17 +3057,62 @@ final class ChatSession: ObservableObject, Identifiable {
         messages[index].content = accumulated
         messages = messages
         
+        // Record token usage
+        let finalInputTokens = inputTokens ?? TokenEstimator.estimateTokens(systemPrompt + messages.map { $0.content }.joined())
+        let finalOutputTokens = outputTokens ?? TokenEstimator.estimateTokens(accumulated)
+        let isEstimated = inputTokens == nil || outputTokens == nil
+        
+        TokenUsageTracker.shared.recordUsage(
+            provider: "Anthropic",
+            model: modelName,
+            promptTokens: finalInputTokens,
+            completionTokens: finalOutputTokens,
+            isEstimated: isEstimated
+        )
+        
         return accumulated
     }
     
-    // MARK: - Models
-    func fetchAvailableModels() async {
-        await MainActor.run {
-            self.modelFetchError = nil
-            self.availableModels = []
+    // MARK: - Model Cache
+    
+    /// Cache key for the current provider configuration
+    private var modelCacheKey: String {
+        "modelCache_\(providerName)_\(apiBaseURL.absoluteString)"
+    }
+    
+    /// TTL for cached models (1 hour)
+    private static let modelCacheTTL: TimeInterval = 3600
+    
+    /// Check if cached models are still valid
+    private func getCachedModels() -> [String]? {
+        guard let data = UserDefaults.standard.data(forKey: modelCacheKey),
+              let cache = try? JSONDecoder().decode(ModelCache.self, from: data) else {
+            return nil
         }
         
-        // Handle cloud providers - use curated model list
+        // Check if cache is expired
+        if Date().timeIntervalSince(cache.timestamp) > Self.modelCacheTTL {
+            return nil
+        }
+        
+        return cache.models
+    }
+    
+    /// Save models to cache
+    private func cacheModels(_ models: [String]) {
+        let cache = ModelCache(models: models, timestamp: Date())
+        if let data = try? JSONEncoder().encode(cache) {
+            UserDefaults.standard.set(data, forKey: modelCacheKey)
+        }
+    }
+    
+    // MARK: - Models
+    func fetchAvailableModels(forceRefresh: Bool = false) async {
+        await MainActor.run {
+            self.modelFetchError = nil
+        }
+        
+        // Handle cloud providers - use curated model list (no caching needed, these are static)
         if case .cloud(let cloudProvider) = providerType {
             let models = CuratedModels.models(for: cloudProvider).map { $0.id }
             await MainActor.run {
@@ -2497,13 +3124,25 @@ final class ChatSession: ObservableObject, Identifiable {
             return
         }
         
+        // Check cache first for local providers (unless force refresh)
+        if !forceRefresh, let cachedModels = getCachedModels(), !cachedModels.isEmpty {
+            await MainActor.run {
+                self.availableModels = cachedModels
+            }
+            return
+        }
+        
+        await MainActor.run {
+            self.availableModels = []
+        }
+        
         // Handle local providers
-        switch LocalProvider(rawValue: providerName) {
+        switch LocalLLMProvider(rawValue: providerName) {
         case .ollama:
             await fetchOllamaModelsInternal()
         case .lmStudio, .vllm:
             await fetchOpenAIStyleModels()
-        default:
+        case .none:
             break
         }
     }
@@ -2529,6 +3168,8 @@ final class ChatSession: ObservableObject, Identifiable {
             struct TagsResponse: Decodable { struct Model: Decodable { let name: String }; let models: [Model] }
             if let decoded = try? JSONDecoder().decode(TagsResponse.self, from: data) {
                 let names = decoded.models.map { $0.name }.sorted()
+                // Cache the results
+                cacheModels(names)
                 await MainActor.run {
                     self.availableModels = names
                     if names.isEmpty {
@@ -2537,6 +3178,7 @@ final class ChatSession: ObservableObject, Identifiable {
                         // Only auto-select if no model is set; preserve user's persisted model
                         self.model = names.first ?? self.model
                     }
+                    self.updateContextLimit()
                     self.persistSettings()
                 }
             } else {
@@ -2564,6 +3206,8 @@ final class ChatSession: ObservableObject, Identifiable {
             struct ModelsResponse: Decodable { struct Model: Decodable { let id: String }; let data: [Model] }
             if let decoded = try? JSONDecoder().decode(ModelsResponse.self, from: data) {
                 let ids = decoded.data.map { $0.id }.sorted()
+                // Cache the results
+                cacheModels(ids)
                 await MainActor.run {
                     self.availableModels = ids
                     if ids.isEmpty {
@@ -2572,6 +3216,7 @@ final class ChatSession: ObservableObject, Identifiable {
                         // Only auto-select if no model is set; preserve user's persisted model
                         self.model = ids.first ?? self.model
                     }
+                    self.updateContextLimit()
                     self.persistSettings()
                 }
             } else {
@@ -2607,7 +3252,12 @@ final class ChatSession: ObservableObject, Identifiable {
             temperature: temperature,
             maxTokens: maxTokens,
             reasoningEffort: reasoningEffort,
-            providerType: providerType
+            providerType: providerType,
+            customLocalContextSize: customLocalContextSize,
+            currentContextTokens: currentContextTokens,
+            contextLimitTokens: contextLimitTokens,
+            lastSummarizationDate: lastSummarizationDate,
+            summarizationCount: summarizationCount
         )
         try? PersistenceService.saveJSON(settings, to: "session-settings-\(id.uuidString).json")
     }
@@ -2627,6 +3277,26 @@ final class ChatSession: ObservableObject, Identifiable {
             maxTokens = settings.maxTokens ?? 4096
             reasoningEffort = settings.reasoningEffort ?? .medium
             providerType = settings.providerType ?? .local(.ollama)
+            
+            // Load context size settings
+            customLocalContextSize = settings.customLocalContextSize
+            
+            // Load context tracking (per-session)
+            if let tokens = settings.currentContextTokens {
+                currentContextTokens = tokens
+            }
+            if let limit = settings.contextLimitTokens {
+                contextLimitTokens = limit
+            }
+            lastSummarizationDate = settings.lastSummarizationDate
+            if let count = settings.summarizationCount {
+                summarizationCount = count
+            }
+        }
+        
+        // Update context limit based on model (only if not already loaded from settings)
+        if contextLimitTokens == 32_000 {
+            updateContextLimit()
         }
         
         // After loading settings, fetch models for selected provider
@@ -2654,9 +3324,70 @@ final class ChatSession: ObservableObject, Identifiable {
         persistSettings()
         Task { await fetchAvailableModels() }
     }
+    
+    // MARK: - Context Tracking
+    
+    /// Update the context limit based on the current model
+    func updateContextLimit() {
+        if providerType.isLocal {
+            // For local models, use custom size if set, otherwise use TokenEstimator fallback
+            if let custom = customLocalContextSize {
+                contextLimitTokens = custom
+            } else {
+                contextLimitTokens = TokenEstimator.contextLimit(for: model)
+            }
+        } else {
+            // For cloud models, use ModelDefinition if available
+            contextLimitTokens = ModelDefinition.contextSize(for: model)
+        }
+    }
+    
+    /// Update the current context usage based on messages and agent context
+    func updateContextUsage(persist: Bool = true) {
+        var totalTokens = 0
+        
+        // Count message tokens
+        let messageArray = buildMessageArray()
+        let messageText = messageArray.map { $0.content }.joined(separator: "\n")
+        totalTokens += TokenEstimator.estimateTokens(messageText)
+        
+        // During agent mode, also count the agent context log (this is what's actually sent to the LLM)
+        if agentModeEnabled && !agentContextLog.isEmpty {
+            let agentContext = agentContextLog.joined(separator: "\n")
+            totalTokens += TokenEstimator.estimateTokens(agentContext)
+        }
+        
+        currentContextTokens = totalTokens
+        
+        if persist {
+            persistSettings()  // Persist context tracking per session
+        }
+    }
+    
+    /// Record that summarization occurred
+    func recordSummarization() {
+        summarizationCount += 1
+        lastSummarizationDate = Date()
+        persistSettings()  // Persist context tracking per session
+    }
+    
+    /// Reset context tracking state (e.g., when clearing chat)
+    func resetContextTracking() {
+        currentContextTokens = 0
+        lastSummarizationDate = nil
+        summarizationCount = 0
+        // Note: persistSettings() is called by the caller (clearChat)
+    }
 }
 
 // MARK: - Supporting Types
+
+/// Cache for fetched model lists
+private struct ModelCache: Codable {
+    let models: [String]
+    let timestamp: Date
+}
+
 private struct SessionSettings: Codable {
     let apiBaseURL: String
     let apiKey: String?
@@ -2671,6 +3402,15 @@ private struct SessionSettings: Codable {
     let maxTokens: Int?
     let reasoningEffort: ReasoningEffort?
     let providerType: ProviderType?
+    
+    // Context size settings
+    let customLocalContextSize: Int?
+    
+    // Context tracking (per-session)
+    let currentContextTokens: Int?
+    let contextLimitTokens: Int?
+    let lastSummarizationDate: Date?
+    let summarizationCount: Int?
 }
 
 private struct OpenAIStreamChunk: Decodable {
@@ -2678,11 +3418,35 @@ private struct OpenAIStreamChunk: Decodable {
         struct Delta: Decodable { let content: String? }
         let delta: Delta?
     }
+    struct Usage: Decodable {
+        let prompt_tokens: Int?
+        let completion_tokens: Int?
+        let total_tokens: Int?
+    }
     let choices: [Choice]
+    let usage: Usage?
 }
 
 private struct OllamaStreamChunk: Decodable {
     struct Message: Decodable { let content: String? }
     let message: Message?
     let response: String?
+}
+
+// MARK: - Anthropic Usage Types
+private struct AnthropicMessageStart: Decodable {
+    struct Message: Decodable {
+        struct Usage: Decodable {
+            let input_tokens: Int
+        }
+        let usage: Usage?
+    }
+    let message: Message?
+}
+
+private struct AnthropicMessageDelta: Decodable {
+    struct Usage: Decodable {
+        let output_tokens: Int
+    }
+    let usage: Usage?
 }

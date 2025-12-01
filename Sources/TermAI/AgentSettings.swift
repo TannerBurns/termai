@@ -16,6 +16,9 @@ final class AgentSettings: ObservableObject, Codable {
     /// Timeout in seconds to wait for command output
     @Published var commandTimeout: TimeInterval = 10.0
     
+    /// Delay in seconds before capturing command output after execution
+    @Published var commandCaptureDelay: TimeInterval = 1.5
+    
     // MARK: - Context Limits
     
     /// Maximum characters to capture from command output
@@ -92,12 +95,18 @@ final class AgentSettings: ObservableObject, Codable {
     /// Enable verbose logging for agent operations
     @Published var verboseLogging: Bool = false
     
+    // MARK: - Model Favorites
+    
+    /// Set of favorited model IDs for quick access
+    @Published var favoriteModels: Set<String> = []
+    
     // MARK: - Codable
     
     enum CodingKeys: String, CodingKey {
         case maxIterations
         case maxFixAttempts
         case commandTimeout
+        case commandCaptureDelay
         case maxOutputCapture
         case maxContextSize
         case outputSummarizationThreshold
@@ -118,6 +127,7 @@ final class AgentSettings: ObservableObject, Codable {
         case verboseLogging
         case agentTemperature
         case titleTemperature
+        case favoriteModels
     }
     
     init() {}
@@ -127,6 +137,7 @@ final class AgentSettings: ObservableObject, Codable {
         maxIterations = try container.decodeIfPresent(Int.self, forKey: .maxIterations) ?? 100
         maxFixAttempts = try container.decodeIfPresent(Int.self, forKey: .maxFixAttempts) ?? 3
         commandTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .commandTimeout) ?? 10.0
+        commandCaptureDelay = try container.decodeIfPresent(TimeInterval.self, forKey: .commandCaptureDelay) ?? 1.5
         maxOutputCapture = try container.decodeIfPresent(Int.self, forKey: .maxOutputCapture) ?? 3000
         maxContextSize = try container.decodeIfPresent(Int.self, forKey: .maxContextSize) ?? 8000
         outputSummarizationThreshold = try container.decodeIfPresent(Int.self, forKey: .outputSummarizationThreshold) ?? 5000
@@ -147,6 +158,7 @@ final class AgentSettings: ObservableObject, Codable {
         verboseLogging = try container.decodeIfPresent(Bool.self, forKey: .verboseLogging) ?? false
         agentTemperature = try container.decodeIfPresent(Double.self, forKey: .agentTemperature) ?? 0.2
         titleTemperature = try container.decodeIfPresent(Double.self, forKey: .titleTemperature) ?? 1.0
+        favoriteModels = try container.decodeIfPresent(Set<String>.self, forKey: .favoriteModels) ?? []
     }
     
     func encode(to encoder: Encoder) throws {
@@ -154,6 +166,7 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(maxIterations, forKey: .maxIterations)
         try container.encode(maxFixAttempts, forKey: .maxFixAttempts)
         try container.encode(commandTimeout, forKey: .commandTimeout)
+        try container.encode(commandCaptureDelay, forKey: .commandCaptureDelay)
         try container.encode(maxOutputCapture, forKey: .maxOutputCapture)
         try container.encode(maxContextSize, forKey: .maxContextSize)
         try container.encode(outputSummarizationThreshold, forKey: .outputSummarizationThreshold)
@@ -174,6 +187,7 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(verboseLogging, forKey: .verboseLogging)
         try container.encode(agentTemperature, forKey: .agentTemperature)
         try container.encode(titleTemperature, forKey: .titleTemperature)
+        try container.encode(favoriteModels, forKey: .favoriteModels)
     }
     
     // MARK: - Persistence
@@ -196,6 +210,7 @@ final class AgentSettings: ObservableObject, Codable {
         maxIterations = 100
         maxFixAttempts = 3
         commandTimeout = 10.0
+        commandCaptureDelay = 1.5
         maxOutputCapture = 3000
         maxContextSize = 8000
         outputSummarizationThreshold = 5000
@@ -216,6 +231,35 @@ final class AgentSettings: ObservableObject, Codable {
         verboseLogging = false
         agentTemperature = 0.2
         titleTemperature = 1.0
+        save()
+    }
+    
+    // MARK: - Model Favorites Helpers
+    
+    /// Check if a model is favorited
+    func isFavorite(_ modelId: String) -> Bool {
+        favoriteModels.contains(modelId)
+    }
+    
+    /// Toggle favorite status for a model
+    func toggleFavorite(_ modelId: String) {
+        if favoriteModels.contains(modelId) {
+            favoriteModels.remove(modelId)
+        } else {
+            favoriteModels.insert(modelId)
+        }
+        save()
+    }
+    
+    /// Add a model to favorites
+    func addFavorite(_ modelId: String) {
+        favoriteModels.insert(modelId)
+        save()
+    }
+    
+    /// Remove a model from favorites
+    func removeFavorite(_ modelId: String) {
+        favoriteModels.remove(modelId)
         save()
     }
     

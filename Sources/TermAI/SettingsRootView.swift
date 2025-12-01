@@ -9,12 +9,14 @@ struct SettingsRootView: View {
         case chatModel = "Chat & Model"
         case agent = "Agent"
         case terminal = "Terminal Theme"
+        case usage = "Usage"
         
         var icon: String {
             switch self {
             case .chatModel: return "message.fill"
             case .agent: return "cpu"
             case .terminal: return "terminal.fill"
+            case .usage: return "chart.bar.fill"
             }
         }
     }
@@ -53,6 +55,8 @@ struct SettingsRootView: View {
                     AgentSettingsView()
                 case .terminal:
                     TerminalThemeSettingsView(ptyModel: ptyModel)
+                case .usage:
+                    UsageSettingsView()
                 }
             }
         }
