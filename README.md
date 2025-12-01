@@ -42,7 +42,36 @@ When enabled, the AI can autonomously execute commands and use tools to complete
 ## Requirements
 
 - **macOS** 13.0+
-- **Swift** 5.9+
+- **Swift** 5.9+ (only required for building from source)
+
+## Installation
+
+### Download (Recommended)
+
+1. Download the latest `TermAI.zip` from the [Releases](../../releases) page
+2. Unzip the archive
+3. Move `TermAI.app` to your Applications folder
+
+**Important:** Since TermAI is not notarized with Apple, macOS Gatekeeper will block it on first launch. To allow it to run:
+
+**Option A — Right-click method:**
+1. Right-click (or Control-click) on `TermAI.app`
+2. Select "Open" from the context menu
+3. Click "Open" in the dialog that appears
+
+**Option B — Terminal method:**
+```bash
+xattr -cr /Applications/TermAI.app
+```
+
+**Option C — System Settings:**
+1. Try to open the app (it will be blocked)
+2. Go to **System Settings → Privacy & Security**
+3. Scroll down and click "Open Anyway" next to the TermAI message
+
+After allowing it once, the app will open normally in the future.
+
+### Build from Source
 
 ## Getting Started
 

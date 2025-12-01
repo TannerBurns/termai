@@ -70,3 +70,4 @@ TermAI.zip
 *.lock
 *~
 
+.build_version
