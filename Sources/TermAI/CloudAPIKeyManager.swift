@@ -9,17 +9,23 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
     @Published private var openAIKeyOverride: String?
     @Published private var anthropicKeyOverride: String?
     
+    /// Cached environment variables from shell (for GUI apps that don't inherit shell env)
+    private var shellEnvironment: [String: String] = [:]
+    
     enum CodingKeys: String, CodingKey {
         case openAIKeyOverride
         case anthropicKeyOverride
     }
     
-    init() {}
+    init() {
+        loadShellEnvironment()
+    }
     
     required init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         openAIKeyOverride = try container.decodeIfPresent(String.self, forKey: .openAIKeyOverride)
         anthropicKeyOverride = try container.decodeIfPresent(String.self, forKey: .anthropicKeyOverride)
+        loadShellEnvironment()
     }
     
     func encode(to encoder: Encoder) throws {
@@ -28,15 +34,101 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
         try container.encodeIfPresent(anthropicKeyOverride, forKey: .anthropicKeyOverride)
     }
     
+    // MARK: - Shell Environment Loading
+    
+    /// Load environment variables from shell config files (for GUI apps that don't inherit shell env)
+    /// GUI apps launched from Finder/Dock don't inherit shell environment variables,
+    /// so we parse common shell config files to find API key exports.
+    private func loadShellEnvironment() {
+        let envVars = [CloudProvider.openai.apiKeyEnvVariable, CloudProvider.anthropic.apiKeyEnvVariable]
+        let directEnv = ProcessInfo.processInfo.environment
+        
+        // For each key, check direct env first, then parse config files
+        for key in envVars {
+            if directEnv[key] != nil {
+                // Already in direct environment, no need to parse files
+                continue
+            }
+            if let value = readEnvFromFiles(key: key) {
+                shellEnvironment[key] = value
+            }
+        }
+    }
+    
+    /// Try to read an environment variable from common shell config files
+    private func readEnvFromFiles(key: String) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let configFiles = [
+            "\(home)/.zshenv",           // zsh: always sourced
+            "\(home)/.zshrc",            // zsh: interactive shells (most common)
+            "\(home)/.zprofile",         // zsh: login shells
+            "\(home)/.bashrc",           // bash: interactive shells
+            "\(home)/.bash_profile",     // bash: login shells
+            "\(home)/.profile",          // POSIX: login shells
+            "\(home)/.config/termai/env" // App-specific config
+        ]
+        
+        // Patterns to match various export formats:
+        // export KEY="value"
+        // export KEY='value'  
+        // export KEY=value
+        // KEY="value"
+        // KEY='value'
+        // KEY=value
+        let patterns = [
+            "^\\s*export\\s+\(key)=\"([^\"]+)\"",
+            "^\\s*export\\s+\(key)='([^']+)'",
+            "^\\s*export\\s+\(key)=([^\\s#\"']+)",
+            "^\\s*\(key)=\"([^\"]+)\"",
+            "^\\s*\(key)='([^']+)'",
+            "^\\s*\(key)=([^\\s#\"']+)"
+        ]
+        
+        for file in configFiles {
+            guard let content = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
+            
+            // Check each line individually to handle multi-line files properly
+            for line in content.components(separatedBy: .newlines) {
+                // Skip comments
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("#") { continue }
+                
+                for pattern in patterns {
+                    if let regex = try? NSRegularExpression(pattern: pattern, options: .anchorsMatchLines),
+                       let match = regex.firstMatch(in: line, options: [], range: NSRange(line.startIndex..., in: line)),
+                       let valueRange = Range(match.range(at: 1), in: line) {
+                        let value = String(line[valueRange])
+                        // Skip if it looks like a variable reference (e.g., $OTHER_VAR)
+                        if !value.hasPrefix("$") {
+                            return value
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Get an environment variable, checking both direct process env and shell env
+    private func getEnvVar(_ key: String) -> String? {
+        // Direct process environment takes precedence
+        if let value = ProcessInfo.processInfo.environment[key] {
+            return value
+        }
+        // Fall back to shell environment
+        return shellEnvironment[key]
+    }
+    
     // MARK: - API Key Access
     
     /// Get the effective API key for a provider (user override or environment)
     func getAPIKey(for provider: CloudProvider) -> String? {
         switch provider {
         case .openai:
-            return openAIKeyOverride ?? ProcessInfo.processInfo.environment[provider.apiKeyEnvVariable]
+            return openAIKeyOverride ?? getEnvVar(provider.apiKeyEnvVariable)
         case .anthropic:
-            return anthropicKeyOverride ?? ProcessInfo.processInfo.environment[provider.apiKeyEnvVariable]
+            return anthropicKeyOverride ?? getEnvVar(provider.apiKeyEnvVariable)
         }
     }
     
@@ -56,9 +148,9 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
     func isFromEnvironment(for provider: CloudProvider) -> Bool {
         switch provider {
         case .openai:
-            return openAIKeyOverride == nil && ProcessInfo.processInfo.environment[provider.apiKeyEnvVariable] != nil
+            return openAIKeyOverride == nil && getEnvVar(provider.apiKeyEnvVariable) != nil
         case .anthropic:
-            return anthropicKeyOverride == nil && ProcessInfo.processInfo.environment[provider.apiKeyEnvVariable] != nil
+            return anthropicKeyOverride == nil && getEnvVar(provider.apiKeyEnvVariable) != nil
         }
     }
     
@@ -74,7 +166,7 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
     
     /// Get the environment variable value (for display purposes)
     func getEnvironmentKey(for provider: CloudProvider) -> String? {
-        ProcessInfo.processInfo.environment[provider.apiKeyEnvVariable]
+        getEnvVar(provider.apiKeyEnvVariable)
     }
     
     // MARK: - Key Management
