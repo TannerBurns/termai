@@ -189,6 +189,9 @@ final class ChatSession: ObservableObject, Identifiable {
     // Agent execution state machine
     @Published var agentExecutionPhase: AgentExecutionPhase = .idle
     
+    // User feedback queue - allows users to provide input while agent is running
+    @Published var pendingUserFeedback: [String] = []
+    
     // Computed properties - unified tracking using checklist as source of truth when available
     var isAgentRunning: Bool { agentExecutionPhase.isActive }
     
@@ -403,6 +406,45 @@ final class ChatSession: ObservableObject, Identifiable {
         ))
         messages = messages
         persistMessages()
+    }
+    
+    /// Queue user feedback while agent is running
+    /// The feedback will be incorporated into the agent's next decision point
+    func queueUserFeedback(_ text: String) {
+        guard isAgentRunning else {
+            AgentDebugConfig.log("[Agent] Feedback ignored - agent not running")
+            return
+        }
+        
+        pendingUserFeedback.append(text)
+        AgentDebugConfig.log("[Agent] User feedback queued: \(text.prefix(100))...")
+        
+        // Add a visible message showing the user's feedback
+        messages.append(ChatMessage(
+            role: "user",
+            content: text,
+            agentEvent: AgentEvent(
+                kind: "status",
+                title: "Feedback for agent",
+                details: text,
+                command: nil,
+                output: nil,
+                collapsed: false
+            )
+        ))
+        messages = messages
+        persistMessages()
+    }
+    
+    /// Consume and return any pending user feedback
+    /// Returns nil if no feedback is pending, otherwise returns all feedback joined
+    func consumePendingFeedback() -> String? {
+        guard !pendingUserFeedback.isEmpty else { return nil }
+        
+        let feedback = pendingUserFeedback.joined(separator: "\n\n")
+        pendingUserFeedback.removeAll()
+        AgentDebugConfig.log("[Agent] Consuming user feedback: \(feedback.prefix(100))...")
+        return feedback
     }
     
     /// Append a user message without triggering model streaming (used by Agent mode)
@@ -831,6 +873,26 @@ final class ChatSession: ObservableObject, Identifiable {
                 break stepLoop
             }
             
+            // Check for user feedback at start of iteration
+            if let feedback = consumePendingFeedback() {
+                // Add feedback to context log so it's included in the next prompt
+                agentContextLog.append("USER FEEDBACK (received during execution): \(feedback)")
+                messages.append(ChatMessage(
+                    role: "assistant",
+                    content: "",
+                    agentEvent: AgentEvent(
+                        kind: "status",
+                        title: "Incorporating user feedback",
+                        details: "The agent will consider your feedback in its next action.",
+                        command: nil,
+                        output: nil,
+                        collapsed: true
+                    )
+                ))
+                messages = messages
+                persistMessages()
+            }
+            
             iterations += 1
             transitionToPhase(.executing(step: iterations, estimatedTotal: estimatedSteps))
             
@@ -839,6 +901,11 @@ final class ChatSession: ObservableObject, Identifiable {
             
             // Periodic reflection (if enabled)
             if AgentSettings.shared.enableReflection && iterations > 1 && iterations % reflectionInterval == 0 {
+                // Check for user feedback before reflection
+                if let feedback = consumePendingFeedback() {
+                    agentContextLog.append("USER FEEDBACK (before reflection): \(feedback)")
+                }
+                
                 // Build checklist status for reflection
                 let checklistStatus = agentChecklist?.displayString ?? (agentPlan.isEmpty ? "No plan" : agentPlan.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "; "))
                 
@@ -1276,6 +1343,25 @@ final class ChatSession: ObservableObject, Identifiable {
             if agentCancelled {
                 AgentDebugConfig.log("[Agent] Cancelled after command execution")
                 break stepLoop
+            }
+            
+            // Check for user feedback after command execution
+            if let feedback = consumePendingFeedback() {
+                agentContextLog.append("USER FEEDBACK (after command): \(feedback)")
+                messages.append(ChatMessage(
+                    role: "assistant",
+                    content: "",
+                    agentEvent: AgentEvent(
+                        kind: "status",
+                        title: "Received user feedback",
+                        details: "Adjusting next action based on your input.",
+                        command: nil,
+                        output: nil,
+                        collapsed: true
+                    )
+                ))
+                messages = messages
+                persistMessages()
             }
             
             // Advance plan step if command succeeded
