@@ -87,6 +87,16 @@ final class ChatHistoryManager: ObservableObject {
         saveEntries()
     }
     
+    /// Clear all history entries and delete their session files permanently
+    func clearAllEntries() {
+        // Clean up all session files first
+        for entry in entries {
+            cleanupSessionFiles(for: entry.id)
+        }
+        entries.removeAll()
+        saveEntries()
+    }
+    
     /// Check if a session ID exists in history
     func hasEntry(id: UUID) -> Bool {
         entries.contains { $0.id == id }

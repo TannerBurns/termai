@@ -14,7 +14,13 @@ final class PTYModel: ObservableObject {
     @Published var lastOutputStartViewportRow: Int? = nil
     @Published var visibleRows: Int = 0
     @Published var lastOutputLineRange: (start: Int, end: Int)? = nil
-    @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path {
+        didSet {
+            if currentWorkingDirectory != oldValue {
+                refreshGitInfo()
+            }
+        }
+    }
     @Published var lastExitCode: Int32 = 0
     // Controls whether to perform heavy buffer processing on terminal updates
     @Published var captureActive: Bool = false
@@ -23,6 +29,12 @@ final class PTYModel: ObservableObject {
     // Agent helpers
     var markNextOutputStart: (() -> Void)?
     @Published var lastSentCommandForCapture: String? = nil
+    
+    // Git integration
+    @Published var gitInfo: GitInfo? = nil
+    private var gitRefreshTask: Task<Void, Never>? = nil
+    private var gitDebounceWorkItem: DispatchWorkItem? = nil
+    private let gitDebounceInterval: TimeInterval = 0.5  // 500ms debounce
     
     // Keep a reference to the terminal view for cleanup
     fileprivate weak var terminalView: BridgedLocalProcessTerminalView?
@@ -34,6 +46,29 @@ final class PTYModel: ObservableObject {
     
     func terminateProcess() {
         terminalView?.terminateShell()
+    }
+    
+    /// Refresh Git info for the current working directory (debounced by 500ms)
+    func refreshGitInfo() {
+        // Cancel any pending debounce and existing task
+        gitDebounceWorkItem?.cancel()
+        gitRefreshTask?.cancel()
+        
+        // Debounce to avoid excessive git operations during rapid directory changes
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.gitRefreshTask = Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                let path = self.currentWorkingDirectory
+                let info = await GitInfoService.shared.fetchGitInfo(for: path)
+                // Only update if we're still looking at the same directory
+                if !Task.isCancelled && self.currentWorkingDirectory == path {
+                    self.gitInfo = info
+                }
+            }
+        }
+        gitDebounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + gitDebounceInterval, execute: workItem)
     }
 }
 
@@ -87,6 +122,7 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             processBufferUpdate(selection: selection, text: text, isAgentCapture: true)
         } else {
             // For normal use, debounce the heavy processing
+            // Always extract CWD to enable real-time directory tracking via OSC 7
             debounceWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 self?.processBufferUpdate(selection: selection, text: text, isAgentCapture: false)
@@ -104,7 +140,8 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             model.hasSelection = !selection.isEmpty
             model.visibleRows = self.terminal.rows
             
-            // Always try to extract CWD from prompt or title
+            // Always extract CWD from buffer for real-time directory tracking
+            // OSC 7 sequences emitted by precmd will be captured here
             if let extractedCwd = Self.extractCwdFromBuffer(text) {
                 model.currentWorkingDirectory = extractedCwd
             }
@@ -171,12 +208,36 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             // Look for ~ or / followed by path characters before $ or %
             if let match = trimmed.range(of: #"[~\/][^\s$%#]*"#, options: .regularExpression) {
                 let path = String(trimmed[match])
-                // Expand ~ to home directory
+                
+                // Validate: reject paths containing invalid filesystem characters
+                // These could appear in echoed content (e.g., markdown: **aioboto3/aiobotocore**)
+                let invalidPathChars = CharacterSet(charactersIn: "*?\"<>|")
+                if path.unicodeScalars.contains(where: { invalidPathChars.contains($0) }) {
+                    continue
+                }
+                
+                // Reject paths that are too short (single / is not a valid detection)
+                // or that look like URL fragments (contain ://)
+                if path.count < 2 || path.contains("://") {
+                    continue
+                }
+                
+                // Expand ~ to home directory and validate path exists
+                var expandedPath = path
                 if path.hasPrefix("~") {
                     let home = FileManager.default.homeDirectoryForCurrentUser.path
-                    return home + path.dropFirst()
-                } else if path.hasPrefix("/") {
-                    return path
+                    expandedPath = home + path.dropFirst()
+                }
+                
+                // Only return paths that actually exist on the filesystem
+                // This prevents false positives from partial paths in terminal output
+                if expandedPath.hasPrefix("/") {
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: expandedPath, isDirectory: &isDir), isDir.boolValue {
+                        return expandedPath
+                    }
+                    // Path doesn't exist, continue searching
+                    continue
                 }
             }
             
@@ -404,9 +465,13 @@ struct SwiftTermView: NSViewRepresentable {
             term?.markOutputStart()
         }
         // Start shell in user's home directory by injecting cd via login shell
+        // Configure precmd hook to emit OSC 7 sequences for real-time CWD tracking
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let escaped = home.replacingOccurrences(of: "\"", with: "\\\"")
-        let cmd = "cd \"\(escaped)\"; exec /bin/zsh -l"
+        // The precmd function emits OSC 7 with the current working directory before each prompt
+        // Format: ESC ] 7 ; file://hostname/path BEL
+        let precmdSetup = "__termai_precmd() { printf '\\e]7;file://%s%s\\a' \"$(hostname)\" \"$(pwd -P)\"; }; precmd_functions+=(__termai_precmd)"
+        let cmd = "cd \"\(escaped)\"; \(precmdSetup); exec /bin/zsh -l"
         
         // Build environment with color support enabled
         var env = ProcessInfo.processInfo.environment
@@ -423,6 +488,8 @@ struct SwiftTermView: NSViewRepresentable {
         if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {
             term.apply(theme: theme)
         }
+        // Fetch initial Git info for home directory
+        model.refreshGitInfo()
         return term
     }
 
