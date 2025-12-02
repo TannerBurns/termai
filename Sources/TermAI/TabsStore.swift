@@ -9,6 +9,8 @@ final class AppTab: Identifiable, ObservableObject {
     let ptyModel: PTYModel
     /// Each app tab has its own chat tabs manager for multiple chat sessions
     let chatTabsManager: ChatTabsManager
+    /// Each app tab has its own suggestion service to avoid cross-tab state leakage
+    let suggestionService: TerminalSuggestionService
     
     init(id: UUID = UUID(), title: String = "Tab", ptyModel: PTYModel = PTYModel(), chatTabsManager: ChatTabsManager? = nil) {
         self.id = id
@@ -16,6 +18,8 @@ final class AppTab: Identifiable, ObservableObject {
         self.ptyModel = ptyModel
         // Create a new ChatTabsManager or use the provided one (for restoration)
         self.chatTabsManager = chatTabsManager ?? ChatTabsManager(tabId: id)
+        // Create a per-tab suggestion service
+        self.suggestionService = TerminalSuggestionService()
     }
     
     var selectedChatSession: ChatSession? {
