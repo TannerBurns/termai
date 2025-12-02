@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 @MainActor
 final class AppTab: Identifiable, ObservableObject {
@@ -12,6 +13,11 @@ final class AppTab: Identifiable, ObservableObject {
     /// Each app tab has its own suggestion service to avoid cross-tab state leakage
     let suggestionService: TerminalSuggestionService
     
+    /// Tracks whether any agent was running in the previous check (for detecting completion)
+    private var wasAgentRunning: Bool = false
+    /// Cancellables for Combine subscriptions
+    private var cancellables = Set<AnyCancellable>()
+    
     init(id: UUID = UUID(), title: String = "Tab", ptyModel: PTYModel = PTYModel(), chatTabsManager: ChatTabsManager? = nil) {
         self.id = id
         self.title = title
@@ -20,6 +26,53 @@ final class AppTab: Identifiable, ObservableObject {
         self.chatTabsManager = chatTabsManager ?? ChatTabsManager(tabId: id)
         // Create a per-tab suggestion service
         self.suggestionService = TerminalSuggestionService()
+        
+        // Wire up the agent running check - pause suggestions while chat agent is active
+        self.suggestionService.checkAgentRunning = { [weak self] in
+            guard let self = self else { return false }
+            return self.chatTabsManager.sessions.contains { $0.isAgentRunning }
+        }
+        
+        // Observe agent execution phase changes to resume suggestions when agent completes
+        setupAgentCompletionObserver()
+    }
+    
+    /// Sets up observation of chat sessions to detect when agent finishes
+    private func setupAgentCompletionObserver() {
+        // Observe the sessions array for changes
+        chatTabsManager.$sessions
+            .sink { [weak self] sessions in
+                self?.observeSessionAgentStates(sessions)
+            }
+            .store(in: &cancellables)
+        
+        // Initial observation of existing sessions
+        observeSessionAgentStates(chatTabsManager.sessions)
+    }
+    
+    /// Observe agent execution phase for each session
+    private func observeSessionAgentStates(_ sessions: [ChatSession]) {
+        // Subscribe to each session's agent execution phase
+        for session in sessions {
+            session.$agentExecutionPhase
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] phase in
+                    self?.checkAgentCompletion()
+                }
+                .store(in: &cancellables)
+        }
+    }
+    
+    /// Check if agent just completed and resume suggestions if so
+    private func checkAgentCompletion() {
+        let isAgentRunning = chatTabsManager.sessions.contains { $0.isAgentRunning }
+        
+        // Agent just finished (was running, now not running)
+        if wasAgentRunning && !isAgentRunning {
+            suggestionService.resumeSuggestionsAfterAgent()
+        }
+        
+        wasAgentRunning = isAgentRunning
     }
     
     var selectedChatSession: ChatSession? {

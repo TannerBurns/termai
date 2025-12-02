@@ -476,6 +476,10 @@ final class TerminalSuggestionService: ObservableObject {
     /// Callback to get fresh terminal context for post-command regeneration
     var getTerminalContext: (() -> (cwd: String, lastOutput: String, lastExitCode: Int32, gitInfo: GitInfo?))?
     
+    /// Callback to check if the chat agent is currently running
+    /// When true, suggestion generation is paused to avoid confusion from agent-generated terminal activity
+    var checkAgentRunning: (() -> Bool)?
+    
     /// Cache for project type detection results (path -> (projectType, timestamp))
     private var projectTypeCache: [String: (type: ProjectType, timestamp: Date)] = [:]
     private let projectTypeCacheExpiration: TimeInterval = 60 // 1 minute (shorter since directories can change)
@@ -546,6 +550,28 @@ final class TerminalSuggestionService: ObservableObject {
         }
     }
     
+    /// Resume suggestions after the chat agent has finished running
+    /// This triggers a fresh suggestion pipeline using the terminal context callback
+    func resumeSuggestionsAfterAgent() {
+        suggestionLogger.info("Resuming suggestions after agent completed")
+        
+        // Get fresh terminal context if callback is available
+        guard let getContext = getTerminalContext else {
+            suggestionLogger.warning("No terminal context callback available for resume")
+            return
+        }
+        
+        let ctx = getContext()
+        
+        // Trigger suggestions with fresh context
+        triggerSuggestions(
+            cwd: ctx.cwd,
+            lastOutput: ctx.lastOutput,
+            lastExitCode: ctx.lastExitCode,
+            gitInfo: ctx.gitInfo
+        )
+    }
+    
     /// Called when user activity is detected (command entered, cd, etc.)
     /// This aborts any in-progress pipeline and prepares for fresh suggestions
     /// The actual pipeline will be triggered by subsequent events (CWD change, output change)
@@ -562,6 +588,12 @@ final class TerminalSuggestionService: ObservableObject {
         lastExitCode: Int32,
         lastOutput: String
     ) {
+        // Ignore activity from chat agent - don't track agent commands as user activity
+        if let checkAgent = checkAgentRunning, checkAgent() {
+            suggestionLogger.info("Activity ignored - chat agent is currently running")
+            return
+        }
+        
         suggestionLogger.info("User activity detected: \(command ?? "unknown command"), aborting active work")
         
         // Cancel any ongoing work
@@ -769,6 +801,13 @@ final class TerminalSuggestionService: ObservableObject {
     ///   - isStartup: Whether this is the startup flow (more comprehensive context gathering)
     func runAgenticPipeline(context: TerminalContext, isStartup: Bool = false) async {
         suggestionLogger.info(">>> Starting agentic pipeline (startup: \(isStartup)) <<<")
+        
+        // Pause suggestions while chat agent is running
+        if let checkAgent = checkAgentRunning, checkAgent() {
+            suggestionLogger.info("Pipeline: Skipping - chat agent is currently running")
+            setPhase(.idle)
+            return
+        }
         
         let settings = AgentSettings.shared
         
@@ -1843,6 +1882,15 @@ final class TerminalSuggestionService: ObservableObject {
         suggestionLogger.info(">>> triggerSuggestions called - cwd: \(cwd, privacy: .public), exitCode: \(lastExitCode), outputLen: \(lastOutput.count)")
         suggestionLogger.info("    lastContext?.cwd: \(self.lastContext?.cwd ?? "nil", privacy: .public)")
         
+        // Pause suggestions while chat agent is running to avoid confusion from agent-generated activity
+        if let checkAgent = checkAgentRunning, checkAgent() {
+            suggestionLogger.info("Skipping suggestions - chat agent is currently running")
+            cancelActiveWork()
+            suggestions = []
+            isVisible = false
+            return
+        }
+        
         let settings = AgentSettings.shared
         
         // Check if feature is enabled and configured
@@ -2038,6 +2086,12 @@ final class TerminalSuggestionService: ObservableObject {
     ///   - cwd: The current working directory (may be stale for suggested commands)
     ///   - waitForCWDUpdate: If true, don't schedule pipeline - let CWD change event trigger it
     func commandExecuted(command: String? = nil, cwd: String? = nil, waitForCWDUpdate: Bool = false) {
+        // Ignore commands from chat agent - don't track or process agent-generated activity
+        if let checkAgent = checkAgentRunning, checkAgent() {
+            suggestionLogger.info("Command executed ignored - chat agent is currently running")
+            return
+        }
+        
         suggestionLogger.debug("Command executed: \(command ?? "unknown"), clearing and setting cooldown, waitForCWDUpdate=\(waitForCWDUpdate)")
         debounceTask?.cancel()
         postCommandTask?.cancel()
@@ -2306,6 +2360,13 @@ final class TerminalSuggestionService: ObservableObject {
         isNewDirectory: Bool = false
     ) {
         suggestionLogger.info("triggerStartupSuggestions called - cwd: \(cwd), isNew: \(isNewDirectory)")
+        
+        // Pause suggestions while chat agent is running
+        if let checkAgent = checkAgentRunning, checkAgent() {
+            suggestionLogger.info("Startup: Skipping - chat agent is currently running")
+            setPhase(.idle)
+            return
+        }
         
         let settings = AgentSettings.shared
         
