@@ -5,18 +5,43 @@ import SwiftUI
 
 /// Utility for estimating token counts from text
 enum TokenEstimator {
-    /// Average characters per token (conservative estimate for English text)
-    /// GPT models average ~4 chars/token, Claude ~3.5 chars/token
-    private static let charsPerToken: Double = 3.8
+    /// Default characters per token (conservative estimate for English text)
+    private static let defaultCharsPerToken: Double = 3.8
     
-    /// Estimate token count from text
-    static func estimateTokens(_ text: String) -> Int {
-        Int(ceil(Double(text.count) / charsPerToken))
+    /// Get model-specific characters per token ratio for more accurate estimation
+    static func charsPerToken(for model: String) -> Double {
+        let lowercased = model.lowercased()
+        
+        // Claude models use a more aggressive tokenizer (~3.5 chars/token)
+        if lowercased.contains("claude") {
+            return 3.5
+        }
+        
+        // GPT-4, GPT-5, and o-series models average ~4 chars/token
+        if lowercased.contains("gpt-4") || lowercased.contains("gpt-5") ||
+           lowercased.hasPrefix("o1") || lowercased.hasPrefix("o3") || lowercased.hasPrefix("o4") {
+            return 4.0
+        }
+        
+        // LLaMA/Mistral/local models often have similar tokenization to GPT
+        if lowercased.contains("llama") || lowercased.contains("mistral") ||
+           lowercased.contains("qwen") || lowercased.contains("gemma") {
+            return 4.0
+        }
+        
+        // Default fallback
+        return defaultCharsPerToken
     }
     
-    /// Estimate tokens from a collection of strings
-    static func estimateTokens(_ texts: [String]) -> Int {
-        texts.reduce(0) { $0 + estimateTokens($1) }
+    /// Estimate token count from text using model-specific ratio
+    static func estimateTokens(_ text: String, model: String = "") -> Int {
+        let ratio = model.isEmpty ? defaultCharsPerToken : charsPerToken(for: model)
+        return Int(ceil(Double(text.count) / ratio))
+    }
+    
+    /// Estimate tokens from a collection of strings using model-specific ratio
+    static func estimateTokens(_ texts: [String], model: String = "") -> Int {
+        texts.reduce(0) { $0 + estimateTokens($1, model: model) }
     }
     
     /// Get the context window limit for a model (in tokens)
@@ -176,13 +201,24 @@ final class ChatSession: ObservableObject, Identifiable {
     let id: UUID
     
     // Chat state
-    @Published var messages: [ChatMessage] = []
+    @Published var messages: [ChatMessage] = [] {
+        didSet {
+            // Reactively update context token count when messages change
+            // Use persist: false to avoid disk I/O on every change during streaming
+            updateContextUsage(persist: false)
+        }
+    }
     @Published var sessionTitle: String = ""
     @Published var streamingMessageId: UUID? = nil
     @Published var pendingTerminalContext: String? = nil
     @Published var pendingTerminalMeta: TerminalContextMeta? = nil
     @Published var agentModeEnabled: Bool = false
-    @Published var agentContextLog: [String] = []
+    @Published var agentContextLog: [String] = [] {
+        didSet {
+            // Reactively update context token count when agent context changes
+            updateContextUsage(persist: false)
+        }
+    }
     @Published var lastKnownCwd: String = ""
     @Published var agentChecklist: TaskChecklist? = nil
     
@@ -292,6 +328,16 @@ final class ChatSession: ObservableObject, Identifiable {
     var recentlySummarized: Bool {
         guard let lastDate = lastSummarizationDate else { return false }
         return Date().timeIntervalSince(lastDate) < 5.0
+    }
+    
+    /// Whether we have at least one real assistant response (not empty/placeholder)
+    /// Used to determine when to show context usage indicator
+    var hasAssistantResponse: Bool {
+        messages.contains { msg in
+            msg.role == "assistant" &&
+            !msg.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            msg.agentEvent == nil
+        }
     }
     
     // System info and prompt
@@ -990,7 +1036,7 @@ final class ChatSession: ObservableObject, Identifiable {
             
             // Build context with summarization if needed (only at 95% of context limit)
             var contextBlob = agentContextLog.joined(separator: "\n")
-            let contextTokens = TokenEstimator.estimateTokens(contextBlob)
+            let contextTokens = TokenEstimator.estimateTokens(contextBlob, model: model)
             let summarizationThreshold = Int(Double(effectiveContextLimit) * 0.95)
             if contextTokens > summarizationThreshold {
                 // Summarize older context when approaching context limit
@@ -1809,219 +1855,18 @@ final class ChatSession: ObservableObject, Identifiable {
     }
     
     private func callOneShotText(prompt: String) async -> String {
-        // Route to appropriate provider
-        if case .cloud(let cloudProvider) = providerType {
-            switch cloudProvider {
-            case .openai:
-                return await callOneShotOpenAI(prompt: prompt)
-            case .anthropic:
-                return await callOneShotAnthropic(prompt: prompt)
-            }
-        } else {
-            return await callOneShotLocal(prompt: prompt)
-        }
-    }
-    
-    private func callOneShotLocal(prompt: String) async -> String {
-        struct RequestBody: Encodable {
-            struct Message: Codable { let role: String; let content: String }
-            let model: String
-            let messages: [Message]
-            let stream: Bool
-            let temperature: Double
-        }
-        let url = apiBaseURL.appendingPathComponent("chat/completions")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let apiKey { request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
-        let messages = [
-            RequestBody.Message(role: "system", content: agentSystemPrompt),
-            RequestBody.Message(role: "user", content: prompt)
-        ]
-        let req = RequestBody(model: model, messages: messages, stream: false, temperature: 0.2)
-        
-        // Estimate prompt tokens for usage tracking
-        let promptText = agentSystemPrompt + prompt
-        let estimatedPromptTokens = TokenEstimator.estimateTokens(promptText)
-        
         do {
-            request.httpBody = try JSONEncoder().encode(req)
-            let (data, _) = try await URLSession.shared.data(for: request)
-            
-            // Response structures for parsing
-            struct Usage: Decodable { let prompt_tokens: Int?; let completion_tokens: Int? }
-            struct Choice: Decodable { struct Message: Decodable { let content: String }; let message: Message }
-            struct Resp: Decodable { let choices: [Choice]; let usage: Usage? }
-            struct OR: Decodable { 
-                struct Message: Decodable { let content: String? }
-                let message: Message?
-                let response: String?
-                let prompt_eval_count: Int?
-                let eval_count: Int?
-            }
-            
-            var content: String = ""
-            var promptTokens: Int? = nil
-            var completionTokens: Int? = nil
-            
-            // Try OpenAI-like format
-            if let decoded = try? JSONDecoder().decode(Resp.self, from: data), 
-               let text = decoded.choices.first?.message.content {
-                content = text
-                promptTokens = decoded.usage?.prompt_tokens
-                completionTokens = decoded.usage?.completion_tokens
-            }
-            // Try Ollama-like format
-            else if let o = try? JSONDecoder().decode(OR.self, from: data) {
-                content = o.message?.content ?? o.response ?? String(data: data, encoding: .utf8) ?? ""
-                promptTokens = o.prompt_eval_count
-                completionTokens = o.eval_count
-            } else {
-                content = String(data: data, encoding: .utf8) ?? ""
-            }
-            
-            // Record usage (use estimates if not provided by API)
-            let finalPromptTokens = promptTokens ?? estimatedPromptTokens
-            let finalCompletionTokens = completionTokens ?? TokenEstimator.estimateTokens(content)
-            let isEstimated = promptTokens == nil || completionTokens == nil
-            
-            TokenUsageTracker.shared.recordUsage(
-                provider: providerName,
-                model: model,
-                promptTokens: finalPromptTokens,
-                completionTokens: finalCompletionTokens,
-                isEstimated: isEstimated,
+            return try await LLMClient.shared.complete(
+                systemPrompt: agentSystemPrompt,
+                userPrompt: prompt,
+                provider: providerType,
+                modelId: model,
+                reasoningEffort: currentModelSupportsReasoning ? reasoningEffort : .none,
+                temperature: currentModelSupportsReasoning ? 1.0 : 0.2,
+                maxTokens: 64000,
+                timeout: 60,
                 requestType: .planning
             )
-            
-            return content
-        } catch {
-            return "{\"error\":\"\(error.localizedDescription)\"}"
-        }
-    }
-    
-    private func callOneShotOpenAI(prompt: String) async -> String {
-        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .openai) else {
-            return "{\"error\":\"OpenAI API key not found\"}"
-        }
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        
-        // Build request body as dictionary for flexibility
-        // Don't limit max_tokens in agent mode - let it generate what it needs
-        var bodyDict: [String: Any] = [
-            "model": model,
-            "messages": [
-                ["role": "system", "content": agentSystemPrompt],
-                ["role": "user", "content": prompt]
-            ],
-            "stream": false
-        ]
-        
-        // For reasoning models, use temperature 1.0; otherwise use agent temperature
-        if currentModelSupportsReasoning {
-            bodyDict["temperature"] = 1.0
-        } else {
-            bodyDict["temperature"] = 0.2
-        }
-        
-        // Estimate prompt tokens for fallback
-        let promptText = agentSystemPrompt + prompt
-        let estimatedPromptTokens = TokenEstimator.estimateTokens(promptText)
-        
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
-            let (data, _) = try await URLSession.shared.data(for: request)
-            
-            // Response structure with usage
-            struct Usage: Decodable { let prompt_tokens: Int; let completion_tokens: Int }
-            struct Choice: Decodable { struct Message: Decodable { let content: String }; let message: Message }
-            struct Resp: Decodable { let choices: [Choice]; let usage: Usage? }
-            
-            if let decoded = try? JSONDecoder().decode(Resp.self, from: data), 
-               let content = decoded.choices.first?.message.content {
-                // Record usage from response or estimate
-                let promptTokens = decoded.usage?.prompt_tokens ?? estimatedPromptTokens
-                let completionTokens = decoded.usage?.completion_tokens ?? TokenEstimator.estimateTokens(content)
-                let isEstimated = decoded.usage == nil
-                
-                TokenUsageTracker.shared.recordUsage(
-                    provider: "OpenAI",
-                    model: model,
-                    promptTokens: promptTokens,
-                    completionTokens: completionTokens,
-                    isEstimated: isEstimated,
-                    requestType: .planning
-                )
-                
-                return content
-            }
-            return String(data: data, encoding: .utf8) ?? ""
-        } catch {
-            return "{\"error\":\"\(error.localizedDescription)\"}"
-        }
-    }
-    
-    private func callOneShotAnthropic(prompt: String) async -> String {
-        let url = URL(string: "https://api.anthropic.com/v1/messages")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        
-        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .anthropic) else {
-            return "{\"error\":\"Anthropic API key not found\"}"
-        }
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        
-        // Anthropic requires max_tokens - Claude Sonnet 4 supports up to 64k output tokens
-        let bodyDict: [String: Any] = [
-            "model": model,
-            "max_tokens": 64000,
-            "system": agentSystemPrompt,
-            "messages": [
-                ["role": "user", "content": prompt]
-            ]
-        ]
-        
-        // Estimate prompt tokens for fallback
-        let promptText = agentSystemPrompt + prompt
-        let estimatedPromptTokens = TokenEstimator.estimateTokens(promptText)
-        
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
-            let (data, _) = try await URLSession.shared.data(for: request)
-            
-            // Anthropic response format with usage
-            struct Usage: Decodable { let input_tokens: Int; let output_tokens: Int }
-            struct ContentBlock: Decodable { let type: String; let text: String? }
-            struct AnthropicResponse: Decodable { let content: [ContentBlock]; let usage: Usage? }
-            
-            if let decoded = try? JSONDecoder().decode(AnthropicResponse.self, from: data),
-               let textBlock = decoded.content.first(where: { $0.type == "text" }),
-               let text = textBlock.text {
-                // Record usage from response or estimate
-                let promptTokens = decoded.usage?.input_tokens ?? estimatedPromptTokens
-                let completionTokens = decoded.usage?.output_tokens ?? TokenEstimator.estimateTokens(text)
-                let isEstimated = decoded.usage == nil
-                
-                TokenUsageTracker.shared.recordUsage(
-                    provider: "Anthropic",
-                    model: model,
-                    promptTokens: promptTokens,
-                    completionTokens: completionTokens,
-                    isEstimated: isEstimated,
-                    requestType: .planning
-                )
-                
-                return text
-            }
-            return String(data: data, encoding: .utf8) ?? ""
         } catch {
             return "{\"error\":\"\(error.localizedDescription)\"}"
         }
@@ -2032,13 +1877,14 @@ final class ChatSession: ObservableObject, Identifiable {
     private func summarizeContext(_ contextLog: [String], maxSize: Int) async -> String {
         let fullContext = contextLog.joined(separator: "\n")
         
-        // Calculate limits using token estimation with 95% threshold
-        let currentTokens = TokenEstimator.estimateTokens(fullContext)
+        // Calculate limits using model-specific token estimation with 95% threshold
+        let currentTokens = TokenEstimator.estimateTokens(fullContext, model: model)
         let tokenThreshold = Int(Double(effectiveContextLimit) * 0.95)
         let maxChars = maxSize
         
         // Use token-based limit as primary, with character limit as fallback
-        let tokenBasedCharLimit = Int(Double(tokenThreshold) * 3.8)
+        let charsPerTokenRatio = TokenEstimator.charsPerToken(for: model)
+        let tokenBasedCharLimit = Int(Double(tokenThreshold) * charsPerTokenRatio)
         let effectiveLimit = min(maxChars, tokenBasedCharLimit)
         
         // If already under 95% threshold, return as-is
@@ -3230,7 +3076,25 @@ final class ChatSession: ObservableObject, Identifiable {
     // MARK: - Persistence
     private var messagesFileName: String { "chat-session-\(id.uuidString).json" }
     
+    /// Debounce work item for batching message persistence
+    private var persistDebounceItem: DispatchWorkItem?
+    private let persistDebounceInterval: TimeInterval = 0.5  // 500ms debounce
+    
+    /// Persist messages with debouncing to reduce disk I/O during streaming
     func persistMessages() {
+        persistDebounceItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            try? PersistenceService.saveJSON(self.messages, to: self.messagesFileName)
+        }
+        persistDebounceItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + persistDebounceInterval, execute: item)
+    }
+    
+    /// Force immediate persistence for critical events (session close, app quit)
+    func persistMessagesImmediately() {
+        persistDebounceItem?.cancel()
+        persistDebounceItem = nil
         try? PersistenceService.saveJSON(messages, to: messagesFileName)
     }
     
@@ -3318,7 +3182,8 @@ final class ChatSession: ObservableObject, Identifiable {
     func switchToLocalProvider(_ provider: LocalLLMProvider) {
         providerType = .local(provider)
         providerName = provider.rawValue
-        apiBaseURL = provider.defaultBaseURL
+        // Use the URL from global AgentSettings
+        apiBaseURL = AgentSettings.shared.baseURL(for: provider)
         apiKey = nil
         model = "" // Reset model selection
         persistSettings()
@@ -3346,15 +3211,15 @@ final class ChatSession: ObservableObject, Identifiable {
     func updateContextUsage(persist: Bool = true) {
         var totalTokens = 0
         
-        // Count message tokens
+        // Count message tokens using model-specific token estimation
         let messageArray = buildMessageArray()
         let messageText = messageArray.map { $0.content }.joined(separator: "\n")
-        totalTokens += TokenEstimator.estimateTokens(messageText)
+        totalTokens += TokenEstimator.estimateTokens(messageText, model: model)
         
         // During agent mode, also count the agent context log (this is what's actually sent to the LLM)
         if agentModeEnabled && !agentContextLog.isEmpty {
             let agentContext = agentContextLog.joined(separator: "\n")
-            totalTokens += TokenEstimator.estimateTokens(agentContext)
+            totalTokens += TokenEstimator.estimateTokens(agentContext, model: model)
         }
         
         currentContextTokens = totalTokens

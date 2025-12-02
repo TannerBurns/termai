@@ -10,6 +10,8 @@ enum UsageRequestType: String, Codable, CaseIterable {
     case summarization = "Summarization"
     case planning = "Planning"
     case reflection = "Reflection"
+    case terminalSuggestion = "Terminal Suggestion"
+    case suggestionResearch = "Suggestion Research"
 }
 
 // MARK: - Token Usage Record

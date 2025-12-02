@@ -270,3 +270,93 @@ enum LocalLLMProvider: String, CaseIterable, Codable {
     }
 }
 
+// MARK: - Local Provider Service
+
+/// Error types for local provider operations
+enum LocalProviderError: LocalizedError {
+    case invalidURL
+    case connectionFailed(statusCode: Int)
+    case decodingFailed(message: String)
+    
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "Invalid provider URL"
+        case .connectionFailed(let statusCode):
+            return "Connection failed (HTTP \(statusCode))"
+        case .decodingFailed(let message):
+            return message
+        }
+    }
+}
+
+/// Shared service for fetching models from local LLM providers
+/// Consolidates duplicate implementations from SessionSettingsView, SettingsRootView, and TerminalPane
+enum LocalProviderService {
+    /// Fetch available models from a local LLM provider
+    /// - Parameters:
+    ///   - provider: The local provider to query
+    ///   - timeout: Request timeout in seconds (default: 10)
+    /// - Returns: Array of model IDs sorted alphabetically
+    static func fetchModels(for provider: LocalLLMProvider, timeout: TimeInterval = 10) async throws -> [String] {
+        let baseURL = AgentSettings.shared.baseURL(for: provider)
+        
+        switch provider {
+        case .ollama:
+            // Ollama uses /api/tags endpoint (not OpenAI-compatible for listing models)
+            let baseURLString = baseURL.absoluteString.replacingOccurrences(of: "/v1", with: "")
+            guard let url = URL(string: baseURLString + "/api/tags") else {
+                throw LocalProviderError.invalidURL
+            }
+            
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = timeout
+            
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw LocalProviderError.connectionFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? -1)
+            }
+            
+            struct TagsResponse: Decodable {
+                struct Model: Decodable { let name: String }
+                let models: [Model]
+            }
+            
+            do {
+                let decoded = try JSONDecoder().decode(TagsResponse.self, from: data)
+                return decoded.models.map { $0.name }.sorted()
+            } catch {
+                throw LocalProviderError.decodingFailed(message: "Failed to parse Ollama response: \(error.localizedDescription)")
+            }
+            
+        case .lmStudio, .vllm:
+            // LM Studio and vLLM use OpenAI-compatible /models endpoint
+            let url = baseURL.appendingPathComponent("models")
+            
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = timeout
+            
+            let (data, response) = try await URLSession.shared.data(for: request)
+            
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw LocalProviderError.connectionFailed(statusCode: (response as? HTTPURLResponse)?.statusCode ?? -1)
+            }
+            
+            struct ModelsResponse: Decodable {
+                struct Model: Decodable { let id: String }
+                let data: [Model]
+            }
+            
+            do {
+                let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
+                return decoded.data.map { $0.id }.sorted()
+            } catch {
+                throw LocalProviderError.decodingFailed(message: "Failed to parse models response: \(error.localizedDescription)")
+            }
+        }
+    }
+}
+
