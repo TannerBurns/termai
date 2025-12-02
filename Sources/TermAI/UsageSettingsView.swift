@@ -467,6 +467,8 @@ struct UsageSettingsView: View {
         case .summarization: return .orange
         case .planning: return .green
         case .reflection: return .teal
+        case .terminalSuggestion: return .mint
+        case .suggestionResearch: return .cyan
         }
     }
     

@@ -265,6 +265,14 @@ final class ProcessManager: ObservableObject {
             }
         }
         
+        // Set up termination handler for immediate cleanup when process exits
+        // This ensures readability handlers are cleaned up right away instead of
+        // waiting for the periodic refreshProcessList() timer
+        process.terminationHandler = { [weak managedProcess] _ in
+            managedProcess?.outputPipe.fileHandleForReading.readabilityHandler = nil
+            managedProcess?.errorPipe.fileHandleForReading.readabilityHandler = nil
+        }
+        
         let startTime = Date()
         
         // If waiting for specific output, poll until we see it or timeout

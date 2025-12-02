@@ -1,4 +1,7 @@
 import SwiftUI
+import os.log
+
+private let ptyLogger = Logger(subsystem: "com.termai.app", category: "PTY")
 
 final class PTYModel: ObservableObject {
     @Published var collectedOutput: String = ""
@@ -17,6 +20,7 @@ final class PTYModel: ObservableObject {
     @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path {
         didSet {
             if currentWorkingDirectory != oldValue {
+                NSLog("[PTY] CWD CHANGED: '%@' → '%@'", oldValue, currentWorkingDirectory)
                 refreshGitInfo()
             }
         }
@@ -30,6 +34,43 @@ final class PTYModel: ObservableObject {
     var markNextOutputStart: (() -> Void)?
     @Published var lastSentCommandForCapture: String? = nil
     
+    /// Indicates that the terminal shell has finished initial startup and is ready
+    /// This triggers startup suggestions
+    @Published var didFinishInitialLoad: Bool = false
+    
+    /// Track the last command sent by the user (for history recording)
+    @Published var lastUserCommand: String? = nil
+    
+    /// Callback invoked when command completion marker (__TERMAI_RC__) is detected
+    /// This provides event-driven notification instead of relying on timer-based capture
+    var onCommandCompletion: (() -> Void)?
+    
+    /// Timeout task for command completion (fallback if marker not detected)
+    private var commandTimeoutTask: DispatchWorkItem?
+    private let commandTimeout: TimeInterval = 30.0  // 30 second fallback
+    
+    /// Start waiting for command completion with timeout fallback
+    func startCommandCapture() {
+        // Cancel any existing timeout
+        commandTimeoutTask?.cancel()
+        
+        // Set up timeout fallback
+        let timeoutItem = DispatchWorkItem { [weak self] in
+            guard let self = self, self.captureActive else { return }
+            // Timeout reached, trigger completion anyway
+            self.onCommandCompletion?()
+        }
+        commandTimeoutTask = timeoutItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + commandTimeout, execute: timeoutItem)
+    }
+    
+    /// Signal that command has completed (marker was detected)
+    fileprivate func signalCommandCompletion() {
+        commandTimeoutTask?.cancel()
+        commandTimeoutTask = nil
+        onCommandCompletion?()
+    }
+    
     // Git integration
     @Published var gitInfo: GitInfo? = nil
     private var gitRefreshTask: Task<Void, Never>? = nil
@@ -40,6 +81,11 @@ final class PTYModel: ObservableObject {
     fileprivate weak var terminalView: BridgedLocalProcessTerminalView?
     
     deinit {
+        // Cancel any pending git refresh tasks to prevent updates to deallocated object
+        gitRefreshTask?.cancel()
+        gitDebounceWorkItem?.cancel()
+        commandTimeoutTask?.cancel()
+        
         // Send exit command to the shell process when PTYModel is deallocated
         terminalView?.terminateShell()
     }
@@ -54,15 +100,21 @@ final class PTYModel: ObservableObject {
         gitDebounceWorkItem?.cancel()
         gitRefreshTask?.cancel()
         
+        // Capture path BEFORE the debounce to avoid race conditions
+        // This ensures we know exactly which path triggered this refresh
+        let capturedPath = self.currentWorkingDirectory
+        
         // Debounce to avoid excessive git operations during rapid directory changes
-        let workItem = DispatchWorkItem { [weak self] in
+        let workItem = DispatchWorkItem { [weak self, capturedPath] in
             guard let self = self else { return }
-            self.gitRefreshTask = Task { @MainActor [weak self] in
+            // Re-check if the directory is still the one we wanted (may have changed during debounce)
+            guard self.currentWorkingDirectory == capturedPath else { return }
+            
+            self.gitRefreshTask = Task { @MainActor [weak self, capturedPath] in
                 guard let self = self else { return }
-                let path = self.currentWorkingDirectory
-                let info = await GitInfoService.shared.fetchGitInfo(for: path)
-                // Only update if we're still looking at the same directory
-                if !Task.isCancelled && self.currentWorkingDirectory == path {
+                let info = await GitInfoService.shared.fetchGitInfo(for: capturedPath)
+                // Only update if we're still looking at the same directory after async fetch
+                if !Task.isCancelled && self.currentWorkingDirectory == capturedPath {
                     self.gitInfo = info
                 }
             }
@@ -80,7 +132,13 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     
     // Debounce timer for non-agent buffer processing
     private var debounceWorkItem: DispatchWorkItem?
-    private let debounceInterval: TimeInterval = 0.15  // 150ms debounce
+    private let debounceInterval: TimeInterval = 0.25  // 250ms debounce for reduced CPU usage
+    
+    // Track if we've detected initial shell ready state
+    private var hasDetectedInitialPrompt: Bool = false
+    
+    // Buffer to track what user is typing (for command history)
+    private var currentInputBuffer: String = ""
     
     func markOutputStart() {
         let buffer = self.getTerminal().getBufferAsData()
@@ -143,7 +201,24 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             // Always extract CWD from buffer for real-time directory tracking
             // OSC 7 sequences emitted by precmd will be captured here
             if let extractedCwd = Self.extractCwdFromBuffer(text) {
+                NSLog("[PTY] extractCwdFromBuffer found: %@", extractedCwd)
                 model.currentWorkingDirectory = extractedCwd
+            }
+            
+            // Detect initial shell ready state (first prompt detected)
+            if !self.hasDetectedInitialPrompt && !model.didFinishInitialLoad {
+                // Look for a prompt in the buffer
+                let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                for line in lines.reversed().prefix(5) {
+                    if Self.looksLikePrompt(line) {
+                        self.hasDetectedInitialPrompt = true
+                        // Small delay to ensure CWD and git info are populated
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            model.didFinishInitialLoad = true
+                        }
+                        break
+                    }
+                }
             }
             
             // Always compute last output chunk for the "Add Last Output" button
@@ -164,6 +239,7 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
                 // Extract and remove both exit code and cwd markers if present
                 let rcProcessed = Self.stripExitCodeMarker(from: trimmedChunk)
                 trimmedChunk = rcProcessed.cleaned
+                let exitCodeDetected = rcProcessed.code != nil
                 if let rc = rcProcessed.code { model.lastExitCode = rc }
                 let cwdProcessed = Self.stripCwdMarker(from: trimmedChunk)
                 trimmedChunk = cwdProcessed.cleaned
@@ -172,6 +248,12 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
                 }
                 model.previousBuffer = text
                 model.collectedOutput = text
+                
+                // Signal command completion when exit code marker is detected
+                // This triggers the event-driven capture instead of relying on a timer
+                if exitCodeDetected {
+                    model.signalCommandCompletion()
+                }
             }
             
             // Always update lastOutputChunk for UI buttons (keep raw if cleaned is empty)
@@ -189,13 +271,99 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     }
 
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        // When user presses Enter (\r or \n), mark buffer offset as the start of next output
-        if data.contains(10) || data.contains(13) { // \n or \r
-            markOutputStart()
+        // Track typed characters for command history
+        for byte in data {
+            if byte == 10 || byte == 13 { // \n or \r (Enter)
+                // User pressed Enter - capture the current command
+                let command = currentInputBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !command.isEmpty {
+                    bridgeModel?.lastUserCommand = command
+                    
+                    // Detect cd commands and update CWD after execution
+                    if command.hasPrefix("cd ") || command == "cd" {
+                        scheduleCwdUpdate(for: command)
+                    }
+                }
+                currentInputBuffer = ""
+                markOutputStart()
+            } else if byte == 127 || byte == 8 { // Backspace or Delete
+                if !currentInputBuffer.isEmpty {
+                    currentInputBuffer.removeLast()
+                }
+            } else if byte == 21 { // Ctrl+U (clear line)
+                currentInputBuffer = ""
+            } else if byte == 23 { // Ctrl+W (delete word)
+                // Remove last word
+                while !currentInputBuffer.isEmpty && currentInputBuffer.last != " " {
+                    currentInputBuffer.removeLast()
+                }
+                while !currentInputBuffer.isEmpty && currentInputBuffer.last == " " {
+                    currentInputBuffer.removeLast()
+                }
+            } else if byte >= 32 && byte < 127 { // Printable ASCII
+                currentInputBuffer.append(Character(UnicodeScalar(byte)))
+            }
         }
         super.send(source: source, data: data)
     }
 
+    /// Schedule a CWD update after a cd command executes
+    private func scheduleCwdUpdate(for command: String) {
+        guard let model = bridgeModel else { return }
+        let currentCWD = model.currentWorkingDirectory
+        
+        // Parse the cd target
+        var cdTarget = command.hasPrefix("cd ") ? String(command.dropFirst(3)).trimmingCharacters(in: .whitespaces) : ""
+        
+        // Handle quoted paths
+        if (cdTarget.hasPrefix("\"") && cdTarget.hasSuffix("\"")) ||
+           (cdTarget.hasPrefix("'") && cdTarget.hasSuffix("'")) {
+            cdTarget = String(cdTarget.dropFirst().dropLast())
+        }
+        
+        // Empty cd goes to home
+        if cdTarget.isEmpty {
+            cdTarget = "~"
+        }
+        
+        // Schedule update after command executes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak model, currentCWD, cdTarget] in
+            guard let model = model else { return }
+            
+            // Resolve the target path
+            let resolvedPath: String
+            if cdTarget.hasPrefix("~") {
+                let home = FileManager.default.homeDirectoryForCurrentUser.path
+                resolvedPath = home + cdTarget.dropFirst()
+            } else if cdTarget.hasPrefix("/") {
+                resolvedPath = cdTarget
+            } else if cdTarget == "-" {
+                // cd - goes to previous directory, skip manual update (we can't track this)
+                return
+            } else if cdTarget == ".." {
+                resolvedPath = (currentCWD as NSString).deletingLastPathComponent
+            } else if cdTarget.hasPrefix("..") {
+                // Handle paths like ../foo or ../../bar
+                resolvedPath = (currentCWD as NSString).appendingPathComponent(cdTarget)
+            } else {
+                // Relative path
+                resolvedPath = (currentCWD as NSString).appendingPathComponent(cdTarget)
+            }
+            
+            // Normalize the path
+            let normalizedPath = (resolvedPath as NSString).standardizingPath
+            
+            // Verify the directory exists before updating
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: normalizedPath, isDirectory: &isDir), isDir.boolValue {
+                ptyLogger.info("CD detected: updating CWD from '\(currentCWD, privacy: .public)' to '\(normalizedPath, privacy: .public)'")
+                model.currentWorkingDirectory = normalizedPath
+            } else {
+                ptyLogger.warning("CD target doesn't exist or isn't a directory: \(normalizedPath, privacy: .public)")
+            }
+        }
+    }
+    
     /// Extract CWD from terminal buffer by looking for common prompt patterns
     private static func extractCwdFromBuffer(_ buffer: String) -> String? {
         // Look for the last line that looks like a prompt with a path
@@ -464,15 +632,6 @@ struct SwiftTermView: NSViewRepresentable {
         model.markNextOutputStart = { [weak term] in
             term?.markOutputStart()
         }
-        // Start shell in user's home directory by injecting cd via login shell
-        // Configure precmd hook to emit OSC 7 sequences for real-time CWD tracking
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let escaped = home.replacingOccurrences(of: "\"", with: "\\\"")
-        // The precmd function emits OSC 7 with the current working directory before each prompt
-        // Format: ESC ] 7 ; file://hostname/path BEL
-        let precmdSetup = "__termai_precmd() { printf '\\e]7;file://%s%s\\a' \"$(hostname)\" \"$(pwd -P)\"; }; precmd_functions+=(__termai_precmd)"
-        let cmd = "cd \"\(escaped)\"; \(precmdSetup); exec /bin/zsh -l"
-        
         // Build environment with color support enabled
         var env = ProcessInfo.processInfo.environment
         env["TERM"] = "xterm-256color"     // Full color support
@@ -480,10 +639,26 @@ struct SwiftTermView: NSViewRepresentable {
         env["CLICOLOR_FORCE"] = "1"        // Force colors even if not a TTY
         env["COLORTERM"] = "truecolor"     // Indicate true color support
         env["LSCOLORS"] = "GxFxCxDxBxegedabagaced"  // macOS ls colors
-        env["LS_COLORS"] = "di=1;36:ln=1;35:so=1;32:pi=1;33:ex=1;31:bd=34;46:cd=34;43:su=30;41:sg=30;46:tw=30;42:ow=34;43"  // GNU ls colors
+        env["LS_COLORS"] = "di=1;36:ln=1;35:so=1;32:pi=1;33:ex=1:bd=34;46:cd=34;43:su=30;41:sg=30;46:tw=30;42:ow=34;43"  // GNU ls colors
         
+        // Start login shell directly (without exec, which would destroy our precmd setup)
         let envArray = env.map { "\($0.key)=\($0.value)" }
-        term.startProcess(executable: "/bin/zsh", args: ["-lc", cmd], environment: envArray)
+        term.startProcess(executable: "/bin/zsh", args: ["-l"], environment: envArray)
+        
+        // Inject precmd hook after shell starts to enable OSC 7 CWD tracking
+        // This MUST happen after startProcess, not via -c flag, because:
+        // 1. Using exec /bin/zsh -l would replace the shell and lose the precmd function
+        // 2. Injecting via stdin ensures the hook exists in the interactive shell
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let escaped = home.replacingOccurrences(of: "\"", with: "\\\"")
+        // The precmd function emits OSC 7 with the current working directory before each prompt
+        // Format: ESC ] 7 ; file://hostname/path BEL
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak term] in
+            guard let term = term else { return }
+            // Define precmd hook and add to precmd_functions array, then cd to home
+            let precmdSetup = "__termai_precmd() { printf '\\e]7;file://%s%s\\a' \"$(hostname)\" \"$(pwd -P)\"; }; precmd_functions+=(__termai_precmd); cd \"\(escaped)\"; clear\n"
+            term.send(txt: precmdSetup)
+        }
         // Apply initial theme
         if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {
             term.apply(theme: theme)
@@ -521,7 +696,21 @@ struct SwiftTermView: NSViewRepresentable {
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
-            guard let dir = directory, !dir.isEmpty else { return }
+            NSLog("[PTY] hostCurrentDirectoryUpdate called with: %@", directory ?? "nil")
+            guard var dir = directory, !dir.isEmpty else { return }
+            
+            // Parse file:// URL to extract the actual path
+            // OSC 7 sends format: file://hostname/path
+            if dir.hasPrefix("file://") {
+                var pathPart = String(dir.dropFirst(7)) // Remove "file://"
+                // Skip hostname if present (find first / after hostname)
+                if !pathPart.hasPrefix("/"), let slashIdx = pathPart.firstIndex(of: "/") {
+                    pathPart = String(pathPart[slashIdx...])
+                }
+                // URL-decode the path (handles %20 for spaces, etc.)
+                dir = pathPart.removingPercentEncoding ?? pathPart
+            }
+            
             DispatchQueue.main.async { [weak self] in
                 self?.model.currentWorkingDirectory = dir
             }

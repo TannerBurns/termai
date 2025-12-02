@@ -269,6 +269,11 @@ struct SessionSettingsView: View {
     @State private var connectionStatus: ConnectionStatus = .unknown
     @State private var isTestingConnection: Bool = false
     
+    // Terminal suggestions local models (fetched independently from session)
+    @State private var terminalSuggestionsLocalModels: [String] = []
+    @State private var isFetchingTerminalSuggestionsModels: Bool = false
+    @State private var terminalSuggestionsModelsError: String? = nil
+    
     private var selectedLocalProvider: LocalLLMProvider? {
         LocalLLMProvider(rawValue: session.providerName)
     }
@@ -295,16 +300,6 @@ struct SessionSettingsView: View {
                 // Provider Selection Card
                 providerSelectionCard
                 
-                // Cloud API Keys Card (for cloud providers)
-                if isCloudProvider {
-                    cloudAPIKeysCard
-                }
-                
-                // Connection Settings Card (only for local providers)
-                if !isCloudProvider {
-                    connectionSettingsCard
-                }
-                
                 // Model Selection Card
                 modelSelectionCard
                 
@@ -315,14 +310,27 @@ struct SessionSettingsView: View {
                 if !isCloudProvider {
                     contextSizeCard
                 }
+                
+                // Terminal Suggestions Card (global setting)
+                terminalSuggestionsCard
             }
             .padding(20)
         }
         .frame(minWidth: 500, minHeight: 400)
         .onAppear {
-            apiURLString = session.apiBaseURL.absoluteString
-            if !isCloudProvider {
+            // For local providers, sync the URL from global AgentSettings
+            if case .local(let provider) = session.providerType {
+                let url = agentSettings.baseURL(for: provider)
+                session.apiBaseURL = url
+                apiURLString = url.absoluteString
                 testConnection()
+            } else {
+                apiURLString = session.apiBaseURL.absoluteString
+            }
+            
+            // Auto-fetch models for terminal suggestions if local provider is selected
+            if case .local(let provider) = agentSettings.terminalSuggestionsProvider {
+                fetchTerminalSuggestionsModels(for: provider)
             }
         }
     }
@@ -410,7 +418,7 @@ struct SessionSettingsView: View {
                 }
             } else {
                 AlertCallout(
-                    message: "Set OPENAI_API_KEY or ANTHROPIC_API_KEY environment variable to enable cloud providers.",
+                    message: "Configure API keys in the Providers tab to enable cloud providers.",
                     type: .info
                 )
             }
@@ -434,8 +442,10 @@ struct SessionSettingsView: View {
                         .onTapGesture {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 session.switchToLocalProvider(LocalLLMProvider(rawValue: provider.rawValue)!)
-                                let def = provider.defaultBaseURL
-                                apiURLString = def.absoluteString
+                                // Use URL from global AgentSettings
+                                let url = agentSettings.baseURL(for: provider)
+                                session.apiBaseURL = url
+                                apiURLString = url.absoluteString
                                 connectionStatus = .unknown
                                 testConnection()
                             }
@@ -444,218 +454,6 @@ struct SessionSettingsView: View {
                     
                     Spacer()
                 }
-            }
-        }
-        .settingsCard()
-    }
-    
-    // MARK: - Cloud API Keys Card
-    private var cloudAPIKeysCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            SettingsSectionHeader("API Keys", subtitle: "Configure cloud provider authentication")
-            
-            VStack(spacing: 16) {
-                // OpenAI API Key
-                cloudAPIKeyField(for: .openai)
-                
-                Divider()
-                
-                // Anthropic API Key
-                cloudAPIKeyField(for: .anthropic)
-            }
-        }
-        .settingsCard()
-    }
-    
-    private func cloudAPIKeyField(for provider: CloudProvider) -> some View {
-        let hasEnvKey = apiKeyManager.getEnvironmentKey(for: provider) != nil
-        let hasOverride = apiKeyManager.hasOverride(for: provider)
-        let isFromEnv = apiKeyManager.isFromEnvironment(for: provider)
-        
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: provider.icon)
-                    .font(.system(size: 14))
-                    .foregroundColor(provider == .openai ? .green : .orange)
-                
-                Text("\(provider.rawValue) API Key")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.primary)
-                
-                Spacer()
-                
-                if isFromEnv {
-                    Text("from \(provider.apiKeyEnvVariable)")
-                        .font(.system(size: 10))
-                        .foregroundColor(.green)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(Color.green.opacity(0.1))
-                        )
-                } else if hasOverride {
-                    Text("custom")
-                        .font(.system(size: 10))
-                        .foregroundColor(.blue)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            Capsule()
-                                .fill(Color.blue.opacity(0.1))
-                        )
-                }
-            }
-            
-            HStack(spacing: 8) {
-                SecureField(
-                    hasEnvKey ? "Override environment variable..." : "Enter API key...",
-                    text: Binding(
-                        get: { apiKeyManager.getOverride(for: provider) ?? "" },
-                        set: { apiKeyManager.setOverride($0.isEmpty ? nil : $0, for: provider) }
-                    )
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: 13, design: .monospaced))
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.primary.opacity(0.05))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(hasOverride ? Color.blue.opacity(0.3) : Color.primary.opacity(0.1), lineWidth: 1)
-                )
-                
-                if hasOverride {
-                    Button(action: {
-                        apiKeyManager.setOverride(nil, for: provider)
-                    }) {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .frame(width: 28, height: 28)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.primary.opacity(0.05))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help("Revert to environment variable")
-                }
-            }
-            
-            if hasEnvKey && !hasOverride {
-                Text("Using key from environment variable. Enter a value above to override.")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-            } else if !hasEnvKey && !hasOverride {
-                Text("No API key found. Set \(provider.apiKeyEnvVariable) environment variable or enter a key above.")
-                    .font(.system(size: 10))
-                    .foregroundColor(.orange)
-            }
-        }
-    }
-    
-    // MARK: - Connection Settings Card
-    private var connectionSettingsCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                SettingsSectionHeader("Connection", subtitle: "API endpoint and authentication")
-                Spacer()
-                ConnectionStatusBadge(status: connectionStatus)
-            }
-            
-            VStack(alignment: .leading, spacing: 12) {
-                // API URL
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("API URL")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.secondary)
-                    
-                    TextField("http://localhost:11434/v1", text: $apiURLString)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced))
-                        .padding(10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.primary.opacity(0.05))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-                        )
-                        .onChange(of: apiURLString) { newValue in
-                            if let url = URL(string: newValue) {
-                                session.apiBaseURL = url
-                                session.persistSettings()
-                                connectionStatus = .unknown
-                            }
-                        }
-                }
-                
-                // API Key
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("API Key")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                        
-                        Text("(optional)")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary.opacity(0.7))
-                    }
-                    
-                    SecureField("Enter API key if required", text: Binding(
-                        get: { session.apiKey ?? "" },
-                        set: { session.apiKey = $0.isEmpty ? nil : $0; session.persistSettings() }
-                    ))
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.primary.opacity(0.05))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-                    )
-                }
-            }
-            
-            // Test Connection Button
-            HStack {
-                Button(action: testConnection) {
-                    HStack(spacing: 6) {
-                        if isTestingConnection {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                                .frame(width: 14, height: 14)
-                        } else {
-                            Image(systemName: "antenna.radiowaves.left.and.right")
-                                .font(.system(size: 12))
-                        }
-                        Text("Test Connection")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.accentColor)
-                    )
-                    .foregroundColor(.white)
-                }
-                .buttonStyle(.plain)
-                .disabled(isTestingConnection)
-                
-                Spacer()
-            }
-            
-            // Connection Error
-            if case .disconnected(let error) = connectionStatus {
-                AlertCallout(message: error, type: .error)
             }
         }
         .settingsCard()
@@ -1052,16 +850,15 @@ struct SessionSettingsView: View {
                 SettingsSectionHeader("Context Window", subtitle: "Set the context size for your local model")
                 Spacer()
                 
-                // Current usage indicator
-                if session.currentContextTokens > 0 {
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(contextUsageColor)
-                            .frame(width: 6, height: 6)
-                        Text(String(format: "%.0f%% used", session.contextUsagePercent * 100))
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
+                // Current usage indicator (show 0% until first response)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(contextUsageColor)
+                        .frame(width: 6, height: 6)
+                    let usagePercent = session.hasAssistantResponse ? session.contextUsagePercent : 0
+                    Text(String(format: "%.0f%% used", usagePercent * 100))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
             }
             
@@ -1176,7 +973,8 @@ struct SessionSettingsView: View {
     }
     
     private var contextUsageColor: Color {
-        let percent = session.contextUsagePercent
+        // Show 0% (green) until first assistant response
+        let percent = session.hasAssistantResponse ? session.contextUsagePercent : 0
         switch percent {
         case 0..<0.6: return .green
         case 0.6..<0.8: return .yellow
@@ -1192,6 +990,36 @@ struct SessionSettingsView: View {
             return String(format: "%.0fK", Double(size) / 1_000)
         }
         return "\(size)"
+    }
+    
+    // MARK: - Terminal Suggestions Model Fetching
+    
+    private func fetchTerminalSuggestionsModels(for provider: LocalLLMProvider) {
+        isFetchingTerminalSuggestionsModels = true
+        terminalSuggestionsModelsError = nil
+        
+        Task {
+            defer {
+                Task { @MainActor in
+                    isFetchingTerminalSuggestionsModels = false
+                }
+            }
+            
+            do {
+                let models = try await LocalProviderService.fetchModels(for: provider)
+                await MainActor.run {
+                    terminalSuggestionsLocalModels = models
+                    if models.isEmpty {
+                        terminalSuggestionsModelsError = "No models found"
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    terminalSuggestionsModelsError = error.localizedDescription
+                    terminalSuggestionsLocalModels = []
+                }
+            }
+        }
     }
     
     // MARK: - Actions
@@ -1225,6 +1053,493 @@ struct SessionSettingsView: View {
                 connectionStatus = .connected(modelCount: session.availableModels.count)
             }
         }
+    }
+    
+    // MARK: - Terminal Suggestions Card
+    
+    /// Helper to check if terminal suggestions are fully configured
+    /// Using a local computed property ensures SwiftUI properly tracks the @Published dependencies
+    private var isTerminalSuggestionsFullyConfigured: Bool {
+        agentSettings.terminalSuggestionsEnabled &&
+        agentSettings.terminalSuggestionsModelId != nil &&
+        agentSettings.terminalSuggestionsProvider != nil
+    }
+    
+    private var terminalSuggestionsCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                SettingsSectionHeader("Terminal AI Suggestions", subtitle: "Real-time command suggestions as you work")
+                Spacer()
+                
+                // Configuration status badge
+                if !isTerminalSuggestionsFullyConfigured && agentSettings.terminalSuggestionsEnabled {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                        Text("Setup Required")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(Color.orange.opacity(0.15))
+                    )
+                } else if isTerminalSuggestionsFullyConfigured {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10))
+                        Text("Configured")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundColor(.green)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(Color.green.opacity(0.15))
+                    )
+                }
+            }
+            
+            VStack(spacing: 16) {
+                // Enable/Disable Toggle
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Enable Terminal Suggestions")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Show AI-powered command suggestions while working in the terminal.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: Binding(
+                        get: { agentSettings.terminalSuggestionsEnabled },
+                        set: { 
+                            agentSettings.terminalSuggestionsEnabled = $0
+                            agentSettings.save()
+                        }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                }
+                
+                if agentSettings.terminalSuggestionsEnabled {
+                    Divider()
+                    
+                    // Warning if not configured
+                    if agentSettings.terminalSuggestionsModelId == nil {
+                        AlertCallout(
+                            message: "Select a model below to enable terminal suggestions. A lightweight model like gpt-4o-mini or claude-3-5-haiku is recommended for fast responses.",
+                            type: .warning
+                        )
+                    }
+                    
+                    // Provider Selection
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Suggestions Provider")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.secondary)
+                        
+                        terminalSuggestionsProviderPicker
+                    }
+                    
+                    // Model Selection (only if provider is selected)
+                    if agentSettings.terminalSuggestionsProvider != nil {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Suggestions Model")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                            
+                            terminalSuggestionsModelPicker
+                        }
+                        
+                        // Reasoning Effort (only for models that support it)
+                        if let modelId = agentSettings.terminalSuggestionsModelId,
+                           CuratedModels.supportsReasoning(modelId: modelId) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Reasoning Effort")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                
+                                Picker("", selection: Binding(
+                                    get: { agentSettings.terminalSuggestionsReasoningEffort },
+                                    set: {
+                                        agentSettings.terminalSuggestionsReasoningEffort = $0
+                                        agentSettings.save()
+                                    }
+                                )) {
+                                    ForEach(ReasoningEffort.allCases, id: \.self) { effort in
+                                        Text(effort.rawValue).tag(effort)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                
+                                Text("Controls how much the model 'thinks' before responding. Higher effort may improve suggestions but takes longer.")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary.opacity(0.8))
+                            }
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    // Shell History Toggle
+                    shellHistorySection
+                    
+                    Divider()
+                    
+                    // Debounce Setting
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Suggestion Delay")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            Text(String(format: "%.1fs", agentSettings.terminalSuggestionsDebounceSeconds))
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(.primary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(Color.primary.opacity(0.05))
+                                )
+                        }
+                        
+                        Slider(
+                            value: Binding(
+                                get: { agentSettings.terminalSuggestionsDebounceSeconds },
+                                set: { 
+                                    agentSettings.terminalSuggestionsDebounceSeconds = $0
+                                    agentSettings.save()
+                                }
+                            ),
+                            in: 1.0...5.0,
+                            step: 0.5
+                        )
+                        
+                        Text("Time to wait after terminal activity before generating suggestions.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary.opacity(0.8))
+                    }
+                }
+            }
+        }
+        .settingsCard()
+        .animation(.easeInOut(duration: 0.2), value: agentSettings.terminalSuggestionsEnabled)
+        .animation(.easeInOut(duration: 0.2), value: agentSettings.terminalSuggestionsModelId)
+        .animation(.easeInOut(duration: 0.2), value: agentSettings.terminalSuggestionsProvider)
+        .animation(.easeInOut(duration: 0.2), value: agentSettings.terminalSuggestionsReasoningEffort)
+    }
+    
+    // MARK: - Terminal Suggestions Provider Picker
+    private var terminalSuggestionsProviderPicker: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Cloud Providers
+            if apiKeyManager.availableProviders.isEmpty {
+                Text("Configure API keys in the Providers tab to use cloud models.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Cloud Providers")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                    
+                    HStack(spacing: 12) {
+                        ForEach(CloudProvider.allCases, id: \.rawValue) { provider in
+                            let isAvailable = apiKeyManager.hasAPIKey(for: provider)
+                            let isSelected = agentSettings.terminalSuggestionsProvider == .cloud(provider)
+                            
+                            CloudProviderBadge(
+                                provider: provider,
+                                isSelected: isSelected,
+                                isAvailable: isAvailable
+                            )
+                            .onTapGesture {
+                                guard isAvailable else { return }
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    agentSettings.terminalSuggestionsProvider = .cloud(provider)
+                                    // Reset model if switching provider
+                                    if !isSelected {
+                                        agentSettings.terminalSuggestionsModelId = nil
+                                        agentSettings.terminalSuggestionsReasoningEffort = .none
+                                    }
+                                    agentSettings.save()
+                                }
+                            }
+                        }
+                        
+                        Spacer()
+                    }
+                }
+            }
+            
+            // Local Providers
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Local Providers")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                
+                HStack(spacing: 12) {
+                    ForEach(LocalLLMProvider.allCases, id: \.rawValue) { provider in
+                        let isSelected = agentSettings.terminalSuggestionsProvider == .local(provider)
+                        
+                        ProviderBadge(
+                            provider: provider,
+                            isSelected: isSelected
+                        )
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                agentSettings.terminalSuggestionsProvider = .local(provider)
+                                // Reset model if switching provider
+                                if !isSelected {
+                                    agentSettings.terminalSuggestionsModelId = nil
+                                    agentSettings.terminalSuggestionsReasoningEffort = .none
+                                    // Fetch models for this provider
+                                    fetchTerminalSuggestionsModels(for: provider)
+                                }
+                                agentSettings.save()
+                            }
+                        }
+                    }
+                    
+                    Spacer()
+                }
+            }
+        }
+    }
+    
+    // MARK: - Shell History Section
+    
+    private var shellHistorySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Use Shell History")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Read your shell history file to suggest frequently used commands.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Toggle("", isOn: Binding(
+                    get: { agentSettings.readShellHistory },
+                    set: {
+                        agentSettings.readShellHistory = $0
+                        agentSettings.save()
+                    }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+            }
+            
+            // Show history file info if enabled and available
+            if agentSettings.readShellHistory {
+                if let info = ShellHistoryParser.shared.getHistoryFileInfo() {
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Reading: \(info.path)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            
+                            Text("\(info.shellType.rawValue) • ~\(info.entryCount) entries")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary.opacity(0.8))
+                        }
+                    }
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.primary.opacity(0.03))
+                    )
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                        Text("No shell history file found")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Terminal Suggestions Model Picker
+    @ViewBuilder
+    private var terminalSuggestionsModelPicker: some View {
+        if let provider = agentSettings.terminalSuggestionsProvider {
+            switch provider {
+            case .cloud(let cloudProvider):
+                cloudModelPicker(for: cloudProvider)
+            case .local:
+                localModelPicker
+            }
+        }
+    }
+    
+    private func cloudModelPicker(for cloudProvider: CloudProvider) -> some View {
+        let models = CuratedModels.models(for: cloudProvider)
+        
+        return Menu {
+            if agentSettings.terminalSuggestionsModelId == nil {
+                Button("Select a model...") { }
+                    .disabled(true)
+            }
+            
+            // All models with reasoning icon support
+            ForEach(models, id: \.id) { model in
+                let isSelected = agentSettings.terminalSuggestionsModelId == model.id
+                
+                Button(action: {
+                    agentSettings.terminalSuggestionsModelId = model.id
+                    agentSettings.save()
+                }) {
+                    HStack {
+                        if model.supportsReasoning {
+                            ReasoningBrainLabel(model.displayName, size: .small)
+                        } else {
+                            Text(model.displayName)
+                        }
+                        Spacer()
+                        if isSelected {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            modelPickerLabel
+        }
+        .menuStyle(.borderlessButton)
+    }
+    
+    private var localModelPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Menu {
+                    if agentSettings.terminalSuggestionsModelId == nil {
+                        Button("Select a model...") { }
+                            .disabled(true)
+                    }
+                    
+                    // Use independently fetched models for terminal suggestions
+                    if !terminalSuggestionsLocalModels.isEmpty {
+                        ForEach(terminalSuggestionsLocalModels, id: \.self) { modelId in
+                            Button(action: {
+                                agentSettings.terminalSuggestionsModelId = modelId
+                                agentSettings.save()
+                            }) {
+                                HStack {
+                                    Text(modelId)
+                                    if agentSettings.terminalSuggestionsModelId == modelId {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } else if isFetchingTerminalSuggestionsModels {
+                        Text("Loading models...")
+                            .foregroundColor(.secondary)
+                    } else {
+                        Button("Click refresh to load models") { }
+                            .disabled(true)
+                    }
+                } label: {
+                    modelPickerLabel
+                }
+                .menuStyle(.borderlessButton)
+                
+                // Refresh button
+                Button(action: {
+                    if case .local(let provider) = agentSettings.terminalSuggestionsProvider {
+                        fetchTerminalSuggestionsModels(for: provider)
+                    }
+                }) {
+                    if isFetchingTerminalSuggestionsModels {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 28, height: 28)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.primary.opacity(0.05))
+                            )
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(isFetchingTerminalSuggestionsModels)
+                .help("Refresh models from provider")
+            }
+            
+            // Error message
+            if let error = terminalSuggestionsModelsError {
+                Text(error)
+                    .font(.system(size: 10))
+                    .foregroundColor(.red)
+            } else if terminalSuggestionsLocalModels.isEmpty && !isFetchingTerminalSuggestionsModels {
+                Text("Make sure your local provider is running, then click refresh.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+    
+    private var modelPickerLabel: some View {
+        HStack {
+            // Show brain icon for reasoning models, cpu for others
+            if let modelId = agentSettings.terminalSuggestionsModelId,
+               CuratedModels.supportsReasoning(modelId: modelId) {
+                ReasoningBrainIcon(size: .medium, showGlow: true)
+            } else {
+                Image(systemName: "cpu")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary)
+            }
+            
+            if let modelId = agentSettings.terminalSuggestionsModelId {
+                Text(CuratedModels.find(id: modelId)?.displayName ?? modelId)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.primary)
+            } else {
+                Text("Select a model...")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(agentSettings.terminalSuggestionsModelId == nil ? Color.orange.opacity(0.5) : Color.primary.opacity(0.1), lineWidth: 1)
+        )
     }
 }
 

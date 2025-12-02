@@ -129,18 +129,21 @@ struct ChatContainerView: View {
                 )
                 .id(selectedSession.id) // Force view recreation when session changes
                 .onReceive(NotificationCenter.default.publisher(for: .TermAIExecuteCommand)) { note in
-                    // When a command is executed, schedule a capture and publish a finish event for the selected session
+                    // When a command is executed, set up marker-based capture
                     guard let cmd = note.userInfo?["command"] as? String else { return }
-                    // Capture after a configurable delay to accumulate output
-                    // Wait longer to ensure markers are processed
-                    let captureDelay = AgentSettings.shared.commandCaptureDelay
-                    DispatchQueue.main.asyncAfter(deadline: .now() + captureDelay) {
+                    let sessionIdFromNote = note.userInfo?["sessionId"] as? UUID
+                    
+                    // Set up the completion callback - triggered when __TERMAI_RC__ marker is detected
+                    // or after timeout (30s fallback)
+                    ptyModel.onCommandCompletion = { [weak ptyModel] in
+                        guard let ptyModel = ptyModel else { return }
+                        
                         // Grab last output chunk and exit code from the terminal
                         let output = ptyModel.lastOutputChunk
                         let rc = ptyModel.lastExitCode
                         let cwd = ptyModel.currentWorkingDirectory
                         // Route the finish to the same session id that issued the command (if provided)
-                        let sid = (note.userInfo?["sessionId"] as? UUID) ?? selectedSession.id
+                        let sid = sessionIdFromNote ?? selectedSession.id
                         NotificationCenter.default.post(name: .TermAICommandFinished, object: nil, userInfo: [
                             "sessionId": sid,
                             "command": cmd,
@@ -152,7 +155,12 @@ struct ChatContainerView: View {
                         ptyModel.lastSentCommandForCapture = nil
                         // Disable capture state to stop heavy updates until next command
                         ptyModel.captureActive = false
+                        // Clear the completion callback
+                        ptyModel.onCommandCompletion = nil
                     }
+                    
+                    // Start waiting for completion with timeout fallback
+                    ptyModel.startCommandCapture()
                 }
             } else {
                 Color.clear
@@ -1222,8 +1230,15 @@ struct ContextUsageIndicator: View {
     @State private var isPulsing: Bool = false
     @Environment(\.colorScheme) var colorScheme
     
+    /// Show 0 usage until we have an actual assistant response
+    /// (before that, currentContextTokens just reflects estimated system prompt, not real usage)
+    private var displayedTokens: Int {
+        session.hasAssistantResponse ? session.currentContextTokens : 0
+    }
+    
     private var usagePercent: Double {
-        session.contextUsagePercent
+        guard session.effectiveContextLimit > 0 else { return 0 }
+        return min(1.0, Double(displayedTokens) / Double(session.effectiveContextLimit))
     }
     
     private var usageColor: Color {
@@ -1240,7 +1255,7 @@ struct ContextUsageIndicator: View {
     }
     
     private var formattedTokens: String {
-        let current = session.currentContextTokens
+        let current = displayedTokens
         let limit = session.effectiveContextLimit
         
         // Format with K suffix for thousands

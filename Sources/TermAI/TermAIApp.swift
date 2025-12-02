@@ -130,8 +130,7 @@ struct TermAIApp: App {
                     ptyModel: selectedTab.ptyModel
                 )
             } else {
-                Text("No tab selected")
-                    .frame(width: 400, height: 300)
+                SettingsEmptyStateView()
             }
         }
     }
@@ -309,9 +308,27 @@ struct AppTabContentView: View {
                         enriched?.cwd = tab.ptyModel.currentWorkingDirectory
                         tab.chatTabsManager.selectedSession?.setPendingTerminalContext(text, meta: enriched)
                     },
-                    onToggleChat: { showChat.toggle() }
+                    onToggleChat: { showChat.toggle() },
+                    onOpenSettings: {
+                        // Open settings via keyboard shortcut simulation
+                        if let event = NSEvent.keyEvent(
+                            with: .keyDown,
+                            location: .zero,
+                            modifierFlags: .command,
+                            timestamp: 0,
+                            windowNumber: 0,
+                            context: nil,
+                            characters: ",",
+                            charactersIgnoringModifiers: ",",
+                            isARepeat: false,
+                            keyCode: 43
+                        ) {
+                            NSApp.sendEvent(event)
+                        }
+                    }
                 )
                 .environmentObject(tab.ptyModel)
+                .environmentObject(tab.suggestionService)
                 .frame(width: actualTerminalWidth)
                 
                 // Resizable divider and chat pane
@@ -406,6 +423,61 @@ extension View {
                 NSCursor.pop()
             }
         }
+    }
+}
+
+// MARK: - Settings Empty State View
+struct SettingsEmptyStateView: View {
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        VStack(spacing: 24) {
+            // Icon
+            Image(systemName: "gearshape.2")
+                .font(.system(size: 56, weight: .light))
+                .foregroundColor(.secondary.opacity(0.5))
+            
+            // Title
+            Text("Settings Unavailable")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundColor(.primary)
+            
+            // Description
+            VStack(spacing: 8) {
+                Text("No active terminal tab is available.")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary)
+                
+                Text("Create a new tab or select an existing one to access settings.")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary.opacity(0.8))
+                    .multilineTextAlignment(.center)
+            }
+            
+            // Hint
+            VStack(spacing: 6) {
+                Divider()
+                    .frame(width: 200)
+                    .padding(.vertical, 8)
+                
+                HStack(spacing: 6) {
+                    Image(systemName: "keyboard")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.6))
+                    Text("Press ")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.7))
+                    + Text("⌘T")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    + Text(" to create a new tab")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+            }
+        }
+        .frame(width: 500, height: 400)
+        .background(colorScheme == .dark ? Color(white: 0.1) : Color(white: 0.98))
     }
 }
 
@@ -537,6 +609,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         
         // Save all sessions before app quits
         tabsStore?.saveAllSessions()
+        
+        // Force save command history (bypass debounce since app is terminating)
+        CommandHistoryStore.shared.forceSave()
+        
+        // Close agent logging
+        AgentDebugConfig.closeLogging()
         
         // Cleanup all tabs
         tabsStore?.tabs.forEach { $0.cleanup() }
