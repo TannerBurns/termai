@@ -754,7 +754,12 @@ final class ChatSession: ObservableObject, Identifiable {
         
         // Ask the model whether to run commands or reply
         let decisionPrompt = """
-        You are operating in an agent mode inside a terminal-centric app. Given the user's request below, decide one of two actions: either respond directly (RESPOND) or run one or more shell commands (RUN). 
+        You are operating in agent mode inside a terminal-centric app. Commands you run execute DIRECTLY in the user's real shell session (via PTY) - environment changes like `source venv/bin/activate`, `export`, `cd`, etc. WILL persist in their terminal.
+
+        Given the user's request below, decide one of two actions:
+        - RESPOND: For questions, explanations, or when no commands are needed
+        - RUN: For tasks requiring shell commands (including environment setup like venv activation)
+
         Reply strictly in JSON on one line with keys: {"action":"RESPOND|RUN", "reason":"short sentence"}.
         User: \(userPrompt)
         """
@@ -1058,7 +1063,7 @@ final class ChatSession: ObservableObject, Identifiable {
             }
             
             let stepPrompt = """
-            You are a terminal agent. Based on the GOAL and CONTEXT below, decide the next action.
+            You are a terminal agent executing commands in the user's REAL shell (PTY). Based on the GOAL and CONTEXT below, decide the next action.
             
             GOAL REMINDER: \(goal.goal ?? "")
             Progress: Step \(iterations) of max \(maxIterations == 0 ? "unlimited" : String(maxIterations))
@@ -1074,7 +1079,7 @@ final class ChatSession: ObservableObject, Identifiable {
             7. "search_files" - Find files by pattern. Args: path, pattern (e.g. "*.swift")
             
             SHELL & PROCESS:
-            8. "command" - Run a simple shell command (ls, mkdir, cd, git, npm, etc.)
+            8. "command" - Run a simple shell command (ls, mkdir, cd, git, npm, node, source, python, etc.)
             9. "run_background" - Start server/process in background. Args: command, wait_for (text to detect startup), timeout
             10. "check_process" - Check process status. Args: pid, port, or list=true
             11. "stop_process" - Stop a background process. Args: pid, or all=true
@@ -1083,11 +1088,19 @@ final class ChatSession: ObservableObject, Identifiable {
             12. "http_request" - Test API endpoints. Args: url, method (GET/POST/PUT/DELETE), body, headers
             13. "search_output" - Search previous command outputs. Args: pattern
             
+            CONTEXT LOG FORMAT (how to read the CONTEXT section):
+            - "RAN: <command>" = command that was executed
+            - "OUTPUT: ..." = command output (may be empty for silent commands)
+            - "__TERMAI_RC__=N" = exit code (0=success, non-zero=failure)
+            - "CWD: /path" = current working directory after command
+            - Many commands (cd, source, mkdir, export) succeed SILENTLY with no output
+            
             RULES:
             - For creating NEW files, use write_file tool
             - For EDITING existing files, use edit_file (search/replace) or insert_lines/delete_lines
             - For reading files, use read_file tool instead of cat
-            - Use shell commands for: mkdir, ls, cd, git, grep, find, npm, node, etc.
+            - Use shell commands for: mkdir, ls, cd, git, grep, find, npm, node, source, python, etc.
+            - Environment commands (source venv/bin/activate, export, cd) run in user's real shell and PERSIST
             - For servers: use run_background to start, http_request to test endpoints
             - For MARKDOWN: Always include blank lines before headings (## Title) when inserting
             - ALWAYS verify your edits by reading the file after making changes
@@ -1101,7 +1114,7 @@ final class ChatSession: ObservableObject, Identifiable {
             
             ENVIRONMENT:
             - CWD: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
-            - Shell: /bin/zsh
+            - Shell: /bin/zsh (user's real shell - environment changes persist)
             
             \(checklistContext)
             
@@ -1148,6 +1161,9 @@ final class ChatSession: ObservableObject, Identifiable {
                     let assessPrompt = """
                     The agent is signaling completion. Verify if the GOAL is actually achieved.
                     The goal is ONLY complete if ALL checklist items are marked ✓ (completed).
+                    
+                    NOTE: Exit code 0 = success. Commands like cd, source, mkdir, export succeed silently (no output).
+                    
                     Reply JSON: {"done":true|false, "reason":"short explanation"}.
                     GOAL: \(goal.goal ?? "")
                     CHECKLIST (\(completedCount)/\(totalCount) completed):
@@ -1418,13 +1434,20 @@ final class ChatSession: ObservableObject, Identifiable {
             // Analyze command outcome; propose fixes if failed
             let analyzePrompt = """
             Analyze the following command execution and decide outcome and next action.
+            
+            INTERPRETATION GUIDE:
+            - EXIT_CODE 0 = success (even if output is empty - many commands succeed silently)
+            - EXIT_CODE non-zero = failure (check output for error messages)
+            - Commands like cd, source, export, mkdir often produce NO output on success
+            - "(no output)" with EXIT_CODE 0 typically means the command succeeded
+            
             Reply strictly as JSON on one line with keys:
             {"outcome":"success|fail|uncertain", "reason":"short", "next":"continue|stop|fix", "fixed_command":"optional replacement if next=fix else empty"}
             GOAL: \(goal.goal ?? "")
             COMMAND: \(commandToRun)
+            EXIT_CODE: \(lastExitCodeString())
             OUTPUT:\n\(capturedOut ?? "(no output)")
             CWD: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
-            EXIT_CODE: \(lastExitCodeString())
             """
             AgentDebugConfig.log("[Agent] Analyze prompt =>\n\(analyzePrompt)")
             let analysis = await callOneShotJSON(prompt: analyzePrompt)
@@ -1482,6 +1505,9 @@ final class ChatSession: ObservableObject, Identifiable {
                 let quickAssessPrompt = """
                 Decide if the GOAL is now achieved after the fix attempt.
                 The goal is ONLY complete if ALL checklist items are marked ✓ (completed).
+                
+                NOTE: Exit code 0 = success. Commands like cd, source, mkdir, export succeed silently (no output).
+                
                 Reply JSON: {"done":true|false, "reason":"short"}.
                 GOAL: \(goal.goal ?? "")
                 CHECKLIST (\(postFixCompletedCount)/\(postFixTotalCount) completed):
@@ -1489,8 +1515,8 @@ final class ChatSession: ObservableObject, Identifiable {
                 BASE CONTEXT:
                 - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
                 - Last Command: \(fixed)
-                - Last Output: \((fixOut ?? "").prefix(AgentSettings.shared.maxOutputCapture))
                 - Last Exit Code: \(lastExitCodeString())
+                - Last Output: \((fixOut ?? "(none - command succeeded silently)").prefix(AgentSettings.shared.maxOutputCapture))
                 CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
                 """
                 AgentDebugConfig.log("[Agent] Post-fix assess prompt =>\n\(quickAssessPrompt)")
@@ -1524,6 +1550,9 @@ final class ChatSession: ObservableObject, Identifiable {
             let assessPrompt = """
             Given the GOAL, CHECKLIST, and CONTEXT, decide if the goal is accomplished.
             The goal is ONLY complete if ALL checklist items are marked ✓ (completed).
+            
+            NOTE: Exit code 0 = success. Many commands (cd, source, mkdir, export) succeed silently with no output.
+            
             Reply JSON: {"done":true|false, "reason":"short"}.
             GOAL: \(goal.goal ?? "")
             CHECKLIST (\(completedCount)/\(totalCount) completed):
@@ -1531,8 +1560,8 @@ final class ChatSession: ObservableObject, Identifiable {
             BASE CONTEXT:
             - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
             - Last Command: \(commandToRun)
-            - Last Output: \((capturedOut ?? "").prefix(AgentSettings.shared.maxOutputCapture))
             - Last Exit Code: \(lastExitCodeString())
+            - Last Output: \((capturedOut ?? "(none - command succeeded silently)").prefix(AgentSettings.shared.maxOutputCapture))
             CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
             """
             AgentDebugConfig.log("[Agent] Assess prompt =>\n\(assessPrompt)")
