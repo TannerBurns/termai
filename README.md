@@ -34,6 +34,27 @@ When enabled, the AI can autonomously execute commands and use tools to complete
 - **Context Actions** — Select text or capture last output to send to chat
 - **Code Execution** — Run shell commands directly from chat code blocks
 
+### Terminal Suggestion Agent
+An AI-powered command suggestion system that proactively offers relevant commands based on context:
+
+- **Agentic Pipeline** — Multi-phase processing: context gathering, research, planning, and generation
+- **Project Detection** — Automatically detects Node, Swift, Rust, Python, Go, Ruby, Java, and .NET projects
+- **Smart Triggers** — Suggestions appear on directory changes, after errors, and based on workflow context
+- **Shell History Integration** — Learns from your zsh/bash command history
+- **Git-Aware** — Contextual suggestions based on repository state and uncommitted changes
+- **Error Analysis** — Suggests fixes when commands fail
+- **Separate Model Config** — Uses its own LLM settings independent of the main chat
+
+**Suggestion Sources:**
+| Icon | Source | Description |
+|------|--------|-------------|
+| 📁 | Project Context | Commands based on detected project type (npm, cargo, swift, etc.) |
+| ⚠️ | Error Analysis | Suggested fixes for failed commands |
+| 🌿 | Git Status | Git commands based on repo state |
+| 📂 | Directory Change | Common commands for the current directory |
+| 💡 | General Context | Contextual suggestions based on workflow |
+| ⏱️ | Recent Commands | Commands you've run recently |
+
 ### Analytics
 - **Token Usage Tracking** — Monitor usage by provider, model, and time range
 - **Context Window Indicator** — Visual display of context usage percentage
@@ -195,6 +216,15 @@ Configure agent behavior in **Settings > Agent**:
 - **Safety** — Require command approval, auto-approve read-only commands
 - **Verbose Logging** — Debug output for troubleshooting
 
+### Suggestion Agent Settings
+
+Configure the terminal suggestion agent in **Settings > Suggestions**:
+
+- **Provider & Model** — Choose a separate LLM for suggestions (can differ from chat)
+- **Enable/Disable** — Toggle suggestion agent on or off
+- **Research Steps** — Max agentic research steps (1-10) for gathering context
+- **Shell History** — Number of shell history entries to consider
+
 ## Keyboard Shortcuts
 
 | Action | Shortcut |
@@ -207,6 +237,8 @@ Configure agent behavior in **Settings > Agent**:
 | Previous Tab | Cmd+Shift+[ |
 | Switch to Tab 1-9 | Cmd+1 through Cmd+9 |
 | Send Message | Cmd+Enter |
+| Toggle Suggestions | Ctrl+Space |
+| Dismiss Suggestions | Esc |
 | Settings | Cmd+, |
 
 ## Data Storage
