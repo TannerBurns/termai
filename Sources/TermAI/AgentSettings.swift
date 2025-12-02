@@ -100,6 +100,56 @@ final class AgentSettings: ObservableObject, Codable {
     /// Set of favorited model IDs for quick access
     @Published var favoriteModels: Set<String> = []
     
+    // MARK: - Terminal Suggestions
+    
+    /// Enable real-time terminal command suggestions
+    @Published var terminalSuggestionsEnabled: Bool = true
+    
+    /// Model ID for terminal suggestions (nil = not configured)
+    @Published var terminalSuggestionsModelId: String? = nil
+    
+    /// Provider type for terminal suggestions (nil = not configured)
+    @Published var terminalSuggestionsProvider: ProviderType? = nil
+    
+    /// Debounce interval in seconds before generating suggestions
+    @Published var terminalSuggestionsDebounceSeconds: Double = 2.5
+    
+    /// Read shell history file (~/.zsh_history, ~/.bash_history) for command suggestions
+    @Published var readShellHistory: Bool = true
+    
+    /// Reasoning effort for terminal suggestions (for models that support it)
+    @Published var terminalSuggestionsReasoningEffort: ReasoningEffort = .none
+    
+    /// Check if terminal suggestions are fully configured
+    var isTerminalSuggestionsConfigured: Bool {
+        terminalSuggestionsEnabled && 
+        terminalSuggestionsModelId != nil && 
+        terminalSuggestionsProvider != nil
+    }
+    
+    // MARK: - Global Provider URLs
+    
+    /// Base URL for Ollama provider
+    @Published var ollamaBaseURL: String = "http://localhost:11434/v1"
+    
+    /// Base URL for LM Studio provider
+    @Published var lmStudioBaseURL: String = "http://localhost:1234/v1"
+    
+    /// Base URL for vLLM provider
+    @Published var vllmBaseURL: String = "http://localhost:8000/v1"
+    
+    /// Get the configured base URL for a local provider
+    func baseURL(for provider: LocalLLMProvider) -> URL {
+        switch provider {
+        case .ollama:
+            return URL(string: ollamaBaseURL) ?? provider.defaultBaseURL
+        case .lmStudio:
+            return URL(string: lmStudioBaseURL) ?? provider.defaultBaseURL
+        case .vllm:
+            return URL(string: vllmBaseURL) ?? provider.defaultBaseURL
+        }
+    }
+    
     // MARK: - Codable
     
     enum CodingKeys: String, CodingKey {
@@ -128,6 +178,15 @@ final class AgentSettings: ObservableObject, Codable {
         case agentTemperature
         case titleTemperature
         case favoriteModels
+        case terminalSuggestionsEnabled
+        case terminalSuggestionsModelId
+        case terminalSuggestionsProvider
+        case terminalSuggestionsDebounceSeconds
+        case readShellHistory
+        case terminalSuggestionsReasoningEffort
+        case ollamaBaseURL
+        case lmStudioBaseURL
+        case vllmBaseURL
     }
     
     init() {}
@@ -159,6 +218,15 @@ final class AgentSettings: ObservableObject, Codable {
         agentTemperature = try container.decodeIfPresent(Double.self, forKey: .agentTemperature) ?? 0.2
         titleTemperature = try container.decodeIfPresent(Double.self, forKey: .titleTemperature) ?? 1.0
         favoriteModels = try container.decodeIfPresent(Set<String>.self, forKey: .favoriteModels) ?? []
+        terminalSuggestionsEnabled = try container.decodeIfPresent(Bool.self, forKey: .terminalSuggestionsEnabled) ?? true
+        terminalSuggestionsModelId = try container.decodeIfPresent(String.self, forKey: .terminalSuggestionsModelId)
+        terminalSuggestionsProvider = try container.decodeIfPresent(ProviderType.self, forKey: .terminalSuggestionsProvider)
+        terminalSuggestionsDebounceSeconds = try container.decodeIfPresent(Double.self, forKey: .terminalSuggestionsDebounceSeconds) ?? 2.5
+        readShellHistory = try container.decodeIfPresent(Bool.self, forKey: .readShellHistory) ?? true
+        terminalSuggestionsReasoningEffort = try container.decodeIfPresent(ReasoningEffort.self, forKey: .terminalSuggestionsReasoningEffort) ?? .none
+        ollamaBaseURL = try container.decodeIfPresent(String.self, forKey: .ollamaBaseURL) ?? "http://localhost:11434/v1"
+        lmStudioBaseURL = try container.decodeIfPresent(String.self, forKey: .lmStudioBaseURL) ?? "http://localhost:1234/v1"
+        vllmBaseURL = try container.decodeIfPresent(String.self, forKey: .vllmBaseURL) ?? "http://localhost:8000/v1"
     }
     
     func encode(to encoder: Encoder) throws {
@@ -188,11 +256,29 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(agentTemperature, forKey: .agentTemperature)
         try container.encode(titleTemperature, forKey: .titleTemperature)
         try container.encode(favoriteModels, forKey: .favoriteModels)
+        try container.encode(terminalSuggestionsEnabled, forKey: .terminalSuggestionsEnabled)
+        try container.encodeIfPresent(terminalSuggestionsModelId, forKey: .terminalSuggestionsModelId)
+        try container.encodeIfPresent(terminalSuggestionsProvider, forKey: .terminalSuggestionsProvider)
+        try container.encode(terminalSuggestionsDebounceSeconds, forKey: .terminalSuggestionsDebounceSeconds)
+        try container.encode(readShellHistory, forKey: .readShellHistory)
+        try container.encode(terminalSuggestionsReasoningEffort, forKey: .terminalSuggestionsReasoningEffort)
+        try container.encode(ollamaBaseURL, forKey: .ollamaBaseURL)
+        try container.encode(lmStudioBaseURL, forKey: .lmStudioBaseURL)
+        try container.encode(vllmBaseURL, forKey: .vllmBaseURL)
     }
     
     // MARK: - Persistence
     
     private static let fileName = "agent-settings.json"
+    
+    /// Debounce interval for settings saves (prevents multiple disk writes when settings change rapidly)
+    private static let saveDebounceInterval: TimeInterval = 0.5
+    
+    /// Pending save work item (used for debouncing)
+    private var pendingSaveWorkItem: DispatchWorkItem?
+    
+    /// Queue for serializing save operations
+    private let saveQueue = DispatchQueue(label: "com.termai.agentsettings.save")
     
     static func load() -> AgentSettings {
         if let settings = try? PersistenceService.loadJSON(AgentSettings.self, from: fileName) {
@@ -201,8 +287,38 @@ final class AgentSettings: ObservableObject, Codable {
         return AgentSettings()
     }
     
+    /// Save settings to disk with debouncing to prevent excessive writes
     func save() {
-        try? PersistenceService.saveJSON(self, to: Self.fileName)
+        saveQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Cancel any pending save
+            self.pendingSaveWorkItem?.cancel()
+            
+            // Create new debounced save work item
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                try? PersistenceService.saveJSON(self, to: Self.fileName)
+            }
+            
+            self.pendingSaveWorkItem = workItem
+            
+            // Schedule save after debounce interval
+            self.saveQueue.asyncAfter(deadline: .now() + Self.saveDebounceInterval, execute: workItem)
+        }
+    }
+    
+    /// Force an immediate save without debouncing (use sparingly)
+    func saveImmediately() {
+        saveQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Cancel any pending debounced save
+            self.pendingSaveWorkItem?.cancel()
+            self.pendingSaveWorkItem = nil
+            
+            try? PersistenceService.saveJSON(self, to: Self.fileName)
+        }
     }
     
     /// Reset all settings to defaults
@@ -231,7 +347,16 @@ final class AgentSettings: ObservableObject, Codable {
         verboseLogging = false
         agentTemperature = 0.2
         titleTemperature = 1.0
-        save()
+        terminalSuggestionsEnabled = true
+        terminalSuggestionsModelId = nil
+        terminalSuggestionsProvider = nil
+        terminalSuggestionsDebounceSeconds = 2.5
+        readShellHistory = true
+        terminalSuggestionsReasoningEffort = .none
+        ollamaBaseURL = "http://localhost:11434/v1"
+        lmStudioBaseURL = "http://localhost:1234/v1"
+        vllmBaseURL = "http://localhost:8000/v1"
+        saveImmediately()
     }
     
     // MARK: - Model Favorites Helpers

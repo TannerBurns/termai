@@ -60,8 +60,8 @@ final class ChatTabsManager: ObservableObject {
         // Archive to history if the session has messages
         let hasMessages = !sessionToRemove.messages.filter { $0.role == "user" }.isEmpty
         if hasMessages {
-            // Make sure session data is saved before archiving
-            sessionToRemove.persistMessages()
+            // Make sure session data is saved immediately before archiving (bypass debounce)
+            sessionToRemove.persistMessagesImmediately()
             sessionToRemove.persistSettings()
             ChatHistoryManager.shared.addEntry(from: sessionToRemove)
         }
@@ -157,9 +157,10 @@ final class ChatTabsManager: ObservableObject {
         try? PersistenceService.saveJSON(sessionData, to: manifestFileName)
         
         // Also make sure each session saves its settings
+        // Use immediate persist to ensure data is written before app quit
         for session in sessions {
             session.persistSettings()
-            session.persistMessages()
+            session.persistMessagesImmediately()
         }
     }
     
