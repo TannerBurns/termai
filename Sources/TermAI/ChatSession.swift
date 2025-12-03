@@ -1939,12 +1939,17 @@ final class ChatSession: ObservableObject, Identifiable {
             // Update cumulative token tracking (total used across all calls)
             agentSessionTokensUsed += result.totalTokens
             
-            // Update accumulated context tokens from API - this is the actual token count
-            // of what we sent, representing the current context size
-            // Always update to reflect the true current value (may decrease after summarization)
-            accumulatedContextTokens = result.promptTokens
+            // Track the maximum accumulated context seen during this agent run
+            // During agent execution, multiple LLM calls happen with different prompt sizes:
+            // - Step prompts (largest, include full context log)
+            // - Decision/assess prompts (may be smaller)
+            // We track the MAX to show true peak context usage for UI and summarization decisions
+            // Only reset to smaller values after explicit summarization (which sets it to 0)
+            if result.promptTokens > accumulatedContextTokens {
+                accumulatedContextTokens = result.promptTokens
+            }
             
-            // Update currentContextTokens for the UI
+            // Update currentContextTokens for the UI (shows peak context during agent run)
             currentContextTokens = accumulatedContextTokens
             objectWillChange.send()
             
