@@ -493,44 +493,23 @@ final class TokenUsageTracker: ObservableObject {
             return cached
         }
         
-        // For synchronous callers, return nil and trigger async load
-        // This prioritizes not blocking the main thread over immediate data
-        Task {
-            await loadDailyDataAsync(for: dateKey)
-        }
-        return nil
-    }
-    
-    /// Async load from disk - runs file I/O on background thread
-    private func loadDailyDataAsync(for dateKey: String) async {
-        // Check cache again (might have been populated while waiting)
-        if cache[dateKey] != nil {
-            return
-        }
-        
-        // Load on background thread
-        let result: DailyUsageData? = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async { [self] in
-                do {
-                    let dir = try usageDirectory()
-                    let fileURL = dir.appendingPathComponent("usage_\(dateKey).json")
-                    guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    let data = try Data(contentsOf: fileURL)
-                    let dailyData = try JSONDecoder().decode(DailyUsageData.self, from: data)
-                    continuation.resume(returning: dailyData)
-                } catch {
-                    print("[TokenUsageTracker] Failed to load data for \(dateKey): \(error)")
-                    continuation.resume(returning: nil)
-                }
+        // Synchronous load from disk - required for data integrity
+        // The cache check above handles the common case (O(1)), so disk I/O only
+        // happens on cache misses. Loading a small daily JSON file is fast, and
+        // correctness is more important than avoiding brief main thread blocks.
+        do {
+            let dir = try usageDirectory()
+            let fileURL = dir.appendingPathComponent("usage_\(dateKey).json")
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                return nil
             }
-        }
-        
-        // Update cache on main actor
-        if let data = result {
-            cache[dateKey] = data
+            let data = try Data(contentsOf: fileURL)
+            let dailyData = try JSONDecoder().decode(DailyUsageData.self, from: data)
+            cache[dateKey] = dailyData
+            return dailyData
+        } catch {
+            print("[TokenUsageTracker] Failed to load data for \(dateKey): \(error)")
+            return nil
         }
     }
     
