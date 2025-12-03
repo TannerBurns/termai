@@ -58,10 +58,9 @@ final class PTYModel: ObservableObject {
         pendingCompletions.append(completion)
         
         // Set up timeout fallback for this command
-        let commandIndex = pendingCompletions.count - 1
         let timeoutItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            // Timeout reached - fire all pending completions up to this one
+            // Timeout reached - fire the next pending completion
             self.fireNextCompletion()
         }
         commandTimeoutTasks.append(timeoutItem)
@@ -133,7 +132,7 @@ final class PTYModel: ObservableObject {
         // Cancel any pending git refresh tasks to prevent updates to deallocated object
         gitRefreshTask?.cancel()
         gitDebounceWorkItem?.cancel()
-        commandTimeoutTask?.cancel()
+        commandTimeoutTasks.forEach { $0.cancel() }
         completionDebounceTask?.cancel()
         
         // Send exit command to the shell process when PTYModel is deallocated
@@ -279,7 +278,7 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             }
             
             // For normal use, just clean up the output minimally
-            var trimmedChunk = Self.cleanOutput(from: newChunk)
+            let trimmedChunk = Self.cleanOutput(from: newChunk)
             
             // Only do agent-specific processing when in capture mode
             if isAgentCapture {
