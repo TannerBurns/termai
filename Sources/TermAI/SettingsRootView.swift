@@ -9,7 +9,7 @@ struct SettingsRootView: View {
         case chatModel = "Chat & Model"
         case providers = "Providers"
         case agent = "Agent"
-        case terminal = "Terminal Theme"
+        case appearance = "Appearance"
         case usage = "Usage"
         
         var icon: String {
@@ -17,7 +17,7 @@ struct SettingsRootView: View {
             case .chatModel: return "message.fill"
             case .providers: return "server.rack"
             case .agent: return "cpu"
-            case .terminal: return "terminal.fill"
+            case .appearance: return "paintbrush.fill"
             case .usage: return "chart.bar.fill"
             }
         }
@@ -57,8 +57,8 @@ struct SettingsRootView: View {
                     ProvidersSettingsView()
                 case .agent:
                     AgentSettingsView()
-                case .terminal:
-                    TerminalThemeSettingsView(ptyModel: ptyModel)
+                case .appearance:
+                    AppearanceSettingsView(ptyModel: ptyModel)
                 case .usage:
                     UsageSettingsView()
                 }
@@ -121,9 +121,10 @@ struct NoSessionPlaceholder: View {
     }
 }
 
-// MARK: - Terminal Theme Settings View
-struct TerminalThemeSettingsView: View {
+// MARK: - Appearance Settings View
+struct AppearanceSettingsView: View {
     @ObservedObject var ptyModel: PTYModel
+    @ObservedObject private var settings = AgentSettings.shared
     @Environment(\.colorScheme) var colorScheme
     
     private var selectedTheme: TerminalTheme {
@@ -133,7 +134,10 @@ struct TerminalThemeSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                // Theme Selection Grid
+                // App Appearance Mode Section
+                appAppearanceSection
+                
+                // Terminal Theme Selection Grid
                 themeSelectionSection
                 
                 // Live Preview
@@ -145,12 +149,33 @@ struct TerminalThemeSettingsView: View {
             .padding(24)
         }
         .frame(minWidth: 500)
+        .onChange(of: settings.appAppearance) { _ in settings.save() }
     }
     
-    // MARK: - Theme Selection Grid
+    // MARK: - App Appearance Section
+    private var appAppearanceSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SettingsSectionHeader("App Appearance", subtitle: "Choose light, dark, or follow system settings")
+            
+            HStack(spacing: 16) {
+                ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                    AppearanceModeCard(
+                        mode: mode,
+                        isSelected: settings.appAppearance == mode
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            settings.appAppearance = mode
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Terminal Theme Selection Grid
     private var themeSelectionSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SettingsSectionHeader("Theme", subtitle: "Choose a color scheme for your terminal")
+            SettingsSectionHeader("Terminal Theme", subtitle: "Choose a color scheme for your terminal")
             
             LazyVGrid(columns: [
                 GridItem(.flexible(), spacing: 12),
@@ -462,6 +487,239 @@ struct ColorSwatch: View {
         .onHover { hovering in
             isHovering = hovering
         }
+    }
+}
+
+// MARK: - Appearance Mode Card
+struct AppearanceModeCard: View {
+    let mode: AppearanceMode
+    let isSelected: Bool
+    let action: () -> Void
+    
+    @State private var isHovered: Bool = false
+    
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 0) {
+                // Mini App Preview
+                appPreview
+                    .frame(height: 80)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .padding(8)
+                
+                // Mode Name and Icon
+                HStack(spacing: 6) {
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 12))
+                        .foregroundColor(isSelected ? .accentColor : .secondary)
+                    
+                    Text(mode.rawValue)
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                        .foregroundColor(.primary)
+                    
+                    Spacer()
+                    
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(.accentColor)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.03))
+            }
+            .frame(maxWidth: .infinity)
+            .background(previewBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? Color.accentColor : Color.primary.opacity(0.1), lineWidth: isSelected ? 2 : 1)
+            )
+            .scaleEffect(isHovered ? 1.02 : 1.0)
+            .shadow(color: isSelected ? Color.accentColor.opacity(0.2) : Color.clear, radius: isHovered ? 8 : 0)
+            .animation(.easeInOut(duration: 0.15), value: isHovered)
+            .animation(.easeInOut(duration: 0.15), value: isSelected)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+    
+    private var previewBackground: Color {
+        switch mode {
+        case .light: return Color(white: 0.97)
+        case .dark: return Color(white: 0.12)
+        case .system: return Color.primary.opacity(0.03)
+        }
+    }
+    
+    @ViewBuilder
+    private var appPreview: some View {
+        switch mode {
+        case .light:
+            lightModePreview
+        case .dark:
+            darkModePreview
+        case .system:
+            systemModePreview
+        }
+    }
+    
+    // Light mode preview - shows a mini app window in light theme
+    private var lightModePreview: some View {
+        HStack(spacing: 0) {
+            // Sidebar
+            VStack(spacing: 4) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.black.opacity(0.08))
+                    .frame(width: 24, height: 6)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.blue.opacity(0.2))
+                    .frame(width: 24, height: 6)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.black.opacity(0.06))
+                    .frame(width: 24, height: 6)
+                Spacer()
+            }
+            .padding(6)
+            .frame(width: 36)
+            .background(Color(white: 0.94))
+            
+            // Main content
+            VStack(spacing: 4) {
+                // Terminal area
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 2) {
+                        Circle().fill(Color.red.opacity(0.7)).frame(width: 4, height: 4)
+                        Circle().fill(Color.yellow.opacity(0.7)).frame(width: 4, height: 4)
+                        Circle().fill(Color.green.opacity(0.7)).frame(width: 4, height: 4)
+                    }
+                    Spacer()
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.black.opacity(0.6))
+                        .frame(width: 30, height: 3)
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.green.opacity(0.5))
+                        .frame(width: 20, height: 3)
+                }
+                .padding(4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
+            .padding(6)
+            .background(Color(white: 0.98))
+        }
+        .background(Color(white: 0.92))
+    }
+    
+    // Dark mode preview - shows a mini app window in dark theme
+    private var darkModePreview: some View {
+        HStack(spacing: 0) {
+            // Sidebar
+            VStack(spacing: 4) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.white.opacity(0.15))
+                    .frame(width: 24, height: 6)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.blue.opacity(0.4))
+                    .frame(width: 24, height: 6)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.white.opacity(0.1))
+                    .frame(width: 24, height: 6)
+                Spacer()
+            }
+            .padding(6)
+            .frame(width: 36)
+            .background(Color(white: 0.12))
+            
+            // Main content
+            VStack(spacing: 4) {
+                // Terminal area
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 2) {
+                        Circle().fill(Color.red.opacity(0.8)).frame(width: 4, height: 4)
+                        Circle().fill(Color.yellow.opacity(0.8)).frame(width: 4, height: 4)
+                        Circle().fill(Color.green.opacity(0.8)).frame(width: 4, height: 4)
+                    }
+                    Spacer()
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.white.opacity(0.8))
+                        .frame(width: 30, height: 3)
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.green.opacity(0.7))
+                        .frame(width: 20, height: 3)
+                }
+                .padding(4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(white: 0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+            }
+            .padding(6)
+            .background(Color(white: 0.15))
+        }
+        .background(Color(white: 0.1))
+    }
+    
+    // System mode preview - split view showing both themes
+    private var systemModePreview: some View {
+        HStack(spacing: 0) {
+            // Light half
+            VStack(spacing: 2) {
+                HStack(spacing: 2) {
+                    Circle().fill(Color.red.opacity(0.7)).frame(width: 3, height: 3)
+                    Circle().fill(Color.yellow.opacity(0.7)).frame(width: 3, height: 3)
+                    Circle().fill(Color.green.opacity(0.7)).frame(width: 3, height: 3)
+                    Spacer()
+                }
+                Spacer()
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.black.opacity(0.6))
+                    .frame(width: 25, height: 3)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.green.opacity(0.5))
+                    .frame(width: 16, height: 3)
+            }
+            .padding(4)
+            .background(Color(white: 0.96))
+            
+            // Diagonal divider representation
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color(white: 0.9), Color(white: 0.2)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .frame(width: 2)
+            
+            // Dark half
+            VStack(spacing: 2) {
+                HStack(spacing: 2) {
+                    Circle().fill(Color.red.opacity(0.8)).frame(width: 3, height: 3)
+                    Circle().fill(Color.yellow.opacity(0.8)).frame(width: 3, height: 3)
+                    Circle().fill(Color.green.opacity(0.8)).frame(width: 3, height: 3)
+                    Spacer()
+                }
+                Spacer()
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.white.opacity(0.8))
+                    .frame(width: 25, height: 3)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.green.opacity(0.7))
+                    .frame(width: 16, height: 3)
+            }
+            .padding(4)
+            .background(Color(white: 0.1))
+        }
+        .overlay(
+            // System icon overlay
+            Image(systemName: "gear")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.5), radius: 2)
+        )
     }
 }
 

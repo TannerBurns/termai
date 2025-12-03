@@ -20,7 +20,6 @@ final class PTYModel: ObservableObject {
     @Published var currentWorkingDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path {
         didSet {
             if currentWorkingDirectory != oldValue {
-                NSLog("[PTY] CWD CHANGED: '%@' → '%@'", oldValue, currentWorkingDirectory)
                 refreshGitInfo()
             }
         }
@@ -41,34 +40,50 @@ final class PTYModel: ObservableObject {
     /// Track the last command sent by the user (for history recording)
     @Published var lastUserCommand: String? = nil
     
-    /// Callback invoked when command completion marker (__TERMAI_RC__) is detected
+    /// Callback invoked when command completion is detected via shell prompt detection
     /// This provides event-driven notification instead of relying on timer-based capture
     var onCommandCompletion: (() -> Void)?
     
-    /// Timeout task for command completion (fallback if marker not detected)
+    /// Timeout task for command completion (fallback if prompt not detected)
     private var commandTimeoutTask: DispatchWorkItem?
     private let commandTimeout: TimeInterval = 30.0  // 30 second fallback
     
+    /// Debounce task for completion signaling - ensures output has stabilized
+    private var completionDebounceTask: DispatchWorkItem?
+    private let completionDebounceInterval: TimeInterval = 0.15  // 150ms debounce for stable output
+    
     /// Start waiting for command completion with timeout fallback
     func startCommandCapture() {
-        // Cancel any existing timeout
+        // Cancel any existing timeout and debounce
         commandTimeoutTask?.cancel()
+        completionDebounceTask?.cancel()
         
         // Set up timeout fallback
         let timeoutItem = DispatchWorkItem { [weak self] in
             guard let self = self, self.captureActive else { return }
             // Timeout reached, trigger completion anyway
+            self.completionDebounceTask?.cancel()
             self.onCommandCompletion?()
         }
         commandTimeoutTask = timeoutItem
         DispatchQueue.main.asyncAfter(deadline: .now() + commandTimeout, execute: timeoutItem)
     }
     
-    /// Signal that command has completed (marker was detected)
+    /// Signal that command has completed - uses debouncing to ensure output has stabilized
     fileprivate func signalCommandCompletion() {
-        commandTimeoutTask?.cancel()
-        commandTimeoutTask = nil
-        onCommandCompletion?()
+        // Cancel any existing debounce task
+        completionDebounceTask?.cancel()
+        
+        // Create new debounce task - wait for output to stabilize before signaling
+        let debounceItem = DispatchWorkItem { [weak self] in
+            guard let self = self, self.captureActive else { return }
+            self.commandTimeoutTask?.cancel()
+            self.commandTimeoutTask = nil
+            self.completionDebounceTask = nil
+            self.onCommandCompletion?()
+        }
+        completionDebounceTask = debounceItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + completionDebounceInterval, execute: debounceItem)
     }
     
     // Git integration
@@ -85,6 +100,7 @@ final class PTYModel: ObservableObject {
         gitRefreshTask?.cancel()
         gitDebounceWorkItem?.cancel()
         commandTimeoutTask?.cancel()
+        completionDebounceTask?.cancel()
         
         // Send exit command to the shell process when PTYModel is deallocated
         terminalView?.terminateShell()
@@ -201,9 +217,9 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             // Always extract CWD from buffer for real-time directory tracking
             // OSC 7 sequences emitted by precmd will be captured here
             if let extractedCwd = Self.extractCwdFromBuffer(text) {
-                NSLog("[PTY] extractCwdFromBuffer found: %@", extractedCwd)
                 model.currentWorkingDirectory = extractedCwd
             }
+            // Note: Exit code is captured via OSC 7777 handler registered with SwiftTerm
             
             // Detect initial shell ready state (first prompt detected)
             if !self.hasDetectedInitialPrompt && !model.didFinishInitialLoad {
@@ -231,35 +247,26 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             // For normal use, just clean up the output minimally
             var trimmedChunk = Self.cleanOutput(from: newChunk)
             
-            // Only do agent-specific processing (echo trim, marker extraction) when in capture mode
+            // Only do agent-specific processing when in capture mode
             if isAgentCapture {
-                if let lastCmd = model.lastSentCommandForCapture, !lastCmd.isEmpty {
-                    trimmedChunk = Self.trimEcho(of: lastCmd, from: trimmedChunk)
-                }
-                // Extract and remove both exit code and cwd markers if present
-                let rcProcessed = Self.stripExitCodeMarker(from: trimmedChunk)
-                trimmedChunk = rcProcessed.cleaned
-                let exitCodeDetected = rcProcessed.code != nil
-                if let rc = rcProcessed.code { model.lastExitCode = rc }
-                let cwdProcessed = Self.stripCwdMarker(from: trimmedChunk)
-                trimmedChunk = cwdProcessed.cleaned
-                if let cwd = cwdProcessed.cwd, !cwd.isEmpty {
-                    model.currentWorkingDirectory = cwd
-                }
+                // NOTE: We no longer trim the echoed command since we're not wrapping anymore.
+                // The agent will see the command it ran as the first line, which is fine.
                 model.previousBuffer = text
                 model.collectedOutput = text
                 
-                // Signal command completion when exit code marker is detected
-                // This triggers the event-driven capture instead of relying on a timer
-                if exitCodeDetected {
+                // Prompt detection is now handled by OSC 7777 handler (more reliable)
+                // We keep this as a fallback but it's rarely needed
+                if Self.endsWithPrompt(newChunk) {
                     model.signalCommandCompletion()
                 }
             }
             
             // Always update lastOutputChunk for UI buttons (keep raw if cleaned is empty)
             let finalChunk = trimmedChunk.isEmpty ? newChunk.trimmingCharacters(in: .whitespacesAndNewlines) : trimmedChunk
+            ptyLogger.debug("[Output] finalChunk isEmpty: \(finalChunk.isEmpty), using raw: \(trimmedChunk.isEmpty)")
             if !finalChunk.isEmpty {
                 model.lastOutputChunk = finalChunk
+                ptyLogger.debug("[Output] Updated lastOutputChunk: '\(finalChunk.prefix(200))...'")
                 // Also compute line range based on viewport start
                 if let startRow = model.lastOutputStartViewportRow {
                     let rows = self.terminal.rows
@@ -434,9 +441,19 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
         return nil
     }
     
-    /// Clean output without being too aggressive - just remove trailing prompt lines
+    /// Clean output without being too aggressive - just remove trailing prompt lines and OSC sequences
     private static func cleanOutput(from chunk: String) -> String {
-        var lines = chunk.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        // First, strip OSC escape sequences (they're invisible but can interfere with processing)
+        // OSC format: ESC ] ... BEL (or ESC \)
+        var cleaned = chunk
+        // Remove OSC 7 (CWD) sequences: \e]7;...\a
+        cleaned = cleaned.replacingOccurrences(of: #"\x1b\]7;[^\x07]*\x07"#, with: "", options: .regularExpression)
+        // Remove OSC 7777 (exit code) sequences: \e]7777;...\a
+        cleaned = cleaned.replacingOccurrences(of: #"\x1b\]7777;[^\x07]*\x07"#, with: "", options: .regularExpression)
+        // Remove any other OSC sequences: \e]...\a
+        cleaned = cleaned.replacingOccurrences(of: #"\x1b\][^\x07]*\x07"#, with: "", options: .regularExpression)
+        
+        var lines = cleaned.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         
         // Remove trailing empty lines and prompt lines
         while let last = lines.last {
@@ -462,9 +479,12 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     /// Check if a line looks like a shell prompt
     private static func looksLikePrompt(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        // Common prompt endings
-        if trimmed.hasSuffix("$") || trimmed.hasSuffix("%") || trimmed.hasSuffix("#") ||
-           trimmed.hasSuffix("$ ") || trimmed.hasSuffix("% ") || trimmed.hasSuffix("# ") {
+        
+        // Common prompt endings - including Unicode variants used by powerline/starship/etc
+        let promptEndings = ["$", "%", "#", "❯", "➜", "›", ">", "λ", "→"]
+        let hasPromptEnding = promptEndings.contains { trimmed.hasSuffix($0) || trimmed.hasSuffix($0 + " ") }
+        
+        if hasPromptEnding {
             // Make sure it's not just output that happens to end with these
             // Prompts typically have user@host or path patterns
             if trimmed.contains("@") || trimmed.contains("~") || trimmed.contains(":") {
@@ -475,6 +495,12 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
                 return true
             }
         }
+        
+        // Also detect starship/powerline style prompts that might just be a symbol on its own line
+        if trimmed.count <= 3 && promptEndings.contains(where: { trimmed.contains($0) }) {
+            return true
+        }
+        
         return false
     }
     
@@ -492,115 +518,25 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
     }
 
     /// Attempts to remove the echoed command from the start of the chunk, tolerating terminal line wraps
-    private static func trimEcho(of command: String, from chunk: String) -> String {
-        guard !command.isEmpty, !chunk.isEmpty else { return chunk }
+    /// Check if the output chunk ends with a shell prompt (indicating command completion)
+    /// Note: This is now a fallback - primary completion signal is OSC 7777
+    private static func endsWithPrompt(_ chunk: String) -> Bool {
+        // Strip OSC sequences first as they appear after the prompt and can interfere
+        var cleaned = chunk
+        cleaned = cleaned.replacingOccurrences(of: #"\x1b\][^\x07]*\x07"#, with: "", options: .regularExpression)
+        // Also strip other ANSI escape sequences (colors, cursor movement, etc.)
+        cleaned = cleaned.replacingOccurrences(of: #"\x1b\[[0-9;]*[A-Za-z]"#, with: "", options: .regularExpression)
         
-        // First try to find where the command echo ends (it might be wrapped or truncated)
-        // Look for the command text in the chunk, allowing for line breaks
-        let commandChars = Array(command)
-        let chunkChars = Array(chunk)
-        var matchEnd = 0
-        var cmdIdx = 0
-        var chunkIdx = 0
+        let lines = cleaned.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         
-        while chunkIdx < chunkChars.count && cmdIdx < commandChars.count {
-            let ch = chunkChars[chunkIdx]
-            
-            // Skip ANSI escape sequences
-            if ch == "\u{001B}" && chunkIdx + 1 < chunkChars.count && chunkChars[chunkIdx + 1] == "[" {
-                chunkIdx += 2
-                while chunkIdx < chunkChars.count {
-                    let c = chunkChars[chunkIdx]
-                    chunkIdx += 1
-                    if c >= "@" && c <= "~" { break }
-                }
-                continue
-            }
-            
-            // Skip newlines/carriage returns in the chunk
-            if ch == "\n" || ch == "\r" {
-                chunkIdx += 1
-                continue
-            }
-            
-            // Try to match command character
-            if ch == commandChars[cmdIdx] {
-                chunkIdx += 1
-                cmdIdx += 1
-                matchEnd = chunkIdx
-            } else if cmdIdx == 0 {
-                // Haven't started matching yet, skip this character
-                chunkIdx += 1
-            } else {
-                // Was matching but stopped - might be truncated, accept what we have
-                break
+        // Check the last few non-empty lines for prompt patterns
+        for line in lines.reversed().prefix(3) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty && looksLikePrompt(trimmed) {
+                return true
             }
         }
-        
-        // If we matched at least some of the command, trim it
-        if matchEnd > 0 {
-            // Skip any trailing newline after the command
-            while matchEnd < chunkChars.count && (chunkChars[matchEnd] == "\n" || chunkChars[matchEnd] == "\r") {
-                matchEnd += 1
-            }
-            let result = String(chunkChars[matchEnd...])
-            return result.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        
-        return chunk
-    }
-
-    private static func stripExitCodeMarker(from chunk: String) -> (cleaned: String, code: Int32?) {
-        guard !chunk.isEmpty else { return (chunk, nil) }
-        let marker = "__TERMAI_RC__="
-        guard let r = chunk.range(of: marker, options: .backwards) else { return (chunk, nil) }
-        var idx = r.upperBound
-        var numStr = ""
-        while idx < chunk.endIndex, chunk[idx].isNumber || chunk[idx] == "-" {
-            numStr.append(chunk[idx])
-            idx = chunk.index(after: idx)
-        }
-        let code = Int32(numStr)
-        // Remove the marker and any trailing newline
-        var lineStart = r.lowerBound
-        while lineStart > chunk.startIndex {
-            let prev = chunk.index(before: lineStart)
-            if chunk[prev] == "\n" || chunk[prev] == "\r" { break }
-            lineStart = prev
-        }
-        var lineEnd = idx
-        if lineEnd < chunk.endIndex, chunk[lineEnd] == "\n" || chunk[lineEnd] == "\r" {
-            lineEnd = chunk.index(after: lineEnd)
-        }
-        let cleaned = chunk.replacingCharacters(in: lineStart..<lineEnd, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return (cleaned, code)
-    }
-
-    private static func stripCwdMarker(from chunk: String) -> (cleaned: String, cwd: String?) {
-        guard !chunk.isEmpty else { return (chunk, nil) }
-        let marker = "__TERMAI_CWD__="
-        guard let r = chunk.range(of: marker, options: .backwards) else { return (chunk, nil) }
-        var idx = r.upperBound
-        var path = ""
-        while idx < chunk.endIndex {
-            let c = chunk[idx]
-            if c == "\n" || c == "\r" { break }
-            path.append(c)
-            idx = chunk.index(after: idx)
-        }
-        // Remove the marker line
-        var lineStart = r.lowerBound
-        while lineStart > chunk.startIndex {
-            let prev = chunk.index(before: lineStart)
-            if chunk[prev] == "\n" || chunk[prev] == "\r" { break }
-            lineStart = prev
-        }
-        var lineEnd = idx
-        if lineEnd < chunk.endIndex, chunk[lineEnd] == "\n" || chunk[lineEnd] == "\r" {
-            lineEnd = chunk.index(after: lineEnd)
-        }
-        let cleaned = chunk.replacingCharacters(in: lineStart..<lineEnd, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return (cleaned, path)
+        return false
     }
 }
 
@@ -641,22 +577,45 @@ struct SwiftTermView: NSViewRepresentable {
         env["LSCOLORS"] = "GxFxCxDxBxegedabagaced"  // macOS ls colors
         env["LS_COLORS"] = "di=1;36:ln=1;35:so=1;32:pi=1;33:ex=1:bd=34;46:cd=34;43:su=30;41:sg=30;46:tw=30;42:ow=34;43"  // GNU ls colors
         
+        // Register OSC 7777 handler to capture exit codes from our precmd hook
+        // This intercepts the OSC before SwiftTerm's fallback handler logs "Unknown OSC code"
+        // OSC 7777 is emitted by our precmd hook AFTER a command completes, so we use it
+        // as the completion signal (more reliable than prompt detection)
+        term.getTerminal().registerOscHandler(code: 7777) { [weak model] data in
+            // Data contains the exit code as ASCII digits
+            if let exitCodeStr = String(bytes: data, encoding: .utf8),
+               let exitCode = Int32(exitCodeStr.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                DispatchQueue.main.async {
+                    guard let model = model else { return }
+                    model.lastExitCode = exitCode
+                    
+                    // If we're capturing agent output, signal completion
+                    // OSC 7777 means precmd ran, which means the command finished
+                    if model.captureActive {
+                        model.signalCommandCompletion()
+                    }
+                }
+            }
+        }
+        
         // Start login shell directly (without exec, which would destroy our precmd setup)
         let envArray = env.map { "\($0.key)=\($0.value)" }
         term.startProcess(executable: "/bin/zsh", args: ["-l"], environment: envArray)
         
-        // Inject precmd hook after shell starts to enable OSC 7 CWD tracking
+        // Inject precmd hook after shell starts to enable OSC 7 CWD tracking and exit code capture
         // This MUST happen after startProcess, not via -c flag, because:
         // 1. Using exec /bin/zsh -l would replace the shell and lose the precmd function
         // 2. Injecting via stdin ensures the hook exists in the interactive shell
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let escaped = home.replacingOccurrences(of: "\"", with: "\\\"")
-        // The precmd function emits OSC 7 with the current working directory before each prompt
-        // Format: ESC ] 7 ; file://hostname/path BEL
+        // The precmd function emits:
+        // - OSC 7 with the current working directory (standard): ESC ] 7 ; file://hostname/path BEL
+        // - OSC 7777 with the exit code (custom): ESC ] 7777 ; exitcode BEL
+        // IMPORTANT: $? must be captured FIRST before any other command resets it
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak term] in
             guard let term = term else { return }
-            // Define precmd hook and add to precmd_functions array, then cd to home
-            let precmdSetup = "__termai_precmd() { printf '\\e]7;file://%s%s\\a' \"$(hostname)\" \"$(pwd -P)\"; }; precmd_functions+=(__termai_precmd); cd \"\(escaped)\"; clear\n"
+            // Define precmd hook: capture $? first, then emit OSC sequences
+            let precmdSetup = "__termai_precmd() { local rc=$?; printf '\\e]7;file://%s%s\\a' \"$(hostname)\" \"$(pwd -P)\"; printf '\\e]7777;%d\\a' $rc; }; precmd_functions+=(__termai_precmd); cd \"\(escaped)\"; clear\n"
             term.send(txt: precmdSetup)
         }
         // Apply initial theme
@@ -696,7 +655,6 @@ struct SwiftTermView: NSViewRepresentable {
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {
-            NSLog("[PTY] hostCurrentDirectoryUpdate called with: %@", directory ?? "nil")
             guard var dir = directory, !dir.isEmpty else { return }
             
             // Parse file:// URL to extract the actual path
