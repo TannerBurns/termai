@@ -11,6 +11,7 @@ struct SettingsRootView: View {
         case agent = "Agent"
         case appearance = "Appearance"
         case usage = "Usage"
+        case data = "Data"
         
         var icon: String {
             switch self {
@@ -19,6 +20,7 @@ struct SettingsRootView: View {
             case .agent: return "cpu"
             case .appearance: return "paintbrush.fill"
             case .usage: return "chart.bar.fill"
+            case .data: return "externaldrive.fill"
             }
         }
     }
@@ -61,6 +63,8 @@ struct SettingsRootView: View {
                     AppearanceSettingsView(ptyModel: ptyModel)
                 case .usage:
                     UsageSettingsView()
+                case .data:
+                    DataSettingsView()
                 }
             }
         }
@@ -1601,6 +1605,245 @@ struct AgentSettingsView: View {
                 )
             }
             .buttonStyle(.plain)
+        }
+    }
+}
+
+// MARK: - Data Settings View
+struct DataSettingsView: View {
+    @Environment(\.colorScheme) var colorScheme
+    @State private var showFactoryResetConfirmation = false
+    @State private var showClearHistoryConfirmation = false
+    @State private var factoryResetError: String?
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                // Data Location Section
+                dataLocationSection
+                
+                // Chat History Section
+                chatHistorySection
+                
+                // Factory Reset Section
+                factoryResetSection
+            }
+            .padding(24)
+        }
+        .frame(minWidth: 500)
+        .alert("Clear Chat History", isPresented: $showClearHistoryConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear", role: .destructive) {
+                Task { @MainActor in
+                    ChatHistoryManager.shared.clearAllEntries()
+                }
+            }
+        } message: {
+            Text("Are you sure you want to clear all chat history? Active sessions will not be affected.")
+        }
+        .alert("Factory Reset", isPresented: $showFactoryResetConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset & Quit", role: .destructive) {
+                performFactoryReset()
+            }
+        } message: {
+            Text("This will delete ALL TermAI data including:\n\n- All chat sessions and messages\n- All settings and preferences\n- Token usage statistics\n- Chat history\n\nThe app will quit after reset. This cannot be undone.")
+        }
+        .alert("Reset Failed", isPresented: Binding(
+            get: { factoryResetError != nil },
+            set: { if !$0 { factoryResetError = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(factoryResetError ?? "An unknown error occurred.")
+        }
+    }
+    
+    // MARK: - Data Location Section
+    private var dataLocationSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SettingsSectionHeader("Data Location", subtitle: "Where TermAI stores your data")
+            
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.accentColor)
+                    
+                    Text(dataPath)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    
+                    Spacer()
+                    
+                    Button(action: openDataFolder) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.up.forward.square")
+                                .font(.system(size: 11))
+                            Text("Open in Finder")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Text("This folder contains all your chat sessions, settings, and usage data.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+            )
+        }
+    }
+    
+    // MARK: - Chat History Section
+    private var chatHistorySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SettingsSectionHeader("Chat History", subtitle: "Archived chat sessions")
+            
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Clear Chat History")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Remove all archived chat sessions. Active sessions will not be affected.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Button(action: { showClearHistoryConfirmation = true }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12))
+                        Text("Clear History")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.orange.opacity(0.5), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+            )
+        }
+    }
+    
+    // MARK: - Factory Reset Section
+    private var factoryResetSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SettingsSectionHeader("Factory Reset", subtitle: "Start fresh with a clean slate")
+            
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(.red)
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Reset All Data")
+                            .font(.system(size: 14, weight: .semibold))
+                        
+                        Text("This will permanently delete all TermAI data and quit the app. When you relaunch, TermAI will start fresh as if it was just installed.")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("What will be deleted:")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
+                            
+                            Group {
+                                Label("All chat sessions and messages", systemImage: "bubble.left.and.bubble.right")
+                                Label("All settings and preferences", systemImage: "gearshape")
+                                Label("Token usage statistics", systemImage: "chart.bar")
+                                Label("Chat history archive", systemImage: "clock.arrow.circlepath")
+                                Label("Provider API key overrides", systemImage: "key")
+                            }
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary.opacity(0.8))
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                
+                HStack {
+                    Spacer()
+                    
+                    Button(action: { showFactoryResetConfirmation = true }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "trash.fill")
+                                .font(.system(size: 12))
+                            Text("Factory Reset")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.red)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.red.opacity(0.3), lineWidth: 1)
+            )
+        }
+    }
+    
+    // MARK: - Helpers
+    
+    private var dataPath: String {
+        (try? PersistenceService.appSupportDirectory().path) ?? "~/Library/Application Support/TermAI"
+    }
+    
+    private func openDataFolder() {
+        if let url = try? PersistenceService.appSupportDirectory() {
+            NSWorkspace.shared.open(url)
+        }
+    }
+    
+    private func performFactoryReset() {
+        do {
+            try PersistenceService.clearAllData()
+            // Quit the app after a short delay to allow the UI to update
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NSApplication.shared.terminate(nil)
+            }
+        } catch {
+            factoryResetError = error.localizedDescription
         }
     }
 }

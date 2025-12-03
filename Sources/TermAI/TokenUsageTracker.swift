@@ -12,6 +12,7 @@ enum UsageRequestType: String, Codable, CaseIterable {
     case reflection = "Reflection"
     case terminalSuggestion = "Terminal Suggestion"
     case suggestionResearch = "Suggestion Research"
+    case testRunner = "Test Runner"
 }
 
 // MARK: - Token Usage Record
@@ -487,34 +488,67 @@ final class TokenUsageTracker: ObservableObject {
     }
     
     private func loadDailyData(for dateKey: String) -> DailyUsageData? {
-        // Check cache first
+        // Check cache first - avoids disk I/O if we have it
         if let cached = cache[dateKey] {
             return cached
         }
         
-        // Load from disk
-        do {
-            let dir = try usageDirectory()
-            let fileURL = dir.appendingPathComponent("usage_\(dateKey).json")
-            guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
-            let data = try Data(contentsOf: fileURL)
-            let dailyData = try JSONDecoder().decode(DailyUsageData.self, from: data)
-            cache[dateKey] = dailyData
-            return dailyData
-        } catch {
-            print("[TokenUsageTracker] Failed to load data for \(dateKey): \(error)")
-            return nil
+        // For synchronous callers, return nil and trigger async load
+        // This prioritizes not blocking the main thread over immediate data
+        Task {
+            await loadDailyDataAsync(for: dateKey)
+        }
+        return nil
+    }
+    
+    /// Async load from disk - runs file I/O on background thread
+    private func loadDailyDataAsync(for dateKey: String) async {
+        // Check cache again (might have been populated while waiting)
+        if cache[dateKey] != nil {
+            return
+        }
+        
+        // Load on background thread
+        let result: DailyUsageData? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { [self] in
+                do {
+                    let dir = try usageDirectory()
+                    let fileURL = dir.appendingPathComponent("usage_\(dateKey).json")
+                    guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    let data = try Data(contentsOf: fileURL)
+                    let dailyData = try JSONDecoder().decode(DailyUsageData.self, from: data)
+                    continuation.resume(returning: dailyData)
+                } catch {
+                    print("[TokenUsageTracker] Failed to load data for \(dateKey): \(error)")
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+        
+        // Update cache on main actor
+        if let data = result {
+            cache[dateKey] = data
         }
     }
     
+    /// Save to disk on background thread (fire-and-forget after cache update)
     private func saveDailyData(_ data: DailyUsageData, for dateKey: String) {
-        do {
-            let dir = try usageDirectory()
-            let fileURL = dir.appendingPathComponent("usage_\(dateKey).json")
-            let jsonData = try JSONEncoder().encode(data)
-            try jsonData.write(to: fileURL, options: .atomic)
-        } catch {
-            print("[TokenUsageTracker] Failed to save data for \(dateKey): \(error)")
+        // Update cache first for immediate availability
+        cache[dateKey] = data
+        
+        // Write to disk on background thread
+        DispatchQueue.global(qos: .utility).async { [self] in
+            do {
+                let dir = try usageDirectory()
+                let fileURL = dir.appendingPathComponent("usage_\(dateKey).json")
+                let jsonData = try JSONEncoder().encode(data)
+                try jsonData.write(to: fileURL, options: .atomic)
+            } catch {
+                print("[TokenUsageTracker] Failed to save data for \(dateKey): \(error)")
+            }
         }
     }
     
@@ -522,39 +556,55 @@ final class TokenUsageTracker: ObservableObject {
     
     /// Remove data older than retention period
     private func cleanupOldData() async {
-        do {
-            let dir = try usageDirectory()
-            let cutoffDate = Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date()) ?? Date()
-            let cutoffKey = dateKeyForDate(cutoffDate)
-            
-            let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-            for file in files {
-                let filename = file.deletingPathExtension().lastPathComponent
-                if filename.hasPrefix("usage_") {
-                    let dateKey = String(filename.dropFirst(6)) // Remove "usage_" prefix
-                    if dateKey < cutoffKey {
-                        try FileManager.default.removeItem(at: file)
-                        cache.removeValue(forKey: dateKey)
+        let cutoffKey = dateKeyForDate(Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date()) ?? Date())
+        
+        // Run file operations on background thread
+        let keysToRemove: [String] = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async { [self] in
+                var removedKeys: [String] = []
+                do {
+                    let dir = try usageDirectory()
+                    let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+                    for file in files {
+                        let filename = file.deletingPathExtension().lastPathComponent
+                        if filename.hasPrefix("usage_") {
+                            let dateKey = String(filename.dropFirst(6)) // Remove "usage_" prefix
+                            if dateKey < cutoffKey {
+                                try FileManager.default.removeItem(at: file)
+                                removedKeys.append(dateKey)
+                            }
+                        }
                     }
+                } catch {
+                    print("[TokenUsageTracker] Cleanup failed: \(error)")
                 }
+                continuation.resume(returning: removedKeys)
             }
-        } catch {
-            print("[TokenUsageTracker] Cleanup failed: \(error)")
+        }
+        
+        // Update cache on main actor
+        for key in keysToRemove {
+            cache.removeValue(forKey: key)
         }
     }
     
     /// Clear all usage data
     func clearAllData() {
-        do {
-            let dir = try usageDirectory()
-            let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-            for file in files {
-                try FileManager.default.removeItem(at: file)
+        // Clear cache immediately for UI responsiveness
+        cache.removeAll()
+        lastUpdated = Date()
+        
+        // Delete files on background thread
+        DispatchQueue.global(qos: .utility).async { [self] in
+            do {
+                let dir = try usageDirectory()
+                let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+                for file in files {
+                    try FileManager.default.removeItem(at: file)
+                }
+            } catch {
+                print("[TokenUsageTracker] Failed to clear data: \(error)")
             }
-            cache.removeAll()
-            lastUpdated = Date()
-        } catch {
-            print("[TokenUsageTracker] Failed to clear data: \(error)")
         }
     }
 }

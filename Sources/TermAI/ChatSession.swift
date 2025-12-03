@@ -348,8 +348,8 @@ final class ChatSession: ObservableObject, Identifiable {
         }
     }
     
-    // System info and prompt
-    private let systemInfo: SystemInfo = SystemInfo.gather()
+    // System info and prompt - use cached version to avoid blocking main thread
+    private var systemInfo: SystemInfo { SystemInfo.cached }
     var systemPrompt: String {
         return systemInfo.injectIntoPrompt()
     }
@@ -3460,9 +3460,12 @@ final class ChatSession: ObservableObject, Identifiable {
     /// Persist messages with debouncing to reduce disk I/O during streaming
     func persistMessages() {
         persistDebounceItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            try? PersistenceService.saveJSON(self.messages, to: self.messagesFileName)
+        // Capture messages immediately to avoid race conditions
+        let messagesToSave = messages
+        let fileName = messagesFileName
+        let item = DispatchWorkItem {
+            // Save on background thread
+            PersistenceService.saveJSONInBackground(messagesToSave, to: fileName)
         }
         persistDebounceItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + persistDebounceInterval, execute: item)
@@ -3472,6 +3475,7 @@ final class ChatSession: ObservableObject, Identifiable {
     func persistMessagesImmediately() {
         persistDebounceItem?.cancel()
         persistDebounceItem = nil
+        // Synchronous save for critical paths (app quit)
         try? PersistenceService.saveJSON(messages, to: messagesFileName)
     }
     
@@ -3500,7 +3504,8 @@ final class ChatSession: ObservableObject, Identifiable {
             lastSummarizationDate: lastSummarizationDate,
             summarizationCount: summarizationCount
         )
-        try? PersistenceService.saveJSON(settings, to: "session-settings-\(id.uuidString).json")
+        // Use background save for settings (not critical path)
+        PersistenceService.saveJSONInBackground(settings, to: "session-settings-\(id.uuidString).json")
     }
     
     func loadSettings() {

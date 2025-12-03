@@ -6,21 +6,22 @@ import SwiftUI
 final class ChatTabsManager: ObservableObject {
     @Published var sessions: [ChatSession] = []
     @Published var selectedSessionId: UUID?
+    @Published private(set) var isLoading: Bool = true
     
     /// Optional tab ID for scoped persistence (when used within an AppTab)
     private let tabId: UUID?
     
     init(tabId: UUID? = nil) {
         self.tabId = tabId
-        // Try to restore previous sessions
-        loadSessions()
         
-        // If no sessions were restored, create a new one
-        if sessions.isEmpty {
-            let firstSession = ChatSession()
-            sessions = [firstSession]
-            selectedSessionId = firstSession.id
-            saveSessions()
+        // Create a default session immediately (will be replaced if restoration succeeds)
+        let firstSession = ChatSession()
+        sessions = [firstSession]
+        selectedSessionId = firstSession.id
+        
+        // Load saved sessions asynchronously
+        Task { @MainActor in
+            await loadSessionsAsync()
         }
     }
     
@@ -154,7 +155,8 @@ final class ChatTabsManager: ObservableObject {
             sessionIds: sessions.map { $0.id },
             selectedSessionId: selectedSessionId
         )
-        try? PersistenceService.saveJSON(sessionData, to: manifestFileName)
+        // Use background save for manifest to avoid blocking main thread
+        PersistenceService.saveJSONInBackground(sessionData, to: manifestFileName)
         
         // Also make sure each session saves its settings
         // Use immediate persist to ensure data is written before app quit
@@ -164,8 +166,32 @@ final class ChatTabsManager: ObservableObject {
         }
     }
     
-    private func loadSessions() {
-        guard let sessionData = try? PersistenceService.loadJSON(SessionsData.self, from: manifestFileName) else {
+    /// Save sessions synchronously - for app quit scenarios where we need to ensure data is written
+    func saveSessionsImmediately() {
+        let sessionData = SessionsData(
+            sessionIds: sessions.map { $0.id },
+            selectedSessionId: selectedSessionId
+        )
+        try? PersistenceService.saveJSON(sessionData, to: manifestFileName)
+        
+        for session in sessions {
+            session.persistSettings()
+            session.persistMessagesImmediately()
+        }
+    }
+    
+    /// Load sessions asynchronously from disk
+    private func loadSessionsAsync() async {
+        // Load manifest on background thread
+        let sessionData: SessionsData? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let result = try? PersistenceService.loadJSON(SessionsData.self, from: manifestFileName)
+                continuation.resume(returning: result)
+            }
+        }
+        
+        guard let sessionData = sessionData, !sessionData.sessionIds.isEmpty else {
+            isLoading = false
             return
         }
         
@@ -182,6 +208,8 @@ final class ChatTabsManager: ObservableObject {
             sessions = restoredSessions
             selectedSessionId = sessionData.selectedSessionId
         }
+        
+        isLoading = false
     }
 }
 

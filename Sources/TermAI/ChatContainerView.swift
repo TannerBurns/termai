@@ -15,6 +15,10 @@ struct ChatContainerView: View {
     // File change approval state
     @State private var pendingFileChangeApproval: PendingFileChangeApproval? = nil
     
+    // Test runner state
+    @State private var showingTestRunner: Bool = false
+    @StateObject private var testRunnerWrapper = TestRunnerAgentWrapper(agent: nil)
+    
     var body: some View {
         VStack(spacing: 0) {
             // Main Chat header with provider/model info
@@ -114,6 +118,13 @@ struct ChatContainerView: View {
                             )
                         }
                     }
+                    
+                    // Test Runner button with progress
+                    TestRunnerButton(
+                        agent: testRunnerWrapper.agent,
+                        onStart: { startTestRunner() },
+                        onShowPanel: { showingTestRunner = true }
+                    )
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -250,6 +261,68 @@ struct ChatContainerView: View {
                     pendingFileChangeApproval = nil
                 }
             )
+        }
+        .sheet(isPresented: $showingTestRunner) {
+            if let agent = testRunnerWrapper.agent {
+                TestRunnerPanel(
+                    agent: agent,
+                    onDismiss: {
+                        showingTestRunner = false
+                    },
+                    onRerun: {
+                        // Create fresh agent with current CWD and re-run
+                        startTestRunner()
+                    },
+                    onRerunFailed: {
+                        Task {
+                            await agent.rerunFailed()
+                        }
+                    },
+                    onRunFix: { command in
+                        Task {
+                            await agent.runFixAndRetry(command: command)
+                        }
+                    }
+                )
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .TermAITestRunnerShow)) { _ in
+            startTestRunner()
+            showingTestRunner = true
+        }
+        .onChange(of: ptyModel.currentWorkingDirectory) { _ in
+            // Reset test runner when directory changes so user can run tests in the new location
+            if testRunnerWrapper.agent != nil {
+                testRunnerWrapper.setAgent(nil)
+                showingTestRunner = false
+            }
+        }
+    }
+    
+    // MARK: - Test Runner Helpers
+    
+    /// Start a new test run in the background (creates agent if needed)
+    private func startTestRunner() {
+        guard let session = tabsManager.selectedSession else { return }
+        
+        // Get project path from terminal CWD or fallback
+        let projectPath = ptyModel.currentWorkingDirectory.isEmpty 
+            ? FileManager.default.currentDirectoryPath 
+            : ptyModel.currentWorkingDirectory
+        
+        // Create new agent with current session's provider/model
+        let agent = TestRunnerAgent(
+            provider: session.providerType,
+            modelId: session.model,
+            projectPath: projectPath
+        )
+        
+        // Update the wrapper with the new agent
+        testRunnerWrapper.setAgent(agent)
+        
+        // Start the test run in background - UI will update via @ObservedObject wrapper
+        Task {
+            await agent.runTests()
         }
     }
 }
