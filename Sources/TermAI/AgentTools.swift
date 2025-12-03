@@ -36,13 +36,15 @@ struct AgentToolResult {
     let error: String?
     /// For file operations, includes the before/after content for diff display
     let fileChange: FileChange?
+    /// When true, the caller already displayed a result message (e.g., approval rejection)
+    let skipResultMessage: Bool
     
     static func success(_ output: String, fileChange: FileChange? = nil) -> AgentToolResult {
-        AgentToolResult(success: true, output: output, error: nil, fileChange: fileChange)
+        AgentToolResult(success: true, output: output, error: nil, fileChange: fileChange, skipResultMessage: false)
     }
     
-    static func failure(_ error: String) -> AgentToolResult {
-        AgentToolResult(success: false, output: "", error: error, fileChange: nil)
+    static func failure(_ error: String, fileChange: FileChange? = nil, skipResultMessage: Bool = false) -> AgentToolResult {
+        AgentToolResult(success: false, output: "", error: error, fileChange: fileChange, skipResultMessage: skipResultMessage)
     }
 }
 
@@ -721,13 +723,13 @@ struct WriteFileTool: AgentTool, FileOperationTool {
             
         case .merged(let result):
             // Operation was merged and executed by FileLockManager
-            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output)
+            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output, fileChange: fileChange)
             
         case .queued(let position):
-            return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.")
+            return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.", fileChange: fileChange)
             
         case .timeout:
-            return .failure("Timeout waiting for file lock on \(path). Another session may be holding the lock.")
+            return .failure("Timeout waiting for file lock on \(path). Another session may be holding the lock.", fileChange: fileChange)
         }
     }
     
@@ -857,13 +859,13 @@ struct EditFileTool: AgentTool, FileOperationTool {
             
         case .merged(let result):
             // Operation was merged and executed by FileLockManager
-            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output)
+            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output, fileChange: fileChange)
             
         case .queued(let position):
-            return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.")
+            return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.", fileChange: fileChange)
             
         case .timeout:
-            return .failure("Timeout waiting for file lock on \(path). Another session may be holding the lock.")
+            return .failure("Timeout waiting for file lock on \(path). Another session may be holding the lock.", fileChange: fileChange)
         }
     }
     
@@ -994,13 +996,13 @@ struct InsertLinesTool: AgentTool, FileOperationTool {
             
         case .merged(let result):
             // Operation was merged and executed by FileLockManager
-            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output)
+            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output, fileChange: fileChange)
             
         case .queued(let position):
-            return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.")
+            return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.", fileChange: fileChange)
             
         case .timeout:
-            return .failure("Timeout waiting for file lock on \(path). Another session may be holding the lock.")
+            return .failure("Timeout waiting for file lock on \(path). Another session may be holding the lock.", fileChange: fileChange)
         }
     }
     
