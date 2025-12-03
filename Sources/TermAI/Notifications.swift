@@ -7,6 +7,10 @@ extension Notification.Name {
     // Command approval flow
     static let TermAICommandPendingApproval = Notification.Name("TermAICommandPendingApproval")
     static let TermAICommandApprovalResponse = Notification.Name("TermAICommandApprovalResponse")
+    
+    // File change approval flow
+    static let TermAIFileChangePendingApproval = Notification.Name("TermAIFileChangePendingApproval")
+    static let TermAIFileChangeApprovalResponse = Notification.Name("TermAIFileChangeApprovalResponse")
 }
 
 

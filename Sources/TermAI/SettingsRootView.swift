@@ -1134,6 +1134,7 @@ struct AgentSettingsView: View {
         .onChange(of: settings.stuckDetectionThreshold) { _ in settings.save() }
         .onChange(of: settings.requireCommandApproval) { _ in settings.save() }
         .onChange(of: settings.autoApproveReadOnly) { _ in settings.save() }
+        .onChange(of: settings.requireFileEditApproval) { _ in settings.save() }
         .onChange(of: settings.verboseLogging) { _ in settings.save() }
         .alert("Reset Agent Settings", isPresented: $showResetConfirmation) {
             Button("Cancel", role: .cancel) { }
@@ -1526,6 +1527,25 @@ struct AgentSettingsView: View {
                             .toggleStyle(.switch)
                             .labelsHidden()
                     }
+                }
+                
+                Divider()
+                
+                // Require File Edit Approval
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Require File Edit Approval")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Show a diff preview and ask for confirmation before modifying files.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: $settings.requireFileEditApproval)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
                 }
             }
             .settingsCard()

@@ -130,6 +130,9 @@ final class AgentSettings: ObservableObject, Codable {
     /// Auto-approve read-only commands when approval is required
     @Published var autoApproveReadOnly: Bool = true
     
+    /// Whether to require user approval before applying file changes (write, edit, insert, delete)
+    @Published var requireFileEditApproval: Bool = true
+    
     // MARK: - Debug
     
     /// Enable verbose logging for agent operations
@@ -215,6 +218,7 @@ final class AgentSettings: ObservableObject, Codable {
         case appAppearance
         case requireCommandApproval
         case autoApproveReadOnly
+        case requireFileEditApproval
         case verboseLogging
         case agentTemperature
         case titleTemperature
@@ -256,6 +260,7 @@ final class AgentSettings: ObservableObject, Codable {
         appAppearance = try container.decodeIfPresent(AppearanceMode.self, forKey: .appAppearance) ?? .system
         requireCommandApproval = try container.decodeIfPresent(Bool.self, forKey: .requireCommandApproval) ?? false
         autoApproveReadOnly = try container.decodeIfPresent(Bool.self, forKey: .autoApproveReadOnly) ?? true
+        requireFileEditApproval = try container.decodeIfPresent(Bool.self, forKey: .requireFileEditApproval) ?? true
         verboseLogging = try container.decodeIfPresent(Bool.self, forKey: .verboseLogging) ?? false
         agentTemperature = try container.decodeIfPresent(Double.self, forKey: .agentTemperature) ?? 0.2
         titleTemperature = try container.decodeIfPresent(Double.self, forKey: .titleTemperature) ?? 1.0
@@ -295,6 +300,7 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(appAppearance, forKey: .appAppearance)
         try container.encode(requireCommandApproval, forKey: .requireCommandApproval)
         try container.encode(autoApproveReadOnly, forKey: .autoApproveReadOnly)
+        try container.encode(requireFileEditApproval, forKey: .requireFileEditApproval)
         try container.encode(verboseLogging, forKey: .verboseLogging)
         try container.encode(agentTemperature, forKey: .agentTemperature)
         try container.encode(titleTemperature, forKey: .titleTemperature)
@@ -388,6 +394,7 @@ final class AgentSettings: ObservableObject, Codable {
         appAppearance = .system
         requireCommandApproval = false
         autoApproveReadOnly = true
+        requireFileEditApproval = true
         verboseLogging = false
         agentTemperature = 0.2
         titleTemperature = 1.0
