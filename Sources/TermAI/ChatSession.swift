@@ -1940,11 +1940,9 @@ final class ChatSession: ObservableObject, Identifiable {
             agentSessionTokensUsed += result.totalTokens
             
             // Update accumulated context tokens from API - this is the actual token count
-            // of what we sent, representing the context size we're building up
-            // Only update if this call's context is larger (context grows, not shrinks, unless summarized)
-            if result.promptTokens > accumulatedContextTokens {
-                accumulatedContextTokens = result.promptTokens
-            }
+            // of what we sent, representing the current context size
+            // Always update to reflect the true current value (may decrease after summarization)
+            accumulatedContextTokens = result.promptTokens
             
             // Update currentContextTokens for the UI
             currentContextTokens = accumulatedContextTokens
