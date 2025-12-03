@@ -40,50 +40,84 @@ final class PTYModel: ObservableObject {
     /// Track the last command sent by the user (for history recording)
     @Published var lastUserCommand: String? = nil
     
-    /// Callback invoked when command completion is detected via shell prompt detection
-    /// This provides event-driven notification instead of relying on timer-based capture
-    var onCommandCompletion: (() -> Void)?
+    /// Queue of pending command completion callbacks
+    /// Each command that starts capture adds its callback to this queue
+    /// When OSC 7777 signals completion, we fire the next callback in FIFO order
+    private var pendingCompletions: [() -> Void] = []
     
-    /// Timeout task for command completion (fallback if prompt not detected)
-    private var commandTimeoutTask: DispatchWorkItem?
+    /// Timeout tasks for each pending command (keyed by index for cleanup)
+    private var commandTimeoutTasks: [DispatchWorkItem] = []
     private let commandTimeout: TimeInterval = 30.0  // 30 second fallback
     
     /// Debounce task for completion signaling - ensures output has stabilized
     private var completionDebounceTask: DispatchWorkItem?
     private let completionDebounceInterval: TimeInterval = 0.15  // 150ms debounce for stable output
     
-    /// Start waiting for command completion with timeout fallback
-    func startCommandCapture() {
-        // Cancel any existing timeout and debounce
-        commandTimeoutTask?.cancel()
-        completionDebounceTask?.cancel()
+    /// Add a completion callback for a command (called when command starts)
+    func enqueueCommandCompletion(_ completion: @escaping () -> Void) {
+        pendingCompletions.append(completion)
         
-        // Set up timeout fallback
+        // Set up timeout fallback for this command
+        let commandIndex = pendingCompletions.count - 1
         let timeoutItem = DispatchWorkItem { [weak self] in
-            guard let self = self, self.captureActive else { return }
-            // Timeout reached, trigger completion anyway
-            self.completionDebounceTask?.cancel()
-            self.onCommandCompletion?()
+            guard let self = self else { return }
+            // Timeout reached - fire all pending completions up to this one
+            self.fireNextCompletion()
         }
-        commandTimeoutTask = timeoutItem
+        commandTimeoutTasks.append(timeoutItem)
         DispatchQueue.main.asyncAfter(deadline: .now() + commandTimeout, execute: timeoutItem)
+    }
+    
+    /// Legacy single callback support (for backwards compatibility during transition)
+    /// This is deprecated - use enqueueCommandCompletion instead
+    var onCommandCompletion: (() -> Void)? {
+        get { pendingCompletions.first }
+        set {
+            if let completion = newValue {
+                // Clear and add single callback (legacy mode)
+                pendingCompletions = [completion]
+            } else {
+                // Only remove if we have exactly one pending
+                if pendingCompletions.count == 1 {
+                    pendingCompletions.removeAll()
+                }
+            }
+        }
+    }
+    
+    /// Start waiting for command completion (legacy - timeout is now per-command)
+    func startCommandCapture() {
+        // No-op for legacy compatibility - timeout is set in enqueueCommandCompletion
     }
     
     /// Signal that command has completed - uses debouncing to ensure output has stabilized
     fileprivate func signalCommandCompletion() {
-        // Cancel any existing debounce task
+        // Cancel any existing debounce task for this completion
         completionDebounceTask?.cancel()
         
         // Create new debounce task - wait for output to stabilize before signaling
         let debounceItem = DispatchWorkItem { [weak self] in
-            guard let self = self, self.captureActive else { return }
-            self.commandTimeoutTask?.cancel()
-            self.commandTimeoutTask = nil
+            guard let self = self else { return }
             self.completionDebounceTask = nil
-            self.onCommandCompletion?()
+            self.fireNextCompletion()
         }
         completionDebounceTask = debounceItem
         DispatchQueue.main.asyncAfter(deadline: .now() + completionDebounceInterval, execute: debounceItem)
+    }
+    
+    /// Fire the next pending completion callback (FIFO order)
+    private func fireNextCompletion() {
+        guard !pendingCompletions.isEmpty else { return }
+        
+        // Cancel the timeout for this command
+        if !commandTimeoutTasks.isEmpty {
+            commandTimeoutTasks.first?.cancel()
+            commandTimeoutTasks.removeFirst()
+        }
+        
+        // Dequeue and fire the completion
+        let completion = pendingCompletions.removeFirst()
+        completion()
     }
     
     // Git integration
