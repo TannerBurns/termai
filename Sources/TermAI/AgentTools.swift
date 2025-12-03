@@ -34,14 +34,24 @@ struct AgentToolResult {
     let success: Bool
     let output: String
     let error: String?
+    /// For file operations, includes the before/after content for diff display
+    let fileChange: FileChange?
     
-    static func success(_ output: String) -> AgentToolResult {
-        AgentToolResult(success: true, output: output, error: nil)
+    static func success(_ output: String, fileChange: FileChange? = nil) -> AgentToolResult {
+        AgentToolResult(success: true, output: output, error: nil, fileChange: fileChange)
     }
     
     static func failure(_ error: String) -> AgentToolResult {
-        AgentToolResult(success: false, output: "", error: error)
+        AgentToolResult(success: false, output: "", error: error, fileChange: nil)
     }
+}
+
+// MARK: - File Operation Protocol
+
+/// Protocol for tools that modify files and can provide change previews
+protocol FileOperationTool: AgentTool {
+    /// Prepare a preview of the file change without actually applying it
+    func prepareChange(args: [String: String], cwd: String?) async -> FileChange?
 }
 
 // MARK: - Process Manager (for background processes)
@@ -631,9 +641,43 @@ struct ReadFileTool: AgentTool {
 
 // MARK: - Write File Tool
 
-struct WriteFileTool: AgentTool {
+struct WriteFileTool: AgentTool, FileOperationTool {
     let name = "write_file"
     let description = "Write content to a file. Args: path (required), content (required), mode ('overwrite' or 'append', default: overwrite)"
+    
+    func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
+        guard let path = args["path"], !path.isEmpty,
+              let content = args["content"] else {
+            return nil
+        }
+        
+        let expandedPath = resolvePath(path, cwd: cwd)
+        let mode = args["mode"] ?? "overwrite"
+        let fileExists = FileManager.default.fileExists(atPath: expandedPath)
+        
+        // Read current content if file exists
+        var beforeContent: String? = nil
+        if fileExists {
+            beforeContent = try? String(contentsOfFile: expandedPath, encoding: .utf8)
+        }
+        
+        // Compute after content
+        let afterContent: String
+        if mode == "append" && beforeContent != nil {
+            afterContent = beforeContent! + content
+        } else {
+            afterContent = content
+        }
+        
+        let operationType: FileOperationType = fileExists ? (mode == "append" ? .insert : .overwrite) : .create
+        
+        return FileChange(
+            filePath: expandedPath,
+            operationType: operationType,
+            beforeContent: beforeContent,
+            afterContent: afterContent
+        )
+    }
     
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let path = args["path"], !path.isEmpty else {
@@ -646,6 +690,9 @@ struct WriteFileTool: AgentTool {
         let expandedPath = resolvePath(path, cwd: cwd)
         let mode = args["mode"] ?? "overwrite"
         let writeMode: FileOperation.WriteMode = mode == "append" ? .append : .overwrite
+        
+        // Capture file change info before modifying
+        let fileChange = await prepareChange(args: args, cwd: cwd)
         
         // Extract session ID for file coordination
         let sessionId = args["_sessionId"].flatMap { UUID(uuidString: $0) } ?? UUID()
@@ -670,11 +717,11 @@ struct WriteFileTool: AgentTool {
         switch acquisitionResult {
         case .acquired:
             // Execute the operation directly
-            return await executeWriteOperation(path: expandedPath, content: content, mode: writeMode)
+            return await executeWriteOperation(path: expandedPath, content: content, mode: writeMode, fileChange: fileChange)
             
         case .merged(let result):
             // Operation was merged and executed by FileLockManager
-            return result.isSuccess ? .success(result.output) : .failure(result.output)
+            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output)
             
         case .queued(let position):
             return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.")
@@ -684,7 +731,7 @@ struct WriteFileTool: AgentTool {
         }
     }
     
-    private func executeWriteOperation(path: String, content: String, mode: FileOperation.WriteMode) async -> AgentToolResult {
+    private func executeWriteOperation(path: String, content: String, mode: FileOperation.WriteMode, fileChange: FileChange?) async -> AgentToolResult {
         let url = URL(fileURLWithPath: path)
         
         do {
@@ -698,10 +745,10 @@ struct WriteFileTool: AgentTool {
                     handle.write(data)
                 }
                 try handle.close()
-                return .success("Appended \(content.count) chars to \(path)")
+                return .success("Appended \(content.count) chars to \(path)", fileChange: fileChange)
             } else {
                 try content.write(to: url, atomically: true, encoding: .utf8)
-                return .success("Wrote \(content.count) chars to \(path)")
+                return .success("Wrote \(content.count) chars to \(path)", fileChange: fileChange)
             }
         } catch {
             return .failure("Error writing file: \(error.localizedDescription)")
@@ -711,9 +758,51 @@ struct WriteFileTool: AgentTool {
 
 // MARK: - Edit File Tool (Search/Replace)
 
-struct EditFileTool: AgentTool {
+struct EditFileTool: AgentTool, FileOperationTool {
     let name = "edit_file"
     let description = "Edit a file by replacing specific text. Args: path (required), old_text (required - exact text to find), new_text (required - replacement text), replace_all (optional, 'true'/'false', default: false)"
+    
+    func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
+        guard let path = args["path"], !path.isEmpty,
+              let oldText = args["old_text"], !oldText.isEmpty,
+              let newText = args["new_text"] else {
+            return nil
+        }
+        
+        let expandedPath = resolvePath(path, cwd: cwd)
+        let replaceAll = args["replace_all"]?.lowercased() == "true"
+        
+        // Read current content
+        guard let beforeContent = try? String(contentsOfFile: expandedPath, encoding: .utf8) else {
+            return nil
+        }
+        
+        // Check if old_text exists
+        guard beforeContent.contains(oldText) else {
+            return nil
+        }
+        
+        // Compute after content
+        let afterContent: String
+        if replaceAll {
+            afterContent = beforeContent.replacingOccurrences(of: oldText, with: newText)
+        } else {
+            if let range = beforeContent.range(of: oldText) {
+                afterContent = beforeContent.replacingCharacters(in: range, with: newText)
+            } else {
+                afterContent = beforeContent
+            }
+        }
+        
+        return FileChange(
+            filePath: expandedPath,
+            operationType: .edit,
+            beforeContent: beforeContent,
+            afterContent: afterContent,
+            oldText: oldText,
+            newText: newText
+        )
+    }
     
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let path = args["path"], !path.isEmpty else {
@@ -738,6 +827,9 @@ struct EditFileTool: AgentTool {
             return .failure("File not found: '\(path)'. Use an absolute path if needed.")
         }
         
+        // Capture file change info before modifying
+        let fileChange = await prepareChange(args: args, cwd: cwd)
+        
         // Extract session ID for file coordination
         let sessionId = args["_sessionId"].flatMap { UUID(uuidString: $0) } ?? UUID()
         
@@ -761,11 +853,11 @@ struct EditFileTool: AgentTool {
         switch acquisitionResult {
         case .acquired:
             // Execute the operation directly
-            return await executeEditOperation(path: expandedPath, oldText: oldText, newText: newText, replaceAll: replaceAll)
+            return await executeEditOperation(path: expandedPath, oldText: oldText, newText: newText, replaceAll: replaceAll, fileChange: fileChange)
             
         case .merged(let result):
             // Operation was merged and executed by FileLockManager
-            return result.isSuccess ? .success(result.output) : .failure(result.output)
+            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output)
             
         case .queued(let position):
             return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.")
@@ -775,7 +867,7 @@ struct EditFileTool: AgentTool {
         }
     }
     
-    private func executeEditOperation(path: String, oldText: String, newText: String, replaceAll: Bool) async -> AgentToolResult {
+    private func executeEditOperation(path: String, oldText: String, newText: String, replaceAll: Bool, fileChange: FileChange?) async -> AgentToolResult {
         let url = URL(fileURLWithPath: path)
         
         do {
@@ -804,9 +896,9 @@ struct EditFileTool: AgentTool {
             let suffix = resultLines.count > 20 ? "\n... (\(resultLines.count - 20) more lines)" : ""
             
             if replaceAll {
-                return .success("Replaced \(occurrences) occurrence(s) in \(path).\n\nFile preview:\n\(previewLines)\(suffix)")
+                return .success("Replaced \(occurrences) occurrence(s) in \(path).\n\nFile preview:\n\(previewLines)\(suffix)", fileChange: fileChange)
             } else {
-                return .success("Replaced 1 occurrence in \(path).\n\nFile preview:\n\(previewLines)\(suffix)")
+                return .success("Replaced 1 occurrence in \(path).\n\nFile preview:\n\(previewLines)\(suffix)", fileChange: fileChange)
             }
         } catch {
             return .failure("Error editing file: \(error.localizedDescription)")
@@ -816,9 +908,40 @@ struct EditFileTool: AgentTool {
 
 // MARK: - Insert Lines Tool
 
-struct InsertLinesTool: AgentTool {
+struct InsertLinesTool: AgentTool, FileOperationTool {
     let name = "insert_lines"
     let description = "Insert lines at a specific position in a file. Args: path (required), line_number (required - 1-based, lines inserted BEFORE this line), content (required). TIP: For markdown, include a leading blank line if inserting after content."
+    
+    func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
+        guard let path = args["path"], !path.isEmpty,
+              let lineNumStr = args["line_number"], let lineNumber = Int(lineNumStr), lineNumber >= 1,
+              let insertContent = args["content"] else {
+            return nil
+        }
+        
+        let expandedPath = resolvePath(path, cwd: cwd)
+        
+        // Read current content
+        guard let beforeContent = try? String(contentsOfFile: expandedPath, encoding: .utf8) else {
+            return nil
+        }
+        
+        // Compute after content
+        var lines = beforeContent.components(separatedBy: "\n")
+        let insertIndex = min(lineNumber - 1, lines.count)
+        let newLines = insertContent.components(separatedBy: "\n")
+        lines.insert(contentsOf: newLines, at: insertIndex)
+        let afterContent = lines.joined(separator: "\n")
+        
+        return FileChange(
+            filePath: expandedPath,
+            operationType: .insert,
+            beforeContent: beforeContent,
+            afterContent: afterContent,
+            startLine: lineNumber,
+            endLine: lineNumber + newLines.count - 1
+        )
+    }
     
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let path = args["path"], !path.isEmpty else {
@@ -840,6 +963,9 @@ struct InsertLinesTool: AgentTool {
             }
             return .failure("File not found: '\(path)'. Use an absolute path if needed.")
         }
+        
+        // Capture file change info before modifying
+        let fileChange = await prepareChange(args: args, cwd: cwd)
         
         // Extract session ID for file coordination
         let sessionId = args["_sessionId"].flatMap { UUID(uuidString: $0) } ?? UUID()
@@ -864,11 +990,11 @@ struct InsertLinesTool: AgentTool {
         switch acquisitionResult {
         case .acquired:
             // Execute the operation directly
-            return await executeInsertOperation(path: expandedPath, lineNumber: lineNumber, content: insertContent)
+            return await executeInsertOperation(path: expandedPath, lineNumber: lineNumber, content: insertContent, fileChange: fileChange)
             
         case .merged(let result):
             // Operation was merged and executed by FileLockManager
-            return result.isSuccess ? .success(result.output) : .failure(result.output)
+            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output)
             
         case .queued(let position):
             return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.")
@@ -878,7 +1004,7 @@ struct InsertLinesTool: AgentTool {
         }
     }
     
-    private func executeInsertOperation(path: String, lineNumber: Int, content insertContent: String) async -> AgentToolResult {
+    private func executeInsertOperation(path: String, lineNumber: Int, content insertContent: String, fileChange: FileChange?) async -> AgentToolResult {
         let url = URL(fileURLWithPath: path)
         
         do {
@@ -886,7 +1012,7 @@ struct InsertLinesTool: AgentTool {
             
             let normalizedInsert = insertContent.trimmingCharacters(in: .whitespacesAndNewlines)
             if content.contains(normalizedInsert) {
-                return .success("ALREADY EXISTS: The content you're trying to insert already exists in the file. No changes made. Use read_file to verify the current state.")
+                return .success("ALREADY EXISTS: The content you're trying to insert already exists in the file. No changes made. Use read_file to verify the current state.", fileChange: nil)
             }
             
             var lines = content.components(separatedBy: "\n")
@@ -903,7 +1029,7 @@ struct InsertLinesTool: AgentTool {
                 "\(previewStart + $0.offset + 1)| \($0.element)" 
             }.joined(separator: "\n")
             
-            return .success("Inserted \(newLines.count) line(s) at line \(lineNumber).\n\nPreview around insertion:\n\(preview)")
+            return .success("Inserted \(newLines.count) line(s) at line \(lineNumber).\n\nPreview around insertion:\n\(preview)", fileChange: fileChange)
         } catch {
             return .failure("Error inserting lines: \(error.localizedDescription)")
         }
@@ -912,9 +1038,44 @@ struct InsertLinesTool: AgentTool {
 
 // MARK: - Delete Lines Tool
 
-struct DeleteLinesTool: AgentTool {
+struct DeleteLinesTool: AgentTool, FileOperationTool {
     let name = "delete_lines"
     let description = "Delete a range of lines from a file. Args: path (required), start_line (required, 1-based), end_line (required, 1-based, inclusive)"
+    
+    func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
+        guard let path = args["path"], !path.isEmpty,
+              let startStr = args["start_line"], let startLine = Int(startStr), startLine >= 1,
+              let endStr = args["end_line"], let endLine = Int(endStr), endLine >= startLine else {
+            return nil
+        }
+        
+        let expandedPath = resolvePath(path, cwd: cwd)
+        
+        // Read current content
+        guard let beforeContent = try? String(contentsOfFile: expandedPath, encoding: .utf8) else {
+            return nil
+        }
+        
+        // Compute after content
+        var lines = beforeContent.components(separatedBy: "\n")
+        let start = max(0, startLine - 1)
+        let end = min(lines.count, endLine)
+        
+        if start < lines.count {
+            lines.removeSubrange(start..<end)
+        }
+        
+        let afterContent = lines.joined(separator: "\n")
+        
+        return FileChange(
+            filePath: expandedPath,
+            operationType: .delete,
+            beforeContent: beforeContent,
+            afterContent: afterContent,
+            startLine: startLine,
+            endLine: endLine
+        )
+    }
     
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let path = args["path"], !path.isEmpty else {
@@ -936,6 +1097,9 @@ struct DeleteLinesTool: AgentTool {
             }
             return .failure("File not found: '\(path)'. Use an absolute path if needed.")
         }
+        
+        // Capture file change info before modifying
+        let fileChange = await prepareChange(args: args, cwd: cwd)
         
         // Extract session ID for file coordination
         let sessionId = args["_sessionId"].flatMap { UUID(uuidString: $0) } ?? UUID()
@@ -960,11 +1124,11 @@ struct DeleteLinesTool: AgentTool {
         switch acquisitionResult {
         case .acquired:
             // Execute the operation directly
-            return await executeDeleteOperation(path: expandedPath, startLine: startLine, endLine: endLine)
+            return await executeDeleteOperation(path: expandedPath, startLine: startLine, endLine: endLine, fileChange: fileChange)
             
         case .merged(let result):
             // Operation was merged and executed by FileLockManager
-            return result.isSuccess ? .success(result.output) : .failure(result.output)
+            return result.isSuccess ? .success(result.output, fileChange: fileChange) : .failure(result.output)
             
         case .queued(let position):
             return .failure("File is locked by another session. Queue position: \(position). Please retry shortly.")
@@ -974,7 +1138,7 @@ struct DeleteLinesTool: AgentTool {
         }
     }
     
-    private func executeDeleteOperation(path: String, startLine: Int, endLine: Int) async -> AgentToolResult {
+    private func executeDeleteOperation(path: String, startLine: Int, endLine: Int, fileChange: FileChange?) async -> AgentToolResult {
         let url = URL(fileURLWithPath: path)
         
         do {
@@ -994,7 +1158,7 @@ struct DeleteLinesTool: AgentTool {
             let newContent = lines.joined(separator: "\n")
             try newContent.write(to: url, atomically: true, encoding: .utf8)
             
-            return .success("Deleted \(deletedCount) line(s) from \(path)")
+            return .success("Deleted \(deletedCount) line(s) from \(path)", fileChange: fileChange)
         } catch {
             return .failure("Error deleting lines: \(error.localizedDescription)")
         }

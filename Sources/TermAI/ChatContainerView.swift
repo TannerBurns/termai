@@ -12,6 +12,9 @@ struct ChatContainerView: View {
     @State private var showingHistoryPopover: Bool = false
     @State private var showingProcessMonitor: Bool = false
     
+    // File change approval state
+    @State private var pendingFileChangeApproval: PendingFileChangeApproval? = nil
+    
     var body: some View {
         VStack(spacing: 0) {
             // Main Chat header with provider/model info
@@ -209,6 +212,42 @@ struct ChatContainerView: View {
                         ]
                     )
                     pendingApproval = nil
+                }
+            )
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .TermAIFileChangePendingApproval)) { note in
+            guard let sessionId = note.userInfo?["sessionId"] as? UUID,
+                  let approval = note.userInfo?["approval"] as? PendingFileChangeApproval else { return }
+            
+            // Only show if this is for the selected session
+            if sessionId == tabsManager.selectedSessionId {
+                pendingFileChangeApproval = approval
+            }
+        }
+        .sheet(item: $pendingFileChangeApproval) { approval in
+            FileChangeApprovalSheet(
+                approval: approval,
+                onApprove: {
+                    NotificationCenter.default.post(
+                        name: .TermAIFileChangeApprovalResponse,
+                        object: nil,
+                        userInfo: [
+                            "approvalId": approval.id,
+                            "approved": true
+                        ]
+                    )
+                    pendingFileChangeApproval = nil
+                },
+                onReject: {
+                    NotificationCenter.default.post(
+                        name: .TermAIFileChangeApprovalResponse,
+                        object: nil,
+                        userInfo: [
+                            "approvalId": approval.id,
+                            "approved": false
+                        ]
+                    )
+                    pendingFileChangeApproval = nil
                 }
             )
         }
