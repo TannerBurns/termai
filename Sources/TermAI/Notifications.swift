@@ -11,6 +11,11 @@ extension Notification.Name {
     // File change approval flow
     static let TermAIFileChangePendingApproval = Notification.Name("TermAIFileChangePendingApproval")
     static let TermAIFileChangeApprovalResponse = Notification.Name("TermAIFileChangeApprovalResponse")
+    
+    // Test runner flow
+    static let TermAITestRunnerShow = Notification.Name("TermAITestRunnerShow")
+    static let TermAITestRunnerStatusUpdate = Notification.Name("TermAITestRunnerStatusUpdate")
+    static let TermAITestRunnerCompleted = Notification.Name("TermAITestRunnerCompleted")
 }
 
 

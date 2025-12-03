@@ -71,3 +71,4 @@ TermAI.zip
 *~
 
 .build_version
+.build-clean/
