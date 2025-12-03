@@ -324,7 +324,7 @@ final class ProcessManager: ObservableObject {
         return (pid: pid, initialOutput: combinedOutput, error: nil)
     }
     
-    nonisolated func checkProcess(pid: Int32) -> (running: Bool, output: String, error: String) {
+    nonisolated func checkProcess(pid: Int32, fullOutput: Bool = false) -> (running: Bool, output: String, error: String) {
         var result: (running: Bool, output: String, error: String) = (false, "", "")
         
         queue.sync {
@@ -336,47 +336,61 @@ final class ProcessManager: ObservableObject {
             let isRunning = managed.process.isRunning
             
             // Use buffered output (collected by readability handlers)
-            // Return last 2000 chars of output and 500 chars of error
-            let outputTail = String(managed.getOutput().suffix(2000))
-            let errorTail = String(managed.getError().suffix(500))
+            let output: String
+            let error: String
+            if fullOutput {
+                // Return complete output for cases like test runners where we need all output
+                output = managed.getOutput()
+                error = managed.getError()
+            } else {
+                // Return truncated output for normal status checks
+                output = String(managed.getOutput().suffix(2000))
+                error = String(managed.getError().suffix(500))
+            }
             
-            result = (isRunning, outputTail, errorTail)
+            result = (isRunning, output, error)
         }
         
         return result
     }
     
-    nonisolated func checkProcessByPort(port: Int) -> (running: Bool, pid: Int32?, output: String) {
-        // Use lsof to find process on port
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        task.arguments = ["-i", ":\(port)", "-t"]
-        
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = Pipe()
-        
-        do {
-            try task.run()
-            task.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               let pid = Int32(output.components(separatedBy: .newlines).first ?? "") {
-                // Check if this is one of our managed processes
-                var managedOutput = ""
-                queue.sync {
-                    if let managed = processes[pid] {
-                        managedOutput = String(managed.outputBuffer.suffix(1000))
+    nonisolated func checkProcessByPort(port: Int) async -> (running: Bool, pid: Int32?, output: String) {
+        // Run lsof on background queue to avoid blocking main thread
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+                task.arguments = ["-i", ":\(port)", "-t"]
+                
+                let pipe = Pipe()
+                task.standardOutput = pipe
+                task.standardError = Pipe()
+                
+                do {
+                    try task.run()
+                    task.waitUntilExit()
+                    
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       let pid = Int32(output.components(separatedBy: .newlines).first ?? "") {
+                        // Check if this is one of our managed processes
+                        var managedOutput = ""
+                        queue.sync {
+                            if let managed = processes[pid] {
+                                managedOutput = String(managed.outputBuffer.suffix(1000))
+                            }
+                        }
+                        let result = (true, pid as Int32?, managedOutput.isEmpty ? "Process \(pid) running on port \(port)" : managedOutput)
+                        continuation.resume(returning: result)
+                        return
                     }
+                } catch {
+                    // lsof failed
                 }
-                return (true, pid, managedOutput.isEmpty ? "Process \(pid) running on port \(port)" : managedOutput)
+                
+                continuation.resume(returning: (false, nil, "No process found on port \(port)"))
             }
-        } catch {
-            // lsof failed
         }
-        
-        return (false, nil, "No process found on port \(port)")
     }
     
     nonisolated func stopProcessSync(pid: Int32) -> Bool {
@@ -1482,7 +1496,7 @@ struct CheckProcessTool: AgentTool {
         
         // Check by port
         if let portStr = args["port"], let port = Int(portStr) {
-            let result = await MainActor.run { ProcessManager.shared.checkProcessByPort(port: port) }
+            let result = await ProcessManager.shared.checkProcessByPort(port: port)
             
             var output = "Port \(port): \(result.running ? "IN USE" : "FREE")"
             if let pid = result.pid {

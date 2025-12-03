@@ -14,7 +14,111 @@ struct SystemInfo {
     let cudaVersion: String
     let pythonVersion: String
     
+    // MARK: - Cached Singleton
+    
+    /// Cached system info - gathered on a background thread to avoid blocking main thread
+    private static var _cached: SystemInfo?
+    private static let cacheLock = NSLock()
+    private static var isGathering = false
+    
+    /// Returns cached system info. Falls back to fast-only info if not yet gathered.
+    /// Call `preloadCache()` early in app lifecycle to ensure full info is available.
+    static var cached: SystemInfo {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        
+        if let cached = _cached {
+            return cached
+        }
+        
+        // If cache miss and not already gathering, start background gather
+        if !isGathering {
+            isGathering = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                let info = gatherInternal()
+                cacheLock.lock()
+                _cached = info
+                isGathering = false
+                cacheLock.unlock()
+            }
+        }
+        
+        // Return fast-only info immediately (no subprocess calls)
+        return gatherFastOnly()
+    }
+    
+    /// Preload the cache on a background thread. Call this early in app startup.
+    static func preloadCache() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let info = gatherInternal()
+            cacheLock.lock()
+            _cached = info
+            isGathering = false
+            cacheLock.unlock()
+        }
+    }
+    
+    /// Synchronous gather - DEPRECATED, use `cached` or `gatherAsync()` instead
+    /// Only kept for backwards compatibility
     static func gather() -> SystemInfo {
+        cacheLock.lock()
+        if let cached = _cached {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+        
+        // Return fast-only to avoid blocking main thread
+        return gatherFastOnly()
+    }
+    
+    /// Async gather - runs subprocess calls on background thread
+    static func gatherAsync() async -> SystemInfo {
+        // All lock operations happen on background queue to avoid async context warnings
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Check cache first (with lock)
+                cacheLock.lock()
+                if let cached = _cached {
+                    cacheLock.unlock()
+                    continuation.resume(returning: cached)
+                    return
+                }
+                cacheLock.unlock()
+                
+                // Gather the info
+                let info = gatherInternal()
+                
+                // Update cache
+                cacheLock.lock()
+                _cached = info
+                cacheLock.unlock()
+                
+                continuation.resume(returning: info)
+            }
+        }
+    }
+    
+    /// Fast-only gather - no subprocess calls, safe for main thread
+    private static func gatherFastOnly() -> SystemInfo {
+        return SystemInfo(
+            osName: getOSName(),
+            osVersion: getOSVersion(),
+            linuxDistro: getLinuxDistro(),
+            arch: getArchitecture(),
+            shell: getShell(),
+            packageManagers: getPackageManagers(),
+            containerType: getContainerType(),
+            isRootless: checkRootless(),
+            privileges: "user",  // Skip subprocess check
+            gpuPresent: checkGPU(),
+            cudaVersion: "",     // Skip subprocess check
+            pythonVersion: ""    // Skip subprocess check
+        )
+    }
+    
+    /// Internal gather with all subprocess calls - must run on background thread
+    private static func gatherInternal() -> SystemInfo {
         let osName = getOSName()
         let osVersion = getOSVersion()
         let linuxDistro = getLinuxDistro()
