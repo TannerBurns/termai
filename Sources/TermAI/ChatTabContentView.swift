@@ -887,6 +887,7 @@ private struct StreamingIndicator: View {
 private struct AgentEventView: View {
     @State private var expanded: Bool = false
     @State private var showCopied: Bool = false
+    @State private var showingDiffSheet: Bool = false
     let event: AgentEvent
     let ptyModel: PTYModel
     
@@ -908,6 +909,11 @@ private struct AgentEventView: View {
                     .fontWeight(.medium)
                 
                 Spacer()
+                
+                // View Changes button (shown when there's a file change)
+                if let fileChange = event.fileChange {
+                    ViewChangesButton(fileChange: fileChange)
+                }
                 
                 // Action buttons (shown when there's a command)
                 if let cmd = event.command, !cmd.isEmpty {
@@ -948,6 +954,11 @@ private struct AgentEventView: View {
             
             if expanded {
                 VStack(alignment: .leading, spacing: 8) {
+                    // File change inline preview
+                    if let fileChange = event.fileChange {
+                        InlineDiffPreview(fileChange: fileChange, maxLines: 8)
+                    }
+                    
                     if let cmd = event.command, !cmd.isEmpty {
                         HStack(spacing: 6) {
                             Image(systemName: "terminal")
@@ -984,7 +995,7 @@ private struct AgentEventView: View {
                         )
                     }
                     
-                    if let details = event.details, !details.isEmpty {
+                    if let details = event.details, !details.isEmpty, event.fileChange == nil {
                         Text(details)
                             .font(.caption2)
                             .foregroundColor(.secondary)
@@ -1022,6 +1033,7 @@ private struct AgentEventView: View {
         case "status": return .blue
         case "step": return .green
         case "summary": return .purple
+        case "file_change": return .orange
         default: return .gray
         }
     }
@@ -1031,6 +1043,7 @@ private struct AgentEventView: View {
         case "status": return "bolt.fill"
         case "step": return "play.fill"
         case "summary": return "checkmark"
+        case "file_change": return "doc.text.fill"
         default: return "info.circle"
         }
     }

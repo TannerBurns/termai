@@ -79,13 +79,14 @@ enum TokenEstimator {
 // MARK: - Chat Message Types
 
 struct AgentEvent: Codable, Equatable {
-    var kind: String // "status", "step", "summary", "checklist"
+    var kind: String // "status", "step", "summary", "checklist", "file_change"
     var title: String
     var details: String? = nil
     var command: String? = nil
     var output: String? = nil
     var collapsed: Bool? = true
     var checklistItems: [TaskChecklistItem]? = nil
+    var fileChange: FileChange? = nil
 }
 
 // MARK: - Task Checklist
@@ -1264,7 +1265,18 @@ final class ChatSession: ObservableObject, Identifiable {
                         }
                     }
                     
-                    let result = await tool.execute(args: argsWithSession, cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd)
+                    // Execute tool - use approval flow for file operations if enabled
+                    let result: AgentToolResult
+                    if isFileOp {
+                        result = await executeFileToolWithApproval(
+                            tool: tool,
+                            toolName: toolToUse,
+                            args: argsWithSession,
+                            cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd
+                        )
+                    } else {
+                        result = await tool.execute(args: argsWithSession, cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd)
+                    }
                     
                     // Restore execution phase if we were waiting
                     if case .waitingForFileLock = agentExecutionPhase {
@@ -1278,7 +1290,8 @@ final class ChatSession: ObservableObject, Identifiable {
                     agentContextLog.append("TOOL: \(toolToUse) \(toolArgs)")
                     agentContextLog.append("RESULT: \(resultOutput.prefix(AgentSettings.shared.maxOutputCapture))")
                     
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: result.success ? "Tool succeeded" : "Tool failed", details: String(resultOutput.prefix(500)), command: nil, output: resultOutput, collapsed: true)))
+                    // Include file change info in the result message if available
+                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: result.success ? "Tool succeeded" : "Tool failed", details: String(resultOutput.prefix(500)), command: nil, output: resultOutput, collapsed: true, fileChange: result.fileChange)))
                     messages = messages
                     persistMessages()
                     
@@ -2414,6 +2427,160 @@ final class ChatSession: ObservableObject, Identifiable {
         )
         
         return output
+    }
+    
+    // MARK: - File Change Approval
+    
+    /// Request user approval for a file change before applying it
+    private func requestFileChangeApproval(fileChange: FileChange, toolName: String, toolArgs: [String: String]) async -> Bool {
+        // Check if approval is required
+        guard AgentSettings.shared.requireFileEditApproval else {
+            return true
+        }
+        
+        // Post notification requesting approval
+        let approvalId = UUID()
+        let approval = PendingFileChangeApproval(
+            id: approvalId,
+            sessionId: self.id,
+            fileChange: fileChange,
+            toolName: toolName,
+            toolArgs: toolArgs
+        )
+        
+        NotificationCenter.default.post(
+            name: .TermAIFileChangePendingApproval,
+            object: nil,
+            userInfo: [
+                "sessionId": self.id,
+                "approvalId": approvalId,
+                "approval": approval
+            ]
+        )
+        
+        // Add a pending approval message
+        messages.append(ChatMessage(
+            role: "assistant",
+            content: "",
+            agentEvent: AgentEvent(
+                kind: "file_change",
+                title: "Awaiting file change approval",
+                details: "Wants to \(fileChange.operationType.description.lowercased()): \(fileChange.fileName)",
+                command: nil,
+                output: nil,
+                collapsed: false,
+                fileChange: fileChange
+            )
+        ))
+        messages = messages
+        persistMessages()
+        
+        // Wait for approval response
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            var token: NSObjectProtocol?
+            var cancelCheckTimer: DispatchSourceTimer?
+            var resolved = false
+            
+            func finish(_ approved: Bool) {
+                guard !resolved else { return }
+                resolved = true
+                cancelCheckTimer?.cancel()
+                cancelCheckTimer = nil
+                if let t = token { NotificationCenter.default.removeObserver(t) }
+                token = nil
+                continuation.resume(returning: approved)
+            }
+            
+            // Check for cancellation periodically
+            cancelCheckTimer = DispatchSource.makeTimerSource(queue: .main)
+            cancelCheckTimer?.schedule(deadline: .now() + 0.5, repeating: 0.5)
+            cancelCheckTimer?.setEventHandler { [weak self] in
+                if self?.agentCancelled == true {
+                    AgentDebugConfig.log("[Agent] File change approval wait cancelled by user")
+                    finish(false)
+                }
+            }
+            cancelCheckTimer?.resume()
+            
+            token = NotificationCenter.default.addObserver(
+                forName: .TermAIFileChangeApprovalResponse,
+                object: nil,
+                queue: .main
+            ) { note in
+                guard let noteApprovalId = note.userInfo?["approvalId"] as? UUID,
+                      noteApprovalId == approvalId else { return }
+                
+                let approved = note.userInfo?["approved"] as? Bool ?? false
+                finish(approved)
+            }
+            
+            // Timeout after 5 minutes (user might be away)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
+                finish(false)
+            }
+        }
+    }
+    
+    /// Execute a file operation tool with optional approval flow
+    private func executeFileToolWithApproval(
+        tool: AgentTool,
+        toolName: String,
+        args: [String: String],
+        cwd: String?
+    ) async -> AgentToolResult {
+        // Check if this is a FileOperationTool that can provide previews
+        if let fileOpTool = tool as? FileOperationTool,
+           AgentSettings.shared.requireFileEditApproval {
+            // Get the preview of changes
+            if let fileChange = await fileOpTool.prepareChange(args: args, cwd: cwd) {
+                // Request approval
+                let approved = await requestFileChangeApproval(
+                    fileChange: fileChange,
+                    toolName: toolName,
+                    toolArgs: args
+                )
+                
+                if !approved {
+                    // File change was rejected
+                    messages.append(ChatMessage(
+                        role: "assistant",
+                        content: "",
+                        agentEvent: AgentEvent(
+                            kind: "status",
+                            title: "File change rejected",
+                            details: "User declined to apply changes to: \(fileChange.fileName)",
+                            command: nil,
+                            output: nil,
+                            collapsed: true,
+                            fileChange: fileChange
+                        )
+                    ))
+                    messages = messages
+                    persistMessages()
+                    return .failure("File change rejected by user")
+                }
+                
+                // Update status to show approval
+                messages.append(ChatMessage(
+                    role: "assistant",
+                    content: "",
+                    agentEvent: AgentEvent(
+                        kind: "status",
+                        title: "File change approved",
+                        details: "Applying changes to: \(fileChange.fileName)",
+                        command: nil,
+                        output: nil,
+                        collapsed: true,
+                        fileChange: fileChange
+                    )
+                ))
+                messages = messages
+                persistMessages()
+            }
+        }
+        
+        // Execute the tool
+        return await tool.execute(args: args, cwd: cwd)
     }
     
     // MARK: - Title Generation
