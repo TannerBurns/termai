@@ -303,6 +303,10 @@ final class ChatSession: ObservableObject, Identifiable {
     // Provider type tracking
     @Published var providerType: ProviderType = .local(.ollama)
     
+    /// Whether the user has explicitly configured the provider (not just using defaults)
+    /// This must be true along with model selection before the session is considered configured
+    @Published var hasExplicitlyConfiguredProvider: Bool = false
+    
     // Context usage tracking
     @Published var currentContextTokens: Int = 0
     @Published var contextLimitTokens: Int = 32_000
@@ -348,8 +352,10 @@ final class ChatSession: ObservableObject, Identifiable {
         }
     }
     
-    // System info and prompt
-    private let systemInfo: SystemInfo = SystemInfo.gather()
+    // System info and prompt - use cached version to avoid blocking main thread
+    // Note: For synchronous access (UI), use SystemInfo.cached which may return fast-only data
+    // For LLM calls, use getSystemPromptAsync() which waits for full system info
+    private var systemInfo: SystemInfo { SystemInfo.cached }
     var systemPrompt: String {
         return systemInfo.injectIntoPrompt()
     }
@@ -357,6 +363,18 @@ final class ChatSession: ObservableObject, Identifiable {
     /// Get system prompt with agent mode instructions when agent mode is enabled
     var agentSystemPrompt: String {
         return systemInfo.injectIntoPromptWithAgentMode()
+    }
+    
+    /// Async version that waits for full system info - use this for LLM calls
+    private func getSystemPromptAsync() async -> String {
+        let info = await SystemInfo.cachedAsync
+        return info.injectIntoPrompt()
+    }
+    
+    /// Async version with agent mode - use this for LLM calls
+    private func getAgentSystemPromptAsync() async -> String {
+        let info = await SystemInfo.cachedAsync
+        return info.injectIntoPromptWithAgentMode()
     }
     
     // Private streaming state
@@ -380,6 +398,13 @@ final class ChatSession: ObservableObject, Identifiable {
     /// Whether the current model supports reasoning/thinking
     var currentModelSupportsReasoning: Bool {
         CuratedModels.supportsReasoning(modelId: model)
+    }
+    
+    /// Whether the session is fully configured (provider explicitly chosen AND model selected)
+    /// Used to determine if we should show setup prompt instead of chat
+    /// This ensures no data is sent to any API without explicit user consent
+    var isConfigured: Bool {
+        hasExplicitlyConfiguredProvider && !model.isEmpty
     }
     
     init(
@@ -1937,8 +1962,10 @@ final class ChatSession: ObservableObject, Identifiable {
     
     private func callOneShotText(prompt: String) async -> String {
         do {
+            // Get full system prompt asynchronously to avoid race condition
+            let sysPrompt = await getAgentSystemPromptAsync()
             let result = try await LLMClient.shared.completeWithUsage(
-                systemPrompt: agentSystemPrompt,
+                systemPrompt: sysPrompt,
                 userPrompt: prompt,
                 provider: providerType,
                 modelId: model,
@@ -2903,7 +2930,9 @@ final class ChatSession: ObservableObject, Identifiable {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
         
-        let allMessages = buildMessageArray()
+        // Get full system prompt asynchronously to avoid race condition
+        let sysPrompt = await getSystemPromptAsync()
+        let allMessages = buildMessageArray(withSystemPrompt: sysPrompt)
         let req = RequestBody(
             model: model,
             messages: allMessages.map { .init(role: $0.role, content: $0.content) },
@@ -2938,7 +2967,9 @@ final class ChatSession: ObservableObject, Identifiable {
         }
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         
-        let allMessages = buildMessageArray()
+        // Get full system prompt asynchronously to avoid race condition
+        let sysPrompt = await getSystemPromptAsync()
+        let allMessages = buildMessageArray(withSystemPrompt: sysPrompt)
         
         // Build request body as dictionary to handle different parameter names
         var bodyDict: [String: Any] = [
@@ -2997,7 +3028,9 @@ final class ChatSession: ObservableObject, Identifiable {
             request.setValue("interleaved-thinking-2025-05-14", forHTTPHeaderField: "anthropic-beta")
         }
         
-        let allMessages = buildMessageArray()
+        // Get full system prompt asynchronously to avoid race condition
+        let sysPrompt = await getSystemPromptAsync()
+        let allMessages = buildMessageArray(withSystemPrompt: sysPrompt)
         
         // Anthropic format is different - separate system from messages
         var bodyDict: [String: Any] = [
@@ -3007,7 +3040,7 @@ final class ChatSession: ObservableObject, Identifiable {
         ]
         
         // Add system prompt
-        bodyDict["system"] = systemPrompt
+        bodyDict["system"] = sysPrompt
         
         // Convert messages (exclude system role for Anthropic)
         let anthropicMessages = allMessages.filter { $0.role != "system" }.map { msg -> [String: Any] in
@@ -3033,7 +3066,8 @@ final class ChatSession: ObservableObject, Identifiable {
         return try await streamAnthropicResponse(
             request: request,
             assistantIndex: assistantIndex,
-            modelName: model
+            modelName: model,
+            systemPromptUsed: sysPrompt
         )
     }
     
@@ -3043,7 +3077,9 @@ final class ChatSession: ObservableObject, Identifiable {
         let content: String
     }
     
-    private func buildMessageArray() -> [SimpleMessage] {
+    /// Build message array for LLM calls. Pass the system prompt explicitly to ensure
+    /// async callers can await full system info before building messages.
+    private func buildMessageArray(withSystemPrompt sysPrompt: String) -> [SimpleMessage] {
         // Exclude agent event bubbles and assistant placeholders from the provider context
         let conversational = messages.filter { msg in
             guard msg.role != "system" else { return false }
@@ -3068,7 +3104,7 @@ final class ChatSession: ObservableObject, Identifiable {
         // Context window management: estimate ~4 chars per token
         // Most models have 4K-128K token limits. We'll aim for ~100K chars max
         let maxContextChars = 100_000
-        let systemPromptChars = systemPrompt.count
+        let systemPromptChars = sysPrompt.count
         let availableChars = maxContextChars - systemPromptChars
         
         // Calculate total message size
@@ -3092,9 +3128,14 @@ final class ChatSession: ObservableObject, Identifiable {
             return msg
         }
         
-        var result = [SimpleMessage(role: "system", content: systemPrompt)]
+        var result = [SimpleMessage(role: "system", content: sysPrompt)]
         result += allConv
         return result
+    }
+    
+    /// Convenience version using the synchronous system prompt (for token estimation only)
+    private func buildMessageArray() -> [SimpleMessage] {
+        return buildMessageArray(withSystemPrompt: systemPrompt)
     }
     
     // MARK: - SSE Response Streaming (OpenAI-compatible)
@@ -3194,7 +3235,8 @@ final class ChatSession: ObservableObject, Identifiable {
     private func streamAnthropicResponse(
         request: URLRequest,
         assistantIndex: Int,
-        modelName: String
+        modelName: String,
+        systemPromptUsed: String? = nil
     ) async throws -> String {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -3281,7 +3323,8 @@ final class ChatSession: ObservableObject, Identifiable {
         messages = messages
         
         // Record token usage
-        let finalInputTokens = inputTokens ?? TokenEstimator.estimateTokens(systemPrompt + messages.map { $0.content }.joined())
+        let sysPromptForEstimation = systemPromptUsed ?? systemPrompt
+        let finalInputTokens = inputTokens ?? TokenEstimator.estimateTokens(sysPromptForEstimation + messages.map { $0.content }.joined())
         let finalOutputTokens = outputTokens ?? TokenEstimator.estimateTokens(accumulated)
         let isEstimated = inputTokens == nil || outputTokens == nil
         
@@ -3397,10 +3440,8 @@ final class ChatSession: ObservableObject, Identifiable {
                     self.availableModels = names
                     if names.isEmpty {
                         self.modelFetchError = "No models found on Ollama"
-                    } else if self.model.isEmpty {
-                        // Only auto-select if no model is set; preserve user's persisted model
-                        self.model = names.first ?? self.model
                     }
+                    // Don't auto-select - let user choose their model
                     self.updateContextLimit()
                     self.persistSettings()
                 }
@@ -3435,10 +3476,8 @@ final class ChatSession: ObservableObject, Identifiable {
                     self.availableModels = ids
                     if ids.isEmpty {
                         self.modelFetchError = "No models available"
-                    } else if self.model.isEmpty {
-                        // Only auto-select if no model is set; preserve user's persisted model
-                        self.model = ids.first ?? self.model
                     }
+                    // Don't auto-select - let user choose their model
                     self.updateContextLimit()
                     self.persistSettings()
                 }
@@ -3460,9 +3499,12 @@ final class ChatSession: ObservableObject, Identifiable {
     /// Persist messages with debouncing to reduce disk I/O during streaming
     func persistMessages() {
         persistDebounceItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            try? PersistenceService.saveJSON(self.messages, to: self.messagesFileName)
+        // Capture messages immediately to avoid race conditions
+        let messagesToSave = messages
+        let fileName = messagesFileName
+        let item = DispatchWorkItem {
+            // Save on background thread
+            PersistenceService.saveJSONInBackground(messagesToSave, to: fileName)
         }
         persistDebounceItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + persistDebounceInterval, execute: item)
@@ -3472,6 +3514,7 @@ final class ChatSession: ObservableObject, Identifiable {
     func persistMessagesImmediately() {
         persistDebounceItem?.cancel()
         persistDebounceItem = nil
+        // Synchronous save for critical paths (app quit)
         try? PersistenceService.saveJSON(messages, to: messagesFileName)
     }
     
@@ -3494,13 +3537,15 @@ final class ChatSession: ObservableObject, Identifiable {
             maxTokens: maxTokens,
             reasoningEffort: reasoningEffort,
             providerType: providerType,
+            hasExplicitlyConfiguredProvider: hasExplicitlyConfiguredProvider,
             customLocalContextSize: customLocalContextSize,
             currentContextTokens: currentContextTokens,
             contextLimitTokens: contextLimitTokens,
             lastSummarizationDate: lastSummarizationDate,
             summarizationCount: summarizationCount
         )
-        try? PersistenceService.saveJSON(settings, to: "session-settings-\(id.uuidString).json")
+        // Use background save for settings (not critical path)
+        PersistenceService.saveJSONInBackground(settings, to: "session-settings-\(id.uuidString).json")
     }
     
     func loadSettings() {
@@ -3518,6 +3563,9 @@ final class ChatSession: ObservableObject, Identifiable {
             maxTokens = settings.maxTokens ?? 4096
             reasoningEffort = settings.reasoningEffort ?? .medium
             providerType = settings.providerType ?? .local(.ollama)
+            
+            // Load provider configuration status (defaults to false for backward compatibility)
+            hasExplicitlyConfiguredProvider = settings.hasExplicitlyConfiguredProvider ?? false
             
             // Load context size settings
             customLocalContextSize = settings.customLocalContextSize
@@ -3551,6 +3599,7 @@ final class ChatSession: ObservableObject, Identifiable {
         apiBaseURL = provider.baseURL
         apiKey = CloudAPIKeyManager.shared.getAPIKey(for: provider)
         model = "" // Reset model selection
+        hasExplicitlyConfiguredProvider = true // User explicitly chose this provider
         availableModels = CuratedModels.models(for: provider).map { $0.id }
         persistSettings()
     }
@@ -3563,6 +3612,7 @@ final class ChatSession: ObservableObject, Identifiable {
         apiBaseURL = AgentSettings.shared.baseURL(for: provider)
         apiKey = nil
         model = "" // Reset model selection
+        hasExplicitlyConfiguredProvider = true // User explicitly chose this provider
         persistSettings()
         Task { await fetchAvailableModels() }
     }
@@ -3663,6 +3713,9 @@ private struct SessionSettings: Codable {
     let maxTokens: Int?
     let reasoningEffort: ReasoningEffort?
     let providerType: ProviderType?
+    
+    // Provider configuration tracking
+    let hasExplicitlyConfiguredProvider: Bool?
     
     // Context size settings
     let customLocalContextSize: Int?

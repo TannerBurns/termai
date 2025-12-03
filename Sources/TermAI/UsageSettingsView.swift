@@ -469,6 +469,7 @@ struct UsageSettingsView: View {
         case .reflection: return .teal
         case .terminalSuggestion: return .mint
         case .suggestionResearch: return .cyan
+        case .testRunner: return .pink
         }
     }
     

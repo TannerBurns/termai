@@ -109,6 +109,9 @@ struct TermAIApp: App {
                 .environmentObject(tabsStore)
                 .preferredColorScheme(settings.appAppearance.colorScheme)
                 .onAppear {
+                    // Preload system info on background thread to avoid blocking later
+                    SystemInfo.preloadCache()
+                    
                     // Initialize agent logging if enabled
                     AgentDebugConfig.initializeLogging()
                     

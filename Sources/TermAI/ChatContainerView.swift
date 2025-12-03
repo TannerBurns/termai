@@ -15,6 +15,10 @@ struct ChatContainerView: View {
     // File change approval state
     @State private var pendingFileChangeApproval: PendingFileChangeApproval? = nil
     
+    // Test runner state
+    @State private var showingTestRunner: Bool = false
+    @StateObject private var testRunnerWrapper = TestRunnerAgentWrapper(agent: nil)
+    
     var body: some View {
         VStack(spacing: 0) {
             // Main Chat header with provider/model info
@@ -114,6 +118,13 @@ struct ChatContainerView: View {
                             )
                         }
                     }
+                    
+                    // Test Runner button with progress
+                    TestRunnerButton(
+                        agent: testRunnerWrapper.agent,
+                        onStart: { startTestRunner() },
+                        onShowPanel: { showingTestRunner = true }
+                    )
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -125,11 +136,17 @@ struct ChatContainerView: View {
             // Selected chat tab content (without redundant header)
             if let selectedSession = tabsManager.selectedSession,
                let index = tabsManager.sessions.firstIndex(where: { $0.id == selectedSession.id }) {
-                ChatTabContentView(
-                    session: selectedSession,
-                    tabIndex: index,
-                    ptyModel: ptyModel
-                )
+                Group {
+                    if selectedSession.isConfigured {
+                        ChatTabContentView(
+                            session: selectedSession,
+                            tabIndex: index,
+                            ptyModel: ptyModel
+                        )
+                    } else {
+                        SessionSetupPromptView(session: selectedSession)
+                    }
+                }
                 .id(selectedSession.id) // Force view recreation when session changes
                 .onReceive(NotificationCenter.default.publisher(for: .TermAIExecuteCommand)) { note in
                     // When a command is executed, set up prompt-based capture
@@ -250,6 +267,68 @@ struct ChatContainerView: View {
                     pendingFileChangeApproval = nil
                 }
             )
+        }
+        .sheet(isPresented: $showingTestRunner) {
+            if let agent = testRunnerWrapper.agent {
+                TestRunnerPanel(
+                    agent: agent,
+                    onDismiss: {
+                        showingTestRunner = false
+                    },
+                    onRerun: {
+                        // Create fresh agent with current CWD and re-run
+                        startTestRunner()
+                    },
+                    onRerunFailed: {
+                        Task {
+                            await agent.rerunFailed()
+                        }
+                    },
+                    onRunFix: { command in
+                        Task {
+                            await agent.runFixAndRetry(command: command)
+                        }
+                    }
+                )
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .TermAITestRunnerShow)) { _ in
+            startTestRunner()
+            showingTestRunner = true
+        }
+        .onChange(of: ptyModel.currentWorkingDirectory) { _ in
+            // Reset test runner when directory changes so user can run tests in the new location
+            if testRunnerWrapper.agent != nil {
+                testRunnerWrapper.setAgent(nil)
+                showingTestRunner = false
+            }
+        }
+    }
+    
+    // MARK: - Test Runner Helpers
+    
+    /// Start a new test run in the background (creates agent if needed)
+    private func startTestRunner() {
+        guard let session = tabsManager.selectedSession else { return }
+        
+        // Get project path from terminal CWD or fallback
+        let projectPath = ptyModel.currentWorkingDirectory.isEmpty 
+            ? FileManager.default.currentDirectoryPath 
+            : ptyModel.currentWorkingDirectory
+        
+        // Create new agent with current session's provider/model
+        let agent = TestRunnerAgent(
+            provider: session.providerType,
+            modelId: session.model,
+            projectPath: projectPath
+        )
+        
+        // Update the wrapper with the new agent
+        testRunnerWrapper.setAgent(agent)
+        
+        // Start the test run in background - UI will update via @ObservedObject wrapper
+        Task {
+            await agent.runTests()
         }
     }
 }
@@ -1545,6 +1624,421 @@ private struct StatRow: View {
             Text(value)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundColor(.primary)
+        }
+    }
+}
+
+// MARK: - Session Setup Prompt View
+
+/// Shown when a chat session has no model configured yet
+private struct SessionSetupPromptView: View {
+    @ObservedObject var session: ChatSession
+    @ObservedObject private var agentSettings = AgentSettings.shared
+    @Environment(\.colorScheme) var colorScheme
+    
+    private var availableCloudProviders: [CloudProvider] {
+        CloudAPIKeyManager.shared.availableProviders
+    }
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 32) {
+                Spacer()
+                    .frame(height: 40)
+                
+                // Icon and title
+                VStack(spacing: 16) {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color.accentColor.opacity(0.2), Color.accentColor.opacity(0.1)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 80, height: 80)
+                        
+                        Image(systemName: "bubble.left.and.bubble.right.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [Color.accentColor, Color.accentColor.opacity(0.7)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    }
+                    
+                    VStack(spacing: 8) {
+                        Text("Welcome to TermAI")
+                            .font(.system(size: 24, weight: .bold))
+                        
+                        Text("Select a provider and model to start chatting")
+                            .font(.system(size: 14))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                // Setup cards
+                VStack(spacing: 16) {
+                    // Step 1: Provider
+                    setupCard(
+                        step: 1,
+                        title: "Choose a Provider",
+                        subtitle: session.hasExplicitlyConfiguredProvider ? session.providerName : "No provider selected",
+                        isComplete: session.hasExplicitlyConfiguredProvider,
+                        icon: providerIcon
+                    ) {
+                        providerPicker
+                    }
+                    
+                    // Step 2: Model
+                    setupCard(
+                        step: 2,
+                        title: "Select a Model",
+                        subtitle: session.model.isEmpty ? "No model selected" : session.model,
+                        isComplete: !session.model.isEmpty,
+                        icon: "cpu"
+                    ) {
+                        modelPicker
+                    }
+                }
+                .frame(maxWidth: 400)
+                
+                // Ready indicator
+                if session.isConfigured {
+                    VStack(spacing: 12) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("Ready to chat!")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(.green)
+                        }
+                        
+                        Text("Start typing in the message field below")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 8)
+                }
+                
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 32)
+        }
+        .background(
+            colorScheme == .dark
+                ? Color(white: 0.08)
+                : Color(white: 0.96)
+        )
+        .onAppear {
+            // Only fetch models after user has explicitly chosen a provider
+            // This ensures no network requests are made without user consent
+            if session.hasExplicitlyConfiguredProvider && session.availableModels.isEmpty {
+                Task { await session.fetchAvailableModels() }
+            }
+        }
+    }
+    
+    private var providerIcon: String {
+        if case .cloud(let provider) = session.providerType {
+            return provider.icon
+        }
+        return "cube.fill"
+    }
+    
+    @ViewBuilder
+    private func setupCard<Content: View>(
+        step: Int,
+        title: String,
+        subtitle: String,
+        isComplete: Bool,
+        icon: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                // Step indicator
+                ZStack {
+                    Circle()
+                        .fill(isComplete ? Color.green : Color.orange)
+                        .frame(width: 24, height: 24)
+                    
+                    if isComplete {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                    } else {
+                        Text("\(step)")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                    }
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(subtitle)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                Image(systemName: icon)
+                    .font(.system(size: 16))
+                    .foregroundColor(.secondary)
+            }
+            
+            content()
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(colorScheme == .dark ? Color(white: 0.12) : Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(
+                    isComplete ? Color.green.opacity(0.3) : Color.orange.opacity(0.3),
+                    lineWidth: 1
+                )
+        )
+    }
+    
+    @ViewBuilder
+    private var providerPicker: some View {
+        VStack(spacing: 8) {
+            // Cloud providers section
+            if !availableCloudProviders.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Cloud Providers")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 4)
+                    
+                    ForEach(availableCloudProviders, id: \.rawValue) { provider in
+                        providerRow(
+                            name: provider.rawValue,
+                            icon: provider.icon,
+                            description: provider == .openai ? "GPT-4, GPT-5, o-series models" : "Claude 3.5, Claude 4 models",
+                            isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .cloud(provider),
+                            color: provider == .openai ? .green : .orange
+                        ) {
+                            session.switchToCloudProvider(provider)
+                        }
+                    }
+                }
+            }
+            
+            // Local providers section
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Local Providers")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 4)
+                
+                providerRow(
+                    name: "Ollama",
+                    icon: "cube.fill",
+                    description: "Run models locally with Ollama",
+                    isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .local(.ollama),
+                    color: .blue
+                ) {
+                    session.switchToLocalProvider(.ollama)
+                }
+                
+                providerRow(
+                    name: "LM Studio",
+                    icon: "sparkles",
+                    description: "Local models via LM Studio",
+                    isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .local(.lmStudio),
+                    color: .purple
+                ) {
+                    session.switchToLocalProvider(.lmStudio)
+                }
+                
+                providerRow(
+                    name: "vLLM",
+                    icon: "bolt.fill",
+                    description: "High-performance inference server",
+                    isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .local(.vllm),
+                    color: .orange
+                ) {
+                    session.switchToLocalProvider(.vllm)
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func providerRow(
+        name: String,
+        icon: String,
+        description: String,
+        isSelected: Bool,
+        color: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                // Provider icon
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isSelected ? color : color.opacity(0.15))
+                        .frame(width: 36, height: 36)
+                    
+                    Image(systemName: icon)
+                        .font(.system(size: 16))
+                        .foregroundColor(isSelected ? .white : color)
+                }
+                
+                // Provider info
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                        .foregroundColor(.primary)
+                    Text(description)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                // Selection indicator
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundColor(color)
+                }
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? color.opacity(0.1) : Color.primary.opacity(0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? color.opacity(0.3) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    @ViewBuilder
+    private var modelPicker: some View {
+        if !session.hasExplicitlyConfiguredProvider {
+            // Show prompt to select provider first
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.up")
+                    .foregroundColor(.secondary)
+                Text("Select a provider above first")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+        } else if session.availableModels.isEmpty {
+            if let error = session.modelFetchError {
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    Button("Retry") {
+                        Task { await session.fetchAvailableModels(forceRefresh: true) }
+                    }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                    Text("Loading models...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
+            }
+        } else {
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(session.availableModels, id: \.self) { modelId in
+                        let isSelected = modelId == session.model
+                        let displayName = CuratedModels.find(id: modelId)?.displayName ?? modelId
+                        let isReasoning = CuratedModels.supportsReasoning(modelId: modelId)
+                        
+                        Button(action: {
+                            session.model = modelId
+                            session.updateContextLimit()
+                            session.persistSettings()
+                        }) {
+                            HStack(spacing: 10) {
+                                // Model icon - brain for reasoning, cpu for others
+                                if isReasoning {
+                                    ReasoningBrainIcon(size: .small, showGlow: isSelected)
+                                } else {
+                                    Image(systemName: "cpu")
+                                        .font(.system(size: 14))
+                                        .foregroundColor(isSelected ? .accentColor : .secondary)
+                                }
+                                
+                                // Model name
+                                Text(displayName)
+                                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                                    .foregroundColor(.primary)
+                                    .lineLimit(1)
+                                
+                                Spacer()
+                                
+                                // Reasoning badge
+                                if isReasoning {
+                                    Text("Thinking")
+                                        .font(.system(size: 9, weight: .medium))
+                                        .foregroundColor(.purple)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(
+                                            Capsule()
+                                                .fill(Color.purple.opacity(0.15))
+                                        )
+                                }
+                                
+                                // Selection indicator
+                                if isSelected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 16))
+                                        .foregroundColor(.accentColor)
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(isSelected ? Color.accentColor.opacity(0.1) : Color.primary.opacity(0.04))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(isSelected ? Color.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxHeight: 250) // Limit height to prevent overflow
         }
     }
 }

@@ -93,11 +93,37 @@ final class AppTab: Identifiable, ObservableObject {
 final class TabsStore: ObservableObject {
     @Published var tabs: [AppTab]
     @Published var selectedId: UUID
+    @Published private(set) var isLoading: Bool = true
     
     init() {
-        // Try to restore previous tabs
-        if let manifest = try? PersistenceService.loadJSON(TabsManifest.self, from: "tabs-manifest.json"),
-           !manifest.tabIds.isEmpty {
+        // Start with a temporary tab - will be replaced by async load
+        let first = AppTab(title: "Tab 1")
+        self.tabs = [first]
+        self.selectedId = first.id
+        
+        // Load saved tabs asynchronously to avoid blocking main thread
+        Task { @MainActor in
+            await loadTabsAsync()
+        }
+    }
+    
+    /// Load saved tabs from disk asynchronously
+    private func loadTabsAsync() async {
+        // Load manifest on background thread
+        let manifest: TabsManifest? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = try? PersistenceService.loadJSON(TabsManifest.self, from: "tabs-manifest.json")
+                continuation.resume(returning: result)
+            }
+        }
+        
+        // Process on main actor
+        if let manifest = manifest, !manifest.tabIds.isEmpty {
+            // Clean up the temporary first tab
+            if tabs.count == 1 && tabs.first?.chatTabsManager.sessions.isEmpty != false {
+                tabs.first?.cleanup()
+            }
+            
             var restoredTabs: [AppTab] = []
             for tabId in manifest.tabIds {
                 // Create a ChatTabsManager that loads its sessions for this tab
@@ -107,12 +133,10 @@ final class TabsStore: ObservableObject {
             }
             self.tabs = restoredTabs
             self.selectedId = manifest.selectedTabId ?? restoredTabs.first!.id
-        } else {
-            // Create first tab
-            let first = AppTab(title: "Tab 1")
-            self.tabs = [first]
-            self.selectedId = first.id
         }
+        // else: keep the default tab created in init
+        
+        isLoading = false
     }
     
     var selected: AppTab? { tabs.first(where: { $0.id == selectedId }) }
