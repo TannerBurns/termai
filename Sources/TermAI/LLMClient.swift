@@ -3,6 +3,18 @@ import os.log
 
 private let llmLogger = Logger(subsystem: "com.termai.app", category: "LLMClient")
 
+// MARK: - Completion Result with Usage
+
+/// Result of an LLM completion that includes token usage for real-time tracking
+struct LLMCompletionResult {
+    let content: String
+    let promptTokens: Int
+    let completionTokens: Int
+    let isEstimated: Bool
+    
+    var totalTokens: Int { promptTokens + completionTokens }
+}
+
 /// Lightweight client for one-shot LLM text completions
 /// Uses ModelDefinition for model capabilities (reasoning, context size)
 /// Shared across ChatSession and TerminalSuggestionService to avoid code duplication
@@ -36,6 +48,43 @@ actor LLMClient {
         timeout: TimeInterval = 30,
         requestType: UsageRequestType = .chat
     ) async throws -> String {
+        let result = try await completeWithUsage(
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt,
+            provider: provider,
+            modelId: modelId,
+            reasoningEffort: reasoningEffort,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            timeout: timeout,
+            requestType: requestType
+        )
+        return result.content
+    }
+    
+    /// Perform a one-shot text completion and return token usage for real-time tracking
+    /// - Parameters:
+    ///   - systemPrompt: System prompt for the model
+    ///   - userPrompt: User prompt/query
+    ///   - provider: The provider type (cloud or local)
+    ///   - modelId: Model identifier
+    ///   - reasoningEffort: Reasoning effort level (for models that support it)
+    ///   - temperature: Temperature for generation (ignored for reasoning models)
+    ///   - maxTokens: Maximum tokens to generate
+    ///   - timeout: Request timeout in seconds
+    ///   - requestType: Type of request for usage tracking
+    /// - Returns: LLMCompletionResult containing the response content and token usage
+    func completeWithUsage(
+        systemPrompt: String,
+        userPrompt: String,
+        provider: ProviderType,
+        modelId: String,
+        reasoningEffort: ReasoningEffort = .none,
+        temperature: Double = 0.3,
+        maxTokens: Int = 500,
+        timeout: TimeInterval = 30,
+        requestType: UsageRequestType = .chat
+    ) async throws -> LLMCompletionResult {
         // Check for cancellation before making network request
         try Task.checkCancellation()
         
@@ -88,7 +137,7 @@ actor LLMClient {
         maxTokens: Int,
         timeout: TimeInterval,
         requestType: UsageRequestType
-    ) async throws -> String {
+    ) async throws -> LLMCompletionResult {
         let url = URL(string: "https://api.openai.com/v1/chat/completions")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -153,11 +202,12 @@ actor LLMClient {
             throw LLMClientError.emptyResponse
         }
         
-        // Record token usage
+        // Calculate token usage
         let promptTokens = decoded.usage?.prompt_tokens ?? estimatedPromptTokens
         let completionTokens = decoded.usage?.completion_tokens ?? TokenEstimator.estimateTokens(content)
         let isEstimated = decoded.usage == nil
         
+        // Record to historical tracker
         await TokenUsageTracker.shared.recordUsage(
             provider: "OpenAI",
             model: modelId,
@@ -167,7 +217,12 @@ actor LLMClient {
             requestType: requestType
         )
         
-        return content
+        return LLMCompletionResult(
+            content: content,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            isEstimated: isEstimated
+        )
     }
     
     // MARK: - Anthropic
@@ -180,7 +235,7 @@ actor LLMClient {
         maxTokens: Int,
         timeout: TimeInterval,
         requestType: UsageRequestType
-    ) async throws -> String {
+    ) async throws -> LLMCompletionResult {
         let url = URL(string: "https://api.anthropic.com/v1/messages")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -265,11 +320,12 @@ actor LLMClient {
             throw LLMClientError.emptyResponse
         }
         
-        // Record token usage
+        // Calculate token usage
         let promptTokens = decoded.usage?.input_tokens ?? estimatedPromptTokens
         let completionTokens = decoded.usage?.output_tokens ?? TokenEstimator.estimateTokens(content)
         let isEstimated = decoded.usage == nil
         
+        // Record to historical tracker
         await TokenUsageTracker.shared.recordUsage(
             provider: "Anthropic",
             model: modelId,
@@ -279,7 +335,12 @@ actor LLMClient {
             requestType: requestType
         )
         
-        return content
+        return LLMCompletionResult(
+            content: content,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            isEstimated: isEstimated
+        )
     }
     
     // MARK: - Local LLM
@@ -292,7 +353,7 @@ actor LLMClient {
         temperature: Double,
         timeout: TimeInterval,
         requestType: UsageRequestType
-    ) async throws -> String {
+    ) async throws -> LLMCompletionResult {
         // Use the URL from global AgentSettings
         let baseURL = AgentSettings.shared.baseURL(for: localProvider)
         let url = baseURL.appendingPathComponent("chat/completions")
@@ -362,11 +423,12 @@ actor LLMClient {
             throw LLMClientError.emptyResponse
         }
         
-        // Record token usage
+        // Calculate token usage
         let finalPromptTokens = promptTokens ?? estimatedPromptTokens
         let finalCompletionTokens = completionTokens ?? TokenEstimator.estimateTokens(content)
         let isEstimated = promptTokens == nil || completionTokens == nil
         
+        // Record to historical tracker
         await TokenUsageTracker.shared.recordUsage(
             provider: localProvider.rawValue,
             model: modelId,
@@ -376,7 +438,12 @@ actor LLMClient {
             requestType: requestType
         )
         
-        return content
+        return LLMCompletionResult(
+            content: content,
+            promptTokens: finalPromptTokens,
+            completionTokens: finalCompletionTokens,
+            isEstimated: isEstimated
+        )
     }
 }
 
