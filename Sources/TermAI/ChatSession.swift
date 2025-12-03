@@ -1291,12 +1291,9 @@ final class ChatSession: ObservableObject, Identifiable {
                     agentContextLog.append("RESULT: \(resultOutput.prefix(AgentSettings.shared.maxOutputCapture))")
                     
                     // Include file change info in the result message if available
-                    // Skip if result already displayed (e.g., file change rejection)
-                    if !result.skipResultMessage {
-                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: result.success ? "Tool succeeded" : "Tool failed", details: String(resultOutput.prefix(500)), command: nil, output: resultOutput, collapsed: true, fileChange: result.fileChange)))
-                        messages = messages
-                        persistMessages()
-                    }
+                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: result.success ? "Tool succeeded" : "Tool failed", details: String(resultOutput.prefix(500)), command: nil, output: resultOutput, collapsed: true, fileChange: result.fileChange)))
+                    messages = messages
+                    persistMessages()
                     
                     // Update checklist item status
                     if let itemId = workingOnChecklistItem, var checklist = agentChecklist {
@@ -2560,7 +2557,7 @@ final class ChatSession: ObservableObject, Identifiable {
                     ))
                     messages = messages
                     persistMessages()
-                    return .failure("File change rejected by user", fileChange: fileChange, skipResultMessage: true)
+                    return .failure("File change rejected by user")
                 }
                 
                 // Update status to show approval
