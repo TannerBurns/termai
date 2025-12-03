@@ -303,6 +303,10 @@ final class ChatSession: ObservableObject, Identifiable {
     // Provider type tracking
     @Published var providerType: ProviderType = .local(.ollama)
     
+    /// Whether the user has explicitly configured the provider (not just using defaults)
+    /// This must be true along with model selection before the session is considered configured
+    @Published var hasExplicitlyConfiguredProvider: Bool = false
+    
     // Context usage tracking
     @Published var currentContextTokens: Int = 0
     @Published var contextLimitTokens: Int = 32_000
@@ -380,6 +384,13 @@ final class ChatSession: ObservableObject, Identifiable {
     /// Whether the current model supports reasoning/thinking
     var currentModelSupportsReasoning: Bool {
         CuratedModels.supportsReasoning(modelId: model)
+    }
+    
+    /// Whether the session is fully configured (provider explicitly chosen AND model selected)
+    /// Used to determine if we should show setup prompt instead of chat
+    /// This ensures no data is sent to any API without explicit user consent
+    var isConfigured: Bool {
+        hasExplicitlyConfiguredProvider && !model.isEmpty
     }
     
     init(
@@ -3397,10 +3408,8 @@ final class ChatSession: ObservableObject, Identifiable {
                     self.availableModels = names
                     if names.isEmpty {
                         self.modelFetchError = "No models found on Ollama"
-                    } else if self.model.isEmpty {
-                        // Only auto-select if no model is set; preserve user's persisted model
-                        self.model = names.first ?? self.model
                     }
+                    // Don't auto-select - let user choose their model
                     self.updateContextLimit()
                     self.persistSettings()
                 }
@@ -3435,10 +3444,8 @@ final class ChatSession: ObservableObject, Identifiable {
                     self.availableModels = ids
                     if ids.isEmpty {
                         self.modelFetchError = "No models available"
-                    } else if self.model.isEmpty {
-                        // Only auto-select if no model is set; preserve user's persisted model
-                        self.model = ids.first ?? self.model
                     }
+                    // Don't auto-select - let user choose their model
                     self.updateContextLimit()
                     self.persistSettings()
                 }
@@ -3498,6 +3505,7 @@ final class ChatSession: ObservableObject, Identifiable {
             maxTokens: maxTokens,
             reasoningEffort: reasoningEffort,
             providerType: providerType,
+            hasExplicitlyConfiguredProvider: hasExplicitlyConfiguredProvider,
             customLocalContextSize: customLocalContextSize,
             currentContextTokens: currentContextTokens,
             contextLimitTokens: contextLimitTokens,
@@ -3523,6 +3531,9 @@ final class ChatSession: ObservableObject, Identifiable {
             maxTokens = settings.maxTokens ?? 4096
             reasoningEffort = settings.reasoningEffort ?? .medium
             providerType = settings.providerType ?? .local(.ollama)
+            
+            // Load provider configuration status (defaults to false for backward compatibility)
+            hasExplicitlyConfiguredProvider = settings.hasExplicitlyConfiguredProvider ?? false
             
             // Load context size settings
             customLocalContextSize = settings.customLocalContextSize
@@ -3556,6 +3567,7 @@ final class ChatSession: ObservableObject, Identifiable {
         apiBaseURL = provider.baseURL
         apiKey = CloudAPIKeyManager.shared.getAPIKey(for: provider)
         model = "" // Reset model selection
+        hasExplicitlyConfiguredProvider = true // User explicitly chose this provider
         availableModels = CuratedModels.models(for: provider).map { $0.id }
         persistSettings()
     }
@@ -3568,6 +3580,7 @@ final class ChatSession: ObservableObject, Identifiable {
         apiBaseURL = AgentSettings.shared.baseURL(for: provider)
         apiKey = nil
         model = "" // Reset model selection
+        hasExplicitlyConfiguredProvider = true // User explicitly chose this provider
         persistSettings()
         Task { await fetchAvailableModels() }
     }
@@ -3668,6 +3681,9 @@ private struct SessionSettings: Codable {
     let maxTokens: Int?
     let reasoningEffort: ReasoningEffort?
     let providerType: ProviderType?
+    
+    // Provider configuration tracking
+    let hasExplicitlyConfiguredProvider: Bool?
     
     // Context size settings
     let customLocalContextSize: Int?

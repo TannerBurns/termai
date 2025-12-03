@@ -89,6 +89,7 @@ enum PersistenceService {
     }
     
     /// Delete all TermAI data by removing the entire app support directory
+    /// and clearing UserDefaults entries
     /// This is a destructive operation - the app should quit after calling this
     static func clearAllData() throws {
         let fm = FileManager.default
@@ -102,6 +103,17 @@ enum PersistenceService {
         if fm.fileExists(atPath: url.path) {
             try fm.removeItem(at: url)
         }
+        
+        // Also clear UserDefaults entries (model cache, etc.)
+        let defaults = UserDefaults.standard
+        let allKeys = defaults.dictionaryRepresentation().keys
+        for key in allKeys {
+            // Clear model cache entries
+            if key.hasPrefix("modelCache_") {
+                defaults.removeObject(forKey: key)
+            }
+        }
+        defaults.synchronize()
     }
 }
 
