@@ -1,4 +1,39 @@
 import Foundation
+import SwiftUI
+
+/// App appearance mode for light/dark theme control
+enum AppearanceMode: String, Codable, CaseIterable {
+    case system = "System"
+    case light = "Light"
+    case dark = "Dark"
+    
+    /// Convert to SwiftUI ColorScheme for preferredColorScheme modifier
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+    
+    /// Icon for the mode
+    var icon: String {
+        switch self {
+        case .system: return "circle.lefthalf.filled"
+        case .light: return "sun.max.fill"
+        case .dark: return "moon.fill"
+        }
+    }
+    
+    /// Description for the mode
+    var description: String {
+        switch self {
+        case .system: return "Follow system appearance"
+        case .light: return "Always use light mode"
+        case .dark: return "Always use dark mode"
+        }
+    }
+}
 
 /// Global agent settings that control the terminal agent's behavior
 /// These settings are shared across all sessions and persisted to disk
@@ -81,6 +116,11 @@ final class AgentSettings: ObservableObject, Codable {
     
     /// Enable agent mode by default for new chat sessions
     @Published var agentModeEnabledByDefault: Bool = false
+    
+    // MARK: - Appearance
+    
+    /// App appearance mode (light, dark, or system)
+    @Published var appAppearance: AppearanceMode = .system
     
     // MARK: - Safety
     
@@ -172,6 +212,7 @@ final class AgentSettings: ObservableObject, Codable {
         case fileLockTimeout
         case enableFileMerging
         case agentModeEnabledByDefault
+        case appAppearance
         case requireCommandApproval
         case autoApproveReadOnly
         case verboseLogging
@@ -212,6 +253,7 @@ final class AgentSettings: ObservableObject, Codable {
         fileLockTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .fileLockTimeout) ?? 30.0
         enableFileMerging = try container.decodeIfPresent(Bool.self, forKey: .enableFileMerging) ?? true
         agentModeEnabledByDefault = try container.decodeIfPresent(Bool.self, forKey: .agentModeEnabledByDefault) ?? false
+        appAppearance = try container.decodeIfPresent(AppearanceMode.self, forKey: .appAppearance) ?? .system
         requireCommandApproval = try container.decodeIfPresent(Bool.self, forKey: .requireCommandApproval) ?? false
         autoApproveReadOnly = try container.decodeIfPresent(Bool.self, forKey: .autoApproveReadOnly) ?? true
         verboseLogging = try container.decodeIfPresent(Bool.self, forKey: .verboseLogging) ?? false
@@ -250,6 +292,7 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(fileLockTimeout, forKey: .fileLockTimeout)
         try container.encode(enableFileMerging, forKey: .enableFileMerging)
         try container.encode(agentModeEnabledByDefault, forKey: .agentModeEnabledByDefault)
+        try container.encode(appAppearance, forKey: .appAppearance)
         try container.encode(requireCommandApproval, forKey: .requireCommandApproval)
         try container.encode(autoApproveReadOnly, forKey: .autoApproveReadOnly)
         try container.encode(verboseLogging, forKey: .verboseLogging)
@@ -342,6 +385,7 @@ final class AgentSettings: ObservableObject, Codable {
         fileLockTimeout = 30.0
         enableFileMerging = true
         agentModeEnabledByDefault = false
+        appAppearance = .system
         requireCommandApproval = false
         autoApproveReadOnly = true
         verboseLogging = false

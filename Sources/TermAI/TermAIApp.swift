@@ -99,6 +99,7 @@ struct AgentDebugConfig {
 @main
 struct TermAIApp: App {
     @StateObject private var tabsStore = TabsStore()
+    @ObservedObject private var settings = AgentSettings.shared
     @State private var showSettings: Bool = false
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
@@ -106,6 +107,7 @@ struct TermAIApp: App {
         WindowGroup {
             MainContentView()
                 .environmentObject(tabsStore)
+                .preferredColorScheme(settings.appAppearance.colorScheme)
                 .onAppear {
                     // Initialize agent logging if enabled
                     AgentDebugConfig.initializeLogging()
@@ -129,8 +131,10 @@ struct TermAIApp: App {
                     selectedSession: selectedSession,
                     ptyModel: selectedTab.ptyModel
                 )
+                .preferredColorScheme(settings.appAppearance.colorScheme)
             } else {
                 SettingsEmptyStateView()
+                    .preferredColorScheme(settings.appAppearance.colorScheme)
             }
         }
     }
@@ -523,14 +527,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in
                 guard let cmd = note.userInfo?["command"] as? String,
                       let ptyModel = tabsStore?.selected?.ptyModel else { return }
-                // Emit exit code and true physical cwd so agent always knows final location
-                let wrapped = "{ \(cmd) ; RC=$?; echo __TERMAI_RC__=$RC; printf '__TERMAI_CWD__=%s\\n' \"$(pwd -P)\"; }"
-                // Store the original command for echo trimming, not the wrapped version
+                // Send the original command as-is (no wrapping)
+                // Exit code and CWD will be captured transparently after command completes
                 ptyModel.lastSentCommandForCapture = cmd
                 // Mark capture active during command execution
                 ptyModel.captureActive = true
                 ptyModel.markNextOutputStart?()
-                ptyModel.sendInput?(wrapped + "\n")
+                ptyModel.sendInput?(cmd + "\n")
             }
         }
         notificationObservers.append(commandObserver)

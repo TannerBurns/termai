@@ -129,20 +129,24 @@ struct ChatContainerView: View {
                 )
                 .id(selectedSession.id) // Force view recreation when session changes
                 .onReceive(NotificationCenter.default.publisher(for: .TermAIExecuteCommand)) { note in
-                    // When a command is executed, set up marker-based capture
+                    // When a command is executed, set up prompt-based capture
+                    // NO PROBE COMMAND - we capture transparently:
+                    // - CWD: tracked via OSC 7 sequences that shells emit automatically
+                    // - Exit code: captured via OSC 7777 sequences from precmd hook
                     guard let cmd = note.userInfo?["command"] as? String else { return }
                     let sessionIdFromNote = note.userInfo?["sessionId"] as? UUID
                     
-                    // Set up the completion callback - triggered when __TERMAI_RC__ marker is detected
-                    // or after timeout (30s fallback)
-                    ptyModel.onCommandCompletion = { [weak ptyModel] in
+                    // Enqueue the completion callback - supports rapid command sequences
+                    // Each command gets its own callback in a FIFO queue
+                    ptyModel.enqueueCommandCompletion { [weak ptyModel] in
                         guard let ptyModel = ptyModel else { return }
                         
-                        // Grab last output chunk and exit code from the terminal
+                        // Get the command output, CWD (from OSC 7), and exit code (from OSC 7777)
                         let output = ptyModel.lastOutputChunk
-                        let rc = ptyModel.lastExitCode
                         let cwd = ptyModel.currentWorkingDirectory
-                        // Route the finish to the same session id that issued the command (if provided)
+                        let rc = ptyModel.lastExitCode
+                        
+                        // Route the finish to the same session id that issued the command
                         let sid = sessionIdFromNote ?? selectedSession.id
                         NotificationCenter.default.post(name: .TermAICommandFinished, object: nil, userInfo: [
                             "sessionId": sid,
@@ -151,16 +155,15 @@ struct ChatContainerView: View {
                             "cwd": cwd,
                             "exitCode": rc
                         ])
+                        
                         // Clear last-sent marker after capture
                         ptyModel.lastSentCommandForCapture = nil
-                        // Disable capture state to stop heavy updates until next command
-                        ptyModel.captureActive = false
-                        // Clear the completion callback
-                        ptyModel.onCommandCompletion = nil
+                        // Disable capture state only if no more pending commands
+                        // (captureActive will be re-enabled by the next command if any)
                     }
                     
-                    // Start waiting for completion with timeout fallback
-                    ptyModel.startCommandCapture()
+                    // Mark capture active during command execution
+                    ptyModel.captureActive = true
                 }
             } else {
                 Color.clear
@@ -1230,10 +1233,21 @@ struct ContextUsageIndicator: View {
     @State private var isPulsing: Bool = false
     @Environment(\.colorScheme) var colorScheme
     
-    /// Show 0 usage until we have an actual assistant response
-    /// (before that, currentContextTokens just reflects estimated system prompt, not real usage)
+    /// Show context usage when we have meaningful activity:
+    /// - During agent execution (isAgentRunning)
+    /// - When we have a real assistant response
+    /// Before that, currentContextTokens just reflects estimated system prompt, not real usage
     private var displayedTokens: Int {
-        session.hasAssistantResponse ? session.currentContextTokens : 0
+        // Always show during active agent execution
+        if session.isAgentRunning {
+            return session.currentContextTokens
+        }
+        // Also show if we have agent context accumulated (even if not actively running)
+        if session.agentModeEnabled && !session.agentContextLog.isEmpty {
+            return session.currentContextTokens
+        }
+        // For normal chat, show after first assistant response
+        return session.hasAssistantResponse ? session.currentContextTokens : 0
     }
     
     private var usagePercent: Double {

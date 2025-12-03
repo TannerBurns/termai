@@ -111,6 +111,190 @@ struct CommandSuggestion: Identifiable, Codable, Equatable {
     }
 }
 
+// MARK: - Command Classification for Context-Aware History Filtering
+
+/// Classification of a command's context requirements
+enum CommandContextType {
+    case universal           // Works anywhere (ls, pwd, git status, cd ~, etc.)
+    case projectSpecific(ProjectType)  // Requires specific project type (npm→node, cargo→rust)
+    case pathDependent       // References specific paths/files that may not exist elsewhere
+    case ambiguous           // Cannot determine, treat as universal
+}
+
+/// Classifies commands to determine if they're relevant in the current directory context
+struct CommandClassifier {
+    
+    /// Commands that work in any directory
+    private static let universalCommands: Set<String> = [
+        "ls", "ll", "la", "pwd", "clear", "whoami", "date", "cal", "uptime",
+        "which", "where", "type", "alias", "history", "env", "printenv",
+        "echo", "cat", "less", "more", "head", "tail", "wc",
+        "grep", "find", "locate", "tree", "du", "df",
+        "ps", "top", "htop", "kill", "killall",
+        "ssh", "scp", "rsync", "curl", "wget", "ping",
+        "man", "help", "tldr", "brew", "apt", "yum", "pacman",
+        "code", "vim", "nvim", "nano", "emacs", "subl",
+        "open", "pbcopy", "pbpaste", "say"
+    ]
+    
+    /// Commands that require specific project markers
+    private static let projectCommands: [String: (ProjectType, marker: String)] = [
+        // Node.js
+        "npm": (.node, "package.json"),
+        "npx": (.node, "package.json"),
+        "yarn": (.node, "package.json"),
+        "pnpm": (.node, "package.json"),
+        "node": (.node, "package.json"),
+        "bun": (.node, "package.json"),
+        // Swift
+        "swift": (.swift, "Package.swift"),
+        // Rust
+        "cargo": (.rust, "Cargo.toml"),
+        "rustc": (.rust, "Cargo.toml"),
+        // Python
+        "pip": (.python, "requirements.txt"),
+        "pip3": (.python, "requirements.txt"),
+        "python": (.python, "requirements.txt"),
+        "python3": (.python, "requirements.txt"),
+        "pytest": (.python, "pytest.ini"),
+        "poetry": (.python, "pyproject.toml"),
+        "pipenv": (.python, "Pipfile"),
+        // Go
+        "go": (.go, "go.mod"),
+        // Ruby
+        "bundle": (.ruby, "Gemfile"),
+        "rails": (.ruby, "Gemfile"),
+        "rake": (.ruby, "Rakefile"),
+        "gem": (.ruby, "Gemfile"),
+        // Java
+        "mvn": (.java, "pom.xml"),
+        "gradle": (.java, "build.gradle"),
+        "gradlew": (.java, "build.gradle"),
+        // .NET
+        "dotnet": (.dotnet, "*.csproj"),
+        // Generic build
+        "make": (.unknown, "Makefile"),
+        "cmake": (.unknown, "CMakeLists.txt"),
+    ]
+    
+    /// Classify a command to determine its context requirements
+    static func classify(_ command: String, currentCWD: String) -> CommandContextType {
+        let parts = command.trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+        
+        guard let baseCommand = parts.first else { return .ambiguous }
+        
+        // Check for universal commands
+        if universalCommands.contains(baseCommand.lowercased()) {
+            return .universal
+        }
+        
+        // Check for cd command - special handling
+        if baseCommand == "cd" {
+            // cd with no args or ~ is universal
+            if parts.count == 1 { return .universal }
+            let target = parts.dropFirst().joined(separator: " ")
+            if target == "~" || target == "-" || target.hasPrefix("~") || target.hasPrefix("/") {
+                return .universal
+            }
+            // cd to relative paths might not exist elsewhere
+            return .pathDependent
+        }
+        
+        // Check for git - universal if just checking status, project-related for commits/push
+        if baseCommand == "git" {
+            let gitSubcommand = parts.dropFirst().first ?? ""
+            let universalGitCommands = ["status", "log", "branch", "remote", "config", "help", "version"]
+            if universalGitCommands.contains(gitSubcommand) {
+                return .universal
+            }
+            // Other git commands are more project-specific
+            return .projectSpecific(.unknown)
+        }
+        
+        // Check for project-specific commands
+        if let (projectType, _) = projectCommands[baseCommand.lowercased()] {
+            return .projectSpecific(projectType)
+        }
+        
+        // Check for path-dependent commands (references relative paths or specific files)
+        if command.contains("./") || command.contains("../") {
+            return .pathDependent
+        }
+        
+        // Check if command contains what looks like a file/path reference
+        let hasPathLikeArg = parts.dropFirst().contains { arg in
+            arg.contains("/") || arg.contains(".") && !arg.hasPrefix("-")
+        }
+        if hasPathLikeArg {
+            return .pathDependent
+        }
+        
+        return .ambiguous
+    }
+    
+    /// Check if a project-specific command is relevant in the given directory
+    static func isRelevantInDirectory(_ command: String, cwd: String, envContext: EnvironmentContext) -> Bool {
+        let classification = classify(command, currentCWD: cwd)
+        
+        switch classification {
+        case .universal:
+            return true
+            
+        case .projectSpecific(let requiredType):
+            // Check if the current directory has the right project type
+            if requiredType == .unknown {
+                // Generic project command - allow if in any project
+                return envContext.projectType != .unknown
+            }
+            return envContext.projectType == requiredType
+            
+        case .pathDependent:
+            // For path-dependent commands, we'd need to check if paths exist
+            // For now, be conservative and exclude from suggestions in different directories
+            return false
+            
+        case .ambiguous:
+            // When unsure, include it
+            return true
+        }
+    }
+    
+    /// Filter a list of frequent commands to only those relevant in the current context
+    static func filterForCurrentContext(
+        commands: [CommandFrequency],
+        cwd: String,
+        envContext: EnvironmentContext
+    ) -> [CommandFrequency] {
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+        let isInHomeDir = cwd == homeDir || cwd == "~"
+        
+        return commands.filter { freq in
+            // If in home directory, be more strict about what we suggest
+            if isInHomeDir {
+                let classification = classify(freq.command, currentCWD: cwd)
+                switch classification {
+                case .universal:
+                    return true
+                case .projectSpecific:
+                    // Don't suggest project commands when in home directory
+                    return false
+                case .pathDependent:
+                    // Don't suggest path-dependent commands when in home
+                    return false
+                case .ambiguous:
+                    // Be conservative in home - include simple commands only
+                    return !freq.command.contains("/") && !freq.command.contains(".")
+                }
+            }
+            
+            // In other directories, use the full relevance check
+            return isRelevantInDirectory(freq.command, cwd: cwd, envContext: envContext)
+        }
+    }
+}
+
 /// Context passed to the suggestion engine
 struct TerminalContext {
     let cwd: String
@@ -835,11 +1019,34 @@ final class TerminalSuggestionService: ObservableObject {
         gathered.lastExitCode = context.lastExitCode
         
         // Get history statistics (programmatic, no AI)
+        // First get environment context so we can filter history appropriately
+        let envContext = getStructuredEnvironmentContext(cwd: context.cwd, gitInfo: context.gitInfo)
+        
         if settings.readShellHistory && ShellHistoryParser.shared.isAvailable() {
-            let historyContext = ShellHistoryParser.shared.getFormattedHistoryContext(topN: 10, recentN: 10)
-            gathered.frequentCommandsFormatted = historyContext.frequentFormatted
+            let historyContext = ShellHistoryParser.shared.getFormattedHistoryContext(topN: 15, recentN: 10)
+            
+            // Get raw frequent commands for filtering
+            let rawFrequent = ShellHistoryParser.shared.getFrequentCommands(limit: 15)
+            
+            // Filter commands to only those relevant in current directory context
+            let filteredFrequent = CommandClassifier.filterForCurrentContext(
+                commands: rawFrequent,
+                cwd: context.cwd,
+                envContext: envContext
+            )
+            
+            // Format filtered commands for prompt
+            if filteredFrequent.isEmpty {
+                gathered.frequentCommandsFormatted = "(no relevant history for this context)"
+            } else {
+                gathered.frequentCommandsFormatted = filteredFrequent.prefix(10).map { freq in
+                    let cmd = freq.command.count > 50 ? String(freq.command.prefix(47)) + "..." : freq.command
+                    return "\(cmd) (\(freq.count))"
+                }.joined(separator: ", ")
+            }
+            
             gathered.recentCommands = historyContext.recent
-            suggestionLogger.info("Phase 1: Got \(gathered.recentCommands.count, privacy: .public) recent commands, frequent: \(historyContext.frequentFormatted.prefix(100), privacy: .public)")
+            suggestionLogger.info("Phase 1: Got \(gathered.recentCommands.count, privacy: .public) recent commands, filtered frequent: \(gathered.frequentCommandsFormatted.prefix(100), privacy: .public)")
         }
         
         // Also include session commands
@@ -850,8 +1057,7 @@ final class TerminalSuggestionService: ObservableObject {
         
         setPhase(.gatheringContext(detail: "Detecting environment..."))
         
-        // Get structured environment context (programmatic)
-        let envContext = getStructuredEnvironmentContext(cwd: context.cwd, gitInfo: context.gitInfo)
+        // Add environment context to gathered info (envContext already computed above for history filtering)
         gathered.environmentInfo.append(envContext.formattedForPrompt)
         
         // Add shell config insights
@@ -1539,19 +1745,31 @@ final class TerminalSuggestionService: ObservableObject {
             contextSection += "\n\n\(researchFormatted)"
         }
         
+        // Determine if this appears to be an idle/startup context
+        let isIdleContext = gathered.terminalOutput.isEmpty && 
+                           gathered.lastExitCode == 0 &&
+                           gathered.recentCommands.filter { !$0.contains("✓") && !$0.contains("✗") }.isEmpty
+        
         let planPrompt = """
-        Analyze this terminal context and plan what suggestions would be most helpful.
+        Analyze this terminal context and plan helpful command suggestions.
         
         \(contextSection)
         
-        Based on this, determine:
-        1. What is the user likely trying to do?
-        2. Should we suggest commands? (false if user seems to know what they're doing)
-        3. What type of suggestions: "error_fix", "next_step", "workflow", "general"
-        4. Any specific focus area?
+        SITUATION: \(isIdleContext ? "User just opened terminal or is idle - suggest useful commands based on their frequent usage patterns and current directory." : "User is actively working - suggest helpful next steps based on their activity.")
+        
+        Your goal is to ALWAYS provide helpful suggestions. Consider:
+        1. What is the user's apparent intent or workflow?
+        2. What type of suggestions fit best: "error_fix", "next_step", "workflow", "history_based", or "general"
+        3. Focus area (if any specific tool/task is relevant)
+        
+        IMPORTANT GUIDELINES:
+        - For IDLE/STARTUP: Suggest commands from their frequent history that are RELEVANT to the current directory. Don't suggest project-specific commands (npm, cargo, swift) if they're in home directory or a non-project folder.
+        - For ACTIVE WORK: Suggest logical next steps based on what they just did.
+        - For ERRORS: Focus on fixing the error.
+        - ALWAYS suggest something helpful - never leave the user without suggestions.
         
         Reply as JSON:
-        {"user_intent": "brief description", "should_suggest": true/false, "suggestion_type": "type", "focus_area": "optional focus", "suggestion_count": 1-3}
+        {"user_intent": "brief description", "should_suggest": true, "suggestion_type": "type", "focus_area": "optional focus", "suggestion_count": 2}
         """
         
         do {
@@ -1569,13 +1787,14 @@ final class TerminalSuggestionService: ObservableObject {
             // Parse the response
             if let parsed = parsePlanResponse(response) {
                 plan.userIntent = parsed.userIntent ?? plan.userIntent
-                plan.shouldSuggest = parsed.shouldSuggest ?? plan.shouldSuggest
+                // ALWAYS suggest - don't let AI opt out. We filtered history to be context-relevant.
+                plan.shouldSuggest = true
                 plan.suggestionType = parsed.suggestionType ?? plan.suggestionType
                 plan.focusArea = parsed.focusArea ?? plan.focusArea
-                plan.suggestionCount = parsed.suggestionCount ?? plan.suggestionCount
+                plan.suggestionCount = max(1, parsed.suggestionCount ?? plan.suggestionCount)
             }
             
-            suggestionLogger.info("Planning (AI): intent='\(plan.userIntent)', type=\(plan.suggestionType), suggest=\(plan.shouldSuggest)")
+            suggestionLogger.info("Planning (AI): intent='\(plan.userIntent)', type=\(plan.suggestionType), suggest=\(plan.shouldSuggest) (forced true)")
         } catch {
             suggestionLogger.error("Planning AI call failed: \(error.localizedDescription)")
             // Fall back to heuristics - still suggest general commands
@@ -1689,6 +1908,16 @@ final class TerminalSuggestionService: ObservableObject {
             Recent commands: \(gathered.recentCommands.prefix(5).joined(separator: ", "))
             
             Suggest the logical next step in their workflow.
+            """
+            
+        case "history_based":
+            prompt += """
+            
+            
+            User's frequent commands (filtered for this context): \(gathered.frequentCommandsFormatted)
+            
+            The user just opened their terminal or is idle. Suggest commands from their frequent usage patterns
+            that make sense for the current directory context. Focus on what they commonly do.
             """
             
         default:

@@ -150,6 +150,12 @@ struct ChatTabContentView: View {
             return
         }
         
+        // CRITICAL: Sync CWD from terminal before sending message
+        // This ensures the agent has accurate context for decision-making
+        if !ptyModel.currentWorkingDirectory.isEmpty {
+            session.lastKnownCwd = ptyModel.currentWorkingDirectory
+        }
+        
         // Normal flow - start new message
         sending = true
         Task {
