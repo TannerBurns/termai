@@ -1838,10 +1838,8 @@ struct DataSettingsView: View {
     private func performFactoryReset() {
         do {
             try PersistenceService.clearAllData()
-            // Quit the app after a short delay to allow the UI to update
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                NSApplication.shared.terminate(nil)
-            }
+            // Quit immediately to prevent any background saves from recreating files
+            NSApplication.shared.terminate(nil)
         } catch {
             factoryResetError = error.localizedDescription
         }

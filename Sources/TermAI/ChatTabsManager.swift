@@ -43,6 +43,7 @@ final class ChatTabsManager: ObservableObject {
             newSession.model = source.model
             newSession.providerName = source.providerName
             newSession.providerType = source.providerType
+            newSession.hasExplicitlyConfiguredProvider = source.hasExplicitlyConfiguredProvider
             // systemPrompt is now automatically generated and cannot be copied
         }
         
@@ -76,6 +77,7 @@ final class ChatTabsManager: ObservableObject {
             newSession.model = sessionToRemove.model
             newSession.providerName = sessionToRemove.providerName
             newSession.providerType = sessionToRemove.providerType
+            newSession.hasExplicitlyConfiguredProvider = sessionToRemove.hasExplicitlyConfiguredProvider
             newSession.persistSettings()
             
             sessions = [newSession]
