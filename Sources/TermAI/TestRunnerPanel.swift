@@ -1100,6 +1100,7 @@ struct TestRunnerButton: View {
     let agent: TestRunnerAgent?
     let onStart: () -> Void
     let onShowPanel: () -> Void
+    var isDisabled: Bool = false
     
     @State private var isHovered = false
     @State private var isPulsing = false
@@ -1174,15 +1175,17 @@ struct TestRunnerButton: View {
                     .stroke(isActive ? statusColor.opacity(0.5) : Color.clear, lineWidth: 1)
             )
             .scaleEffect(isPulsing && isActive ? 1.02 : 1.0)
+            .opacity(isDisabled ? 0.5 : 1.0)
         }
         .buttonStyle(.plain)
+        .disabled(isDisabled)
         .onHover { isHovered = $0 }
         .animation(.easeInOut(duration: 0.15), value: isHovered)
         .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isPulsing)
         .onAppear {
             isPulsing = true
         }
-        .help(isActive ? "Click to view test progress" : "Analyze project and run tests")
+        .help(isDisabled ? "Select a provider and model first" : (isActive ? "Click to view test progress" : "Analyze project and run tests"))
     }
     
     private var statusIcon: String {
@@ -1199,6 +1202,9 @@ struct TestRunnerButton: View {
     }
     
     private var foregroundColor: Color {
+        if isDisabled {
+            return .secondary
+        }
         if isHovered && !isActive {
             return .white
         }
@@ -1206,6 +1212,9 @@ struct TestRunnerButton: View {
     }
     
     private var backgroundColor: Color {
+        if isDisabled {
+            return Color.secondary.opacity(0.1)
+        }
         if isHovered && !isActive {
             return statusColor
         }

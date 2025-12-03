@@ -123,7 +123,8 @@ struct ChatContainerView: View {
                     TestRunnerButton(
                         agent: testRunnerWrapper.agent,
                         onStart: { startTestRunner() },
-                        onShowPanel: { showingTestRunner = true }
+                        onShowPanel: { showingTestRunner = true },
+                        isDisabled: !(tabsManager.selectedSession?.isConfigured ?? false)
                     )
                 }
                 .padding(.horizontal, 12)
