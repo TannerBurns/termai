@@ -198,30 +198,37 @@ final class ShellHistoryParser {
     /// - Parameter limit: Maximum number of commands to return
     /// - Returns: Array of frequently used commands sorted by frequency (from cache, triggers async refresh if stale)
     func getFrequentCommands(limit: Int = 10) -> [CommandFrequency] {
-        return cacheQueue.sync {
+        // Check if cache needs refresh OUTSIDE the sync block to avoid deadlock
+        let (needsRefresh, result) = cacheQueue.sync { () -> (Bool, [CommandFrequency]) in
             // Check cache validity
-            if let timestamp = cacheTimestamp,
-               Date().timeIntervalSince(timestamp) < cacheExpirationSeconds,
-               !cachedFrequencies.isEmpty {
-                return Array(cachedFrequencies.prefix(limit))
-            }
-            
-            // Return current cache (even if stale) and trigger async refresh
-            let result = Array(cachedFrequencies.prefix(limit))
-            triggerAsyncParse()
-            return result
+            let cacheValid = cacheTimestamp != nil &&
+                Date().timeIntervalSince(cacheTimestamp!) < cacheExpirationSeconds &&
+                !cachedFrequencies.isEmpty
+            return (!cacheValid, Array(cachedFrequencies.prefix(limit)))
         }
+        
+        // Trigger async parse OUTSIDE the sync block to avoid deadlock
+        if needsRefresh {
+            triggerAsyncParse()
+        }
+        
+        return result
     }
     
     /// Get frequent commands filtered for a specific directory
     /// Only works for zsh with extended history format that includes directory info
     func getFrequentCommands(for directory: String, limit: Int = 5) -> [CommandFrequency] {
+        // Check if cache needs refresh OUTSIDE the sync block to avoid deadlock
+        let needsRefresh = cacheQueue.sync { () -> Bool in
+            return cacheTimestamp == nil || Date().timeIntervalSince(cacheTimestamp!) >= cacheExpirationSeconds
+        }
+        
+        // Trigger async parse OUTSIDE the sync block to avoid deadlock
+        if needsRefresh {
+            triggerAsyncParse()
+        }
+        
         return cacheQueue.sync {
-            // Check cache validity and trigger refresh if needed
-            if cacheTimestamp == nil || Date().timeIntervalSince(cacheTimestamp!) >= cacheExpirationSeconds {
-                triggerAsyncParse()
-            }
-            
             // Filter entries by directory
             let normalizedDir = normalizePath(directory)
             let directoryEntries = cachedEntries.filter { entry in

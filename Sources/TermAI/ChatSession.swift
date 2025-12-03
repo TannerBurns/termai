@@ -309,6 +309,13 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var summarizationCount: Int = 0
     /// User-defined context size for local models (nil = use auto-detected/default)
     @Published var customLocalContextSize: Int? = nil
+    /// Cumulative tokens used in the current agent run (reset at agent start)
+    /// This tracks actual API usage across all LLM calls during agent execution
+    @Published var agentSessionTokensUsed: Int = 0
+    /// Accumulated context tokens being built up for the next request
+    /// This is the actual token count from the API, tracking what's in our context array
+    /// Used to know when we need to summarize before the next request
+    @Published var accumulatedContextTokens: Int = 0
     
     /// Effective context limit considering custom size for local models
     var effectiveContextLimit: Int {
@@ -752,13 +759,30 @@ final class ChatSession: ObservableObject, Identifiable {
         
         transitionToPhase(.deciding)
         
+        // Gather environment context for informed decision-making
+        let envContext = await gatherQuickContext()
+        
         // Ask the model whether to run commands or reply
         let decisionPrompt = """
         You are operating in agent mode inside a terminal-centric app. Commands you run execute DIRECTLY in the user's real shell session (via PTY) - environment changes like `source venv/bin/activate`, `export`, `cd`, etc. WILL persist in their terminal.
 
+        CURRENT ENVIRONMENT (may be incomplete if no commands run yet):
+        \(envContext.formatted())
+
         Given the user's request below, decide one of two actions:
-        - RESPOND: For questions, explanations, or when no commands are needed
-        - RUN: For tasks requiring shell commands (including environment setup like venv activation)
+        - RESPOND: ONLY for pure questions/explanations where no action is requested
+        - RUN: For ANY request that implies running commands or performing actions
+
+        BIAS TOWARD ACTION: When in doubt, choose RUN. The user is asking you to DO something.
+        - "activate venv" → RUN (try common paths: venv, .venv, env)
+        - "run tests" → RUN (figure out the test command)
+        - "install dependencies" → RUN
+        - "build the project" → RUN
+        - "what does X do?" → RESPOND (pure question)
+        - "explain Y" → RESPOND (pure explanation)
+
+        NOTE: The environment info above may not reflect the user's actual terminal directory. 
+        If the request is clearly actionable, choose RUN and discover the environment during execution.
 
         Reply strictly in JSON on one line with keys: {"action":"RESPOND|RUN", "reason":"short sentence"}.
         User: \(userPrompt)
@@ -804,6 +828,16 @@ final class ChatSession: ObservableObject, Identifiable {
         transitionToPhase(.settingGoal)
         let goalPrompt = """
         Convert the user's request below into a concise actionable goal a shell-capable agent should accomplish.
+        
+        CURRENT ENVIRONMENT (reference only, may be incomplete):
+        \(envContext.formatted())
+        
+        Create an actionable goal. Don't over-constrain based on environment - the user knows their setup.
+        Examples:
+        - "activate venv" → "Activate Python virtual environment"
+        - "run tests" → "Run the project's test suite"
+        - "build" → "Build the project"
+        
         Reply as JSON: {"goal":"short goal phrase"}.
         User: \(userPrompt)
         """
@@ -821,6 +855,11 @@ final class ChatSession: ObservableObject, Identifiable {
         // NOTE: Don't add GOAL/CHECKLIST here - they're shown separately in the step prompt
         // Adding them here causes confusion with outdated state in the context
         agentContextLog = []
+        
+        // Reset token tracking for this new agent run
+        agentSessionTokensUsed = 0
+        accumulatedContextTokens = 0
+        currentContextTokens = 0
         
         // Planning phase (if enabled)
         var agentPlan: [String] = []
@@ -888,7 +927,7 @@ final class ChatSession: ObservableObject, Identifiable {
                     let out = (note.userInfo?["output"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     self.lastKnownCwd = cwd
                     self.agentContextLog.append("CWD: \(cwd)")
-                    if let rc { self.agentContextLog.append("__TERMAI_RC__=\(rc)") }
+                    if let rc { self.agentContextLog.append("EXIT_CODE: \(rc)") }
                     if !out.isEmpty {
                         self.agentContextLog.append("OUTPUT(\(cmd.prefix(64))): \(out.prefix(AgentSettings.shared.maxOutputCapture))")
                         // Update last status event bubble with output
@@ -1091,7 +1130,7 @@ final class ChatSession: ObservableObject, Identifiable {
             CONTEXT LOG FORMAT (how to read the CONTEXT section):
             - "RAN: <command>" = command that was executed
             - "OUTPUT: ..." = command output (may be empty for silent commands)
-            - "__TERMAI_RC__=N" = exit code (0=success, non-zero=failure)
+            - "EXIT_CODE: N" = exit code (0=success, non-zero=failure)
             - "CWD: /path" = current working directory after command
             - Many commands (cd, source, mkdir, export) succeed SILENTLY with no output
             
@@ -1885,7 +1924,7 @@ final class ChatSession: ObservableObject, Identifiable {
     
     private func callOneShotText(prompt: String) async -> String {
         do {
-            return try await LLMClient.shared.complete(
+            let result = try await LLMClient.shared.completeWithUsage(
                 systemPrompt: agentSystemPrompt,
                 userPrompt: prompt,
                 provider: providerType,
@@ -1896,9 +1935,151 @@ final class ChatSession: ObservableObject, Identifiable {
                 timeout: 60,
                 requestType: .planning
             )
+            
+            // Update cumulative token tracking (total used across all calls)
+            agentSessionTokensUsed += result.totalTokens
+            
+            // Track the maximum accumulated context seen during this agent run
+            // During agent execution, multiple LLM calls happen with different prompt sizes:
+            // - Step prompts (largest, include full context log)
+            // - Decision/assess prompts (may be smaller)
+            // We track the MAX to show true peak context usage for UI and summarization decisions
+            // Only reset to smaller values after explicit summarization (which sets it to 0)
+            if result.promptTokens > accumulatedContextTokens {
+                accumulatedContextTokens = result.promptTokens
+            }
+            
+            // Update currentContextTokens for the UI (shows peak context during agent run)
+            currentContextTokens = accumulatedContextTokens
+            objectWillChange.send()
+            
+            return result.content
         } catch {
             return "{\"error\":\"\(error.localizedDescription)\"}"
         }
+    }
+    
+    // MARK: - Quick Environment Context
+    
+    /// Represents quick environment context for agent decision-making
+    struct QuickEnvironmentContext {
+        let cwd: String
+        let directoryContents: [String]
+        let gitBranch: String?
+        let gitDirty: Bool
+        let projectType: String
+        
+        /// Format context for inclusion in prompts
+        func formatted() -> String {
+            var lines: [String] = []
+            
+            lines.append("- Current Directory: \(cwd.isEmpty ? "(unknown)" : cwd)")
+            
+            if !directoryContents.isEmpty {
+                let contents = directoryContents.prefix(20).joined(separator: ", ")
+                let suffix = directoryContents.count > 20 ? ", ..." : ""
+                lines.append("- Directory Contents: \(contents)\(suffix)")
+            }
+            
+            if let branch = gitBranch {
+                let dirtyIndicator = gitDirty ? " (uncommitted changes)" : ""
+                lines.append("- Git: branch '\(branch)'\(dirtyIndicator)")
+            }
+            
+            if !projectType.isEmpty && projectType != "unknown" {
+                lines.append("- Project Type: \(projectType)")
+            }
+            
+            return lines.joined(separator: "\n")
+        }
+    }
+    
+    /// Gather quick environment context for agent decision-making
+    /// This provides the agent with enough context to make informed RESPOND vs RUN decisions
+    private func gatherQuickContext() async -> QuickEnvironmentContext {
+        let cwd = lastKnownCwd.isEmpty ? FileManager.default.currentDirectoryPath : lastKnownCwd
+        
+        // Get directory contents (top-level only, quick)
+        var directoryContents: [String] = []
+        if !cwd.isEmpty {
+            let url = URL(fileURLWithPath: cwd)
+            if let contents = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                directoryContents = contents.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { item in
+                    let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                    return item.lastPathComponent + (isDir ? "/" : "")
+                }
+            }
+        }
+        
+        // Get git info asynchronously
+        var gitBranch: String? = nil
+        var gitDirty = false
+        if !cwd.isEmpty {
+            if let gitInfo = await GitInfoService.shared.fetchGitInfo(for: cwd) {
+                gitBranch = gitInfo.branch
+                gitDirty = gitInfo.isDirty
+            }
+        }
+        
+        // Detect project type from common files
+        let projectType = detectProjectType(from: directoryContents)
+        
+        return QuickEnvironmentContext(
+            cwd: cwd,
+            directoryContents: directoryContents,
+            gitBranch: gitBranch,
+            gitDirty: gitDirty,
+            projectType: projectType
+        )
+    }
+    
+    /// Detect project type from directory contents
+    private func detectProjectType(from contents: [String]) -> String {
+        var types: [String] = []
+        
+        // Python
+        if contents.contains("requirements.txt") || contents.contains("setup.py") || 
+           contents.contains("pyproject.toml") || contents.contains("Pipfile") ||
+           contents.contains("venv/") || contents.contains(".venv/") {
+            types.append("Python")
+        }
+        
+        // Node.js
+        if contents.contains("package.json") {
+            types.append("Node.js")
+        }
+        
+        // Swift
+        if contents.contains("Package.swift") || contents.contains(where: { $0.hasSuffix(".xcodeproj/") || $0.hasSuffix(".xcworkspace/") }) {
+            types.append("Swift")
+        }
+        
+        // Rust
+        if contents.contains("Cargo.toml") {
+            types.append("Rust")
+        }
+        
+        // Go
+        if contents.contains("go.mod") {
+            types.append("Go")
+        }
+        
+        // Ruby
+        if contents.contains("Gemfile") {
+            types.append("Ruby")
+        }
+        
+        // Java/Kotlin
+        if contents.contains("pom.xml") || contents.contains("build.gradle") || contents.contains("build.gradle.kts") {
+            types.append("Java/Kotlin")
+        }
+        
+        // Docker
+        if contents.contains("Dockerfile") || contents.contains("docker-compose.yml") || contents.contains("docker-compose.yaml") {
+            types.append("Docker")
+        }
+        
+        return types.isEmpty ? "unknown" : types.joined(separator: ", ")
     }
     
     /// Summarize context when it exceeds size limits
@@ -1993,9 +2174,9 @@ final class ChatSession: ObservableObject, Identifiable {
     
     private func lastExitCodeString() -> String {
         // We don't have direct access to PTYModel here; rely on last recorded value from context if present.
-        // Look for "__TERMAI_RC__=N" pattern and extract just the number
+        // Look for "EXIT_CODE: N" pattern and extract just the number
         for line in agentContextLog.reversed() {
-            if let range = line.range(of: "__TERMAI_RC__=") {
+            if let range = line.range(of: "EXIT_CODE: ") {
                 // Extract only the numeric characters immediately following the marker
                 var numStr = ""
                 var idx = range.upperBound
@@ -3237,21 +3418,36 @@ final class ChatSession: ObservableObject, Identifiable {
     }
     
     /// Update the current context usage based on messages and agent context
+    /// During agent execution, this is a no-op since we use actual API-reported tokens
     func updateContextUsage(persist: Bool = true) {
-        var totalTokens = 0
-        
-        // Count message tokens using model-specific token estimation
-        let messageArray = buildMessageArray()
-        let messageText = messageArray.map { $0.content }.joined(separator: "\n")
-        totalTokens += TokenEstimator.estimateTokens(messageText, model: model)
-        
-        // During agent mode, also count the agent context log (this is what's actually sent to the LLM)
-        if agentModeEnabled && !agentContextLog.isEmpty {
-            let agentContext = agentContextLog.joined(separator: "\n")
-            totalTokens += TokenEstimator.estimateTokens(agentContext, model: model)
+        // During active agent execution, skip estimation - we use actual API tokens set by callOneShotText()
+        if agentModeEnabled && isAgentRunning {
+            if persist {
+                persistSettings()
+            }
+            return
         }
         
-        currentContextTokens = totalTokens
+        var totalTokens = 0
+        
+        if agentModeEnabled && !agentContextLog.isEmpty {
+            // Agent mode but not actively running - show combined estimate
+            let messageArray = buildMessageArray()
+            let messageText = messageArray.map { $0.content }.joined(separator: "\n")
+            totalTokens = TokenEstimator.estimateTokens(messageText, model: model)
+            let agentContext = agentContextLog.joined(separator: "\n")
+            totalTokens += TokenEstimator.estimateTokens(agentContext, model: model)
+        } else {
+            // Normal chat mode: estimate from messages
+            let messageArray = buildMessageArray()
+            let messageText = messageArray.map { $0.content }.joined(separator: "\n")
+            totalTokens = TokenEstimator.estimateTokens(messageText, model: model)
+        }
+        
+        // Only update and notify if the value has actually changed
+        if currentContextTokens != totalTokens {
+            currentContextTokens = totalTokens
+        }
         
         if persist {
             persistSettings()  // Persist context tracking per session
@@ -3262,14 +3458,18 @@ final class ChatSession: ObservableObject, Identifiable {
     func recordSummarization() {
         summarizationCount += 1
         lastSummarizationDate = Date()
+        // Reset accumulated context after summarization since we've compressed it
+        accumulatedContextTokens = 0
         persistSettings()  // Persist context tracking per session
     }
     
     /// Reset context tracking state (e.g., when clearing chat)
     func resetContextTracking() {
         currentContextTokens = 0
+        accumulatedContextTokens = 0
         lastSummarizationDate = nil
         summarizationCount = 0
+        agentSessionTokensUsed = 0
         // Note: persistSettings() is called by the caller (clearChat)
     }
 }
