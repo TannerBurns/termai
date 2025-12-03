@@ -136,8 +136,9 @@ struct ChatContainerView: View {
                     guard let cmd = note.userInfo?["command"] as? String else { return }
                     let sessionIdFromNote = note.userInfo?["sessionId"] as? UUID
                     
-                    // Set up the completion callback - triggered when OSC 7777 is received
-                    ptyModel.onCommandCompletion = { [weak ptyModel] in
+                    // Enqueue the completion callback - supports rapid command sequences
+                    // Each command gets its own callback in a FIFO queue
+                    ptyModel.enqueueCommandCompletion { [weak ptyModel] in
                         guard let ptyModel = ptyModel else { return }
                         
                         // Get the command output, CWD (from OSC 7), and exit code (from OSC 7777)
@@ -157,14 +158,12 @@ struct ChatContainerView: View {
                         
                         // Clear last-sent marker after capture
                         ptyModel.lastSentCommandForCapture = nil
-                        // Disable capture state to stop heavy updates until next command
-                        ptyModel.captureActive = false
-                        // Clear the completion callback
-                        ptyModel.onCommandCompletion = nil
+                        // Disable capture state only if no more pending commands
+                        // (captureActive will be re-enabled by the next command if any)
                     }
                     
-                    // Start waiting for completion with timeout fallback
-                    ptyModel.startCommandCapture()
+                    // Mark capture active during command execution
+                    ptyModel.captureActive = true
                 }
             } else {
                 Color.clear
