@@ -1114,6 +1114,9 @@ struct AgentSettingsView: View {
                 // Safety Section
                 safetySection
                 
+                // Test Runner Section
+                testRunnerSection
+                
                 // Advanced Section
                 advancedSection
                 
@@ -1140,6 +1143,7 @@ struct AgentSettingsView: View {
         .onChange(of: settings.autoApproveReadOnly) { _ in settings.save() }
         .onChange(of: settings.requireFileEditApproval) { _ in settings.save() }
         .onChange(of: settings.verboseLogging) { _ in settings.save() }
+        .onChange(of: settings.testRunnerEnabled) { _ in settings.save() }
         .alert("Reset Agent Settings", isPresented: $showResetConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("Reset", role: .destructive) {
@@ -1554,6 +1558,33 @@ struct AgentSettingsView: View {
             }
             .settingsCard()
             .animation(.easeInOut(duration: 0.2), value: settings.requireCommandApproval)
+        }
+    }
+    
+    // MARK: - Test Runner Section
+    private var testRunnerSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsSectionHeader("Test Runner", subtitle: "Automated test detection and execution")
+            
+            VStack(spacing: 16) {
+                // Enable Test Runner
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Enable Test Runner")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Show the Test Runner button in the chat toolbar to analyze and run project tests.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: $settings.testRunnerEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+            }
+            .settingsCard()
         }
     }
     
