@@ -185,6 +185,181 @@ struct TaskChecklist: Codable, Equatable {
     }
 }
 
+// MARK: - Pinned Context (File Attachments)
+
+/// Type of attached context
+enum PinnedContextType: String, Codable, Equatable {
+    case file       // File from the filesystem
+    case terminal   // Terminal output
+    case snippet    // User-provided code snippet
+}
+
+/// Represents an attached context (file, terminal output, etc.) for a chat message
+/// Represents a line range (start and end are 1-indexed, inclusive)
+struct LineRange: Codable, Equatable, Hashable {
+    let start: Int
+    let end: Int
+    
+    init(start: Int, end: Int) {
+        self.start = min(start, end)
+        self.end = max(start, end)
+    }
+    
+    /// Single line
+    init(line: Int) {
+        self.start = line
+        self.end = line
+    }
+    
+    /// Parse a range string like "10-50" or "100"
+    static func parse(_ str: String) -> LineRange? {
+        let trimmed = str.trimmingCharacters(in: .whitespaces)
+        if trimmed.contains("-") {
+            let parts = trimmed.split(separator: "-")
+            guard parts.count == 2,
+                  let start = Int(parts[0]),
+                  let end = Int(parts[1]) else { return nil }
+            return LineRange(start: start, end: end)
+        } else if let line = Int(trimmed) {
+            return LineRange(line: line)
+        }
+        return nil
+    }
+    
+    /// Parse multiple ranges from a comma-separated string like "10-50,80-100"
+    static func parseMultiple(_ str: String) -> [LineRange] {
+        str.split(separator: ",").compactMap { parse(String($0)) }
+    }
+    
+    var description: String {
+        start == end ? "L\(start)" : "L\(start)-\(end)"
+    }
+    
+    /// Check if a line number is within this range
+    func contains(_ line: Int) -> Bool {
+        line >= start && line <= end
+    }
+}
+
+struct PinnedContext: Codable, Identifiable, Equatable {
+    let id: UUID
+    let type: PinnedContextType
+    let path: String        // file path, or "terminal" for terminal context
+    let displayName: String // short name for display (e.g., filename)
+    let content: String     // selected content (from ranges)
+    let fullContent: String? // full file content (for viewer highlighting)
+    let lineRanges: [LineRange]? // multiple line ranges
+    var summary: String?    // for large content (LLM-generated summary)
+    let timestamp: Date
+    
+    // Legacy support
+    var startLine: Int? { lineRanges?.first?.start }
+    var endLine: Int? { lineRanges?.last?.end }
+    
+    init(
+        id: UUID = UUID(),
+        type: PinnedContextType,
+        path: String,
+        displayName: String? = nil,
+        content: String,
+        fullContent: String? = nil,
+        lineRanges: [LineRange]? = nil,
+        summary: String? = nil
+    ) {
+        self.id = id
+        self.type = type
+        self.path = path
+        self.displayName = displayName ?? URL(fileURLWithPath: path).lastPathComponent
+        self.content = content
+        self.fullContent = fullContent
+        self.lineRanges = lineRanges
+        self.summary = summary
+        self.timestamp = Date()
+    }
+    
+    /// Create a file context with optional line ranges
+    static func file(path: String, content: String, fullContent: String? = nil, lineRanges: [LineRange]? = nil) -> PinnedContext {
+        PinnedContext(type: .file, path: path, content: content, fullContent: fullContent, lineRanges: lineRanges)
+    }
+    
+    /// Create a file context with a single range (legacy support)
+    static func file(path: String, content: String, startLine: Int? = nil, endLine: Int? = nil) -> PinnedContext {
+        let ranges: [LineRange]?
+        if let start = startLine {
+            ranges = [LineRange(start: start, end: endLine ?? start)]
+        } else {
+            ranges = nil
+        }
+        return PinnedContext(type: .file, path: path, content: content, lineRanges: ranges)
+    }
+    
+    /// Create a terminal context
+    static func terminal(content: String, cwd: String? = nil) -> PinnedContext {
+        PinnedContext(type: .terminal, path: cwd ?? "terminal", displayName: "Terminal Output", content: content)
+    }
+    
+    /// Check if content is large (>5000 tokens estimated)
+    var isLargeContent: Bool {
+        TokenEstimator.estimateTokens(content) > 5000
+    }
+    
+    /// Check if this is a partial file (has line ranges)
+    var isPartialFile: Bool {
+        lineRanges != nil && !lineRanges!.isEmpty
+    }
+    
+    /// Get line range description if applicable
+    var lineRangeDescription: String? {
+        guard let ranges = lineRanges, !ranges.isEmpty else { return nil }
+        if ranges.count == 1 {
+            let r = ranges[0]
+            return r.start == r.end ? "line \(r.start)" : "lines \(r.start)-\(r.end)"
+        } else {
+            // Multiple ranges: "L10-50, L80-100"
+            return ranges.map { $0.description }.joined(separator: ", ")
+        }
+    }
+    
+    /// Check if a line number is within any of the selected ranges
+    func isLineSelected(_ lineNumber: Int) -> Bool {
+        guard let ranges = lineRanges else { return false }
+        return ranges.contains { $0.contains(lineNumber) }
+    }
+    
+    /// Icon for the context type
+    var icon: String {
+        switch type {
+        case .file: return "doc.text.fill"
+        case .terminal: return "terminal.fill"
+        case .snippet: return "text.quote"
+        }
+    }
+    
+    /// Detected language for syntax highlighting
+    var language: String? {
+        guard type == .file else { return nil }
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        switch ext {
+        case "swift": return "swift"
+        case "py": return "python"
+        case "js": return "javascript"
+        case "ts": return "typescript"
+        case "jsx", "tsx": return ext
+        case "json": return "json"
+        case "yaml", "yml": return "yaml"
+        case "html", "htm": return "html"
+        case "css", "scss", "sass": return "css"
+        case "rs": return "rust"
+        case "go": return "go"
+        case "c", "h": return "c"
+        case "cpp", "hpp", "cc": return "cpp"
+        case "md", "markdown": return "markdown"
+        case "sh", "bash", "zsh": return "shell"
+        default: return nil
+        }
+    }
+}
+
 struct ChatMessage: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
     var role: String
@@ -192,6 +367,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var terminalContext: String? = nil
     var terminalContextMeta: TerminalContextMeta? = nil
     var agentEvent: AgentEvent? = nil
+    var attachedContexts: [PinnedContext]? = nil  // Pinned files/contexts attached to this message
 }
 
 // MARK: - Chat Session
@@ -213,6 +389,7 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var streamingMessageId: UUID? = nil
     @Published var pendingTerminalContext: String? = nil
     @Published var pendingTerminalMeta: TerminalContextMeta? = nil
+    @Published var pendingAttachedContexts: [PinnedContext] = []  // Files/contexts to attach to next message
     @Published var agentModeEnabled: Bool = false
     @Published var agentContextLog: [String] = [] {
         didSet {
@@ -444,6 +621,230 @@ final class ChatSession: ObservableObject, Identifiable {
         pendingTerminalMeta = nil
     }
     
+    // MARK: - Attached Context Management
+    
+    /// Add a file to the pending attached contexts
+    /// Add a file to the pending attached contexts (legacy - entire file or single range)
+    func attachFile(path: String, content: String, startLine: Int? = nil, endLine: Int? = nil) {
+        let context = PinnedContext.file(path: path, content: content, startLine: startLine, endLine: endLine)
+        pendingAttachedContexts.append(context)
+    }
+    
+    /// Add a file with multiple line ranges to the pending attached contexts
+    func attachFileWithRanges(path: String, selectedContent: String, fullContent: String, lineRanges: [LineRange]) {
+        let context = PinnedContext.file(path: path, content: selectedContent, fullContent: fullContent, lineRanges: lineRanges)
+        pendingAttachedContexts.append(context)
+    }
+    
+    /// Update line ranges for an existing attached context
+    func updateAttachedContextLineRanges(id: UUID, lineRanges: [LineRange]) {
+        guard let index = pendingAttachedContexts.firstIndex(where: { $0.id == id }) else { return }
+        let existing = pendingAttachedContexts[index]
+        
+        // Get the full content (either stored or from file)
+        let fullContent = existing.fullContent ?? existing.content
+        let lines = fullContent.components(separatedBy: .newlines)
+        
+        // Extract selected content based on new ranges
+        let selectedContent: String
+        if lineRanges.isEmpty {
+            selectedContent = fullContent
+        } else {
+            var selectedLines: [String] = []
+            for range in lineRanges.sorted(by: { $0.start < $1.start }) {
+                let startIdx = max(0, range.start - 1)
+                let endIdx = min(lines.count, range.end)
+                guard startIdx < lines.count else { continue }
+                selectedLines.append(contentsOf: lines[startIdx..<endIdx])
+            }
+            selectedContent = selectedLines.joined(separator: "\n")
+        }
+        
+        // Create updated context
+        let updated = PinnedContext(
+            id: existing.id,
+            type: existing.type,
+            path: existing.path,
+            displayName: existing.displayName,
+            content: selectedContent,
+            fullContent: fullContent,
+            lineRanges: lineRanges.isEmpty ? nil : lineRanges
+        )
+        
+        pendingAttachedContexts[index] = updated
+    }
+    
+    /// Add terminal output to the pending attached contexts
+    func attachTerminalOutput(_ content: String, cwd: String? = nil) {
+        let context = PinnedContext.terminal(content: content, cwd: cwd)
+        pendingAttachedContexts.append(context)
+    }
+    
+    /// Remove an attached context by ID
+    func removeAttachedContext(id: UUID) {
+        pendingAttachedContexts.removeAll { $0.id == id }
+    }
+    
+    /// Clear all pending attached contexts
+    func clearAttachedContexts() {
+        pendingAttachedContexts.removeAll()
+    }
+    
+    /// Consume and return pending attached contexts (used when sending a message)
+    func consumeAttachedContexts() -> [PinnedContext] {
+        let contexts = pendingAttachedContexts
+        pendingAttachedContexts.removeAll()
+        return contexts
+    }
+    
+    /// Summarize large attached contexts before sending
+    /// This processes contexts that exceed the token threshold and generates summaries
+    func summarizeLargeContexts() async {
+        // Process each context that needs summarization
+        var updatedContexts: [PinnedContext] = []
+        
+        for context in pendingAttachedContexts {
+            if context.isLargeContent && context.summary == nil {
+                // Generate summary for large content
+                if let summary = await generateContextSummary(context) {
+                    var updated = context
+                    updated.summary = summary
+                    updatedContexts.append(updated)
+                } else {
+                    updatedContexts.append(context)
+                }
+            } else {
+                updatedContexts.append(context)
+            }
+        }
+        
+        pendingAttachedContexts = updatedContexts
+    }
+    
+    /// Generate a summary for a large attached context using the LLM
+    private func generateContextSummary(_ context: PinnedContext) async -> String? {
+        // Skip if model not configured
+        guard !model.isEmpty else { return nil }
+        
+        let prompt = """
+        You are summarizing a file that will be used as context for a coding assistant.
+        
+        File: \(context.displayName)
+        Path: \(context.path)
+        \(context.language.map { "Language: \($0)" } ?? "")
+        
+        Provide a concise summary that captures:
+        1. The main purpose/functionality of this code
+        2. Key functions, classes, or structures defined
+        3. Important dependencies or imports
+        4. Any notable patterns or configurations
+        
+        Keep the summary under 500 words. Focus on information that would help an AI understand how to work with or modify this code.
+        
+        FILE CONTENT:
+        ```
+        \(context.content.prefix(15000))
+        ```
+        \(context.content.count > 15000 ? "\n[Content truncated at 15000 characters...]" : "")
+        """
+        
+        do {
+            let response = try await requestSimpleCompletion(prompt: prompt, maxTokens: 800)
+            return response.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            AgentDebugConfig.log("[Summary] Failed to generate summary: \(error)")
+            return nil
+        }
+    }
+    
+    /// Request a simple completion (non-streaming) for utility tasks like summarization
+    private func requestSimpleCompletion(prompt: String, maxTokens: Int = 500) async throws -> String {
+        var messageBody: [String: Any] = [
+            "model": model,
+            "messages": [
+                ["role": "system", "content": "You are a helpful assistant that summarizes code and technical content concisely."],
+                ["role": "user", "content": prompt]
+            ],
+            "max_tokens": maxTokens,
+            "temperature": 0.3,
+            "stream": false
+        ]
+        
+        let url: URL
+        var headers: [String: String] = ["Content-Type": "application/json"]
+        
+        switch providerType {
+        case .cloud(let provider):
+            switch provider {
+            case .openai:
+                url = URL(string: "https://api.openai.com/v1/chat/completions")!
+                if let key = CloudAPIKeyManager.shared.getAPIKey(for: .openai) {
+                    headers["Authorization"] = "Bearer \(key)"
+                }
+            case .anthropic:
+                // For Anthropic, we need to use a different message format
+                url = URL(string: "https://api.anthropic.com/v1/messages")!
+                if let key = CloudAPIKeyManager.shared.getAPIKey(for: .anthropic) {
+                    headers["x-api-key"] = key
+                    headers["anthropic-version"] = "2023-06-01"
+                }
+                // Anthropic uses a different message format
+                messageBody = [
+                    "model": model,
+                    "max_tokens": maxTokens,
+                    "messages": [
+                        ["role": "user", "content": prompt]
+                    ],
+                    "system": "You are a helpful assistant that summarizes code and technical content concisely."
+                ]
+            }
+        case .local(let provider):
+            switch provider {
+            case .ollama:
+                url = URL(string: "http://127.0.0.1:11434/api/chat")!
+            case .lmStudio:
+                url = URL(string: "http://127.0.0.1:1234/v1/chat/completions")!
+            case .vllm:
+                url = provider.defaultBaseURL.appendingPathComponent("chat/completions")
+            }
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        request.httpBody = try JSONSerialization.data(withJSONObject: messageBody)
+        request.timeoutInterval = 60
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            throw NSError(domain: "Summary", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to get summary"])
+        }
+        
+        // Parse response based on provider
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // OpenAI/LM Studio format
+            if let choices = json["choices"] as? [[String: Any]],
+               let message = choices.first?["message"] as? [String: Any],
+               let content = message["content"] as? String {
+                return content
+            }
+            // Anthropic format
+            if let content = json["content"] as? [[String: Any]],
+               let text = content.first?["text"] as? String {
+                return text
+            }
+            // Ollama format
+            if let message = json["message"] as? [String: Any],
+               let content = message["content"] as? String {
+                return content
+            }
+        }
+        
+        throw NSError(domain: "Summary", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not parse response"])
+    }
+    
     func clearChat() {
         streamingTask?.cancel()
         streamingTask = nil
@@ -532,7 +933,19 @@ final class ChatSession: ObservableObject, Identifiable {
         let meta = pendingTerminalMeta
         pendingTerminalContext = nil
         pendingTerminalMeta = nil
-        messages.append(ChatMessage(role: "user", content: text, terminalContext: ctx, terminalContextMeta: meta))
+        
+        // Consume any attached contexts (files, etc.)
+        // Note: For appendUserMessage (used in agent mode), we consume without async summarization
+        // since agent mode has its own context management
+        let attachedContexts = consumeAttachedContexts()
+        
+        messages.append(ChatMessage(
+            role: "user",
+            content: text,
+            terminalContext: ctx,
+            terminalContextMeta: meta,
+            attachedContexts: attachedContexts.isEmpty ? nil : attachedContexts
+        ))
         // Force UI update and persist
         messages = messages
         persistMessages()
@@ -560,7 +973,19 @@ final class ChatSession: ObservableObject, Identifiable {
         pendingTerminalContext = nil
         pendingTerminalMeta = nil
         
-        messages.append(ChatMessage(role: "user", content: text, terminalContext: ctx, terminalContextMeta: meta))
+        // Summarize large attached contexts before consuming
+        await summarizeLargeContexts()
+        
+        // Consume any attached contexts (files, etc.)
+        let attachedContexts = consumeAttachedContexts()
+        
+        messages.append(ChatMessage(
+            role: "user",
+            content: text,
+            terminalContext: ctx,
+            terminalContextMeta: meta,
+            attachedContexts: attachedContexts.isEmpty ? nil : attachedContexts
+        ))
         let assistantIndex = messages.count
         messages.append(ChatMessage(role: "assistant", content: ""))
         streamingMessageId = messages[assistantIndex].id
@@ -3091,6 +3516,8 @@ final class ChatSession: ObservableObject, Identifiable {
         // Convert to SimpleMessages
         var allConv = conversational.map { msg -> SimpleMessage in
             var prefix = ""
+            
+            // Add terminal context if present
             if let ctx = msg.terminalContext, !ctx.isEmpty {
                 var header = "Terminal Context:"
                 if let meta = msg.terminalContextMeta, let cwd = meta.cwd, !cwd.isEmpty {
@@ -3098,6 +3525,14 @@ final class ChatSession: ObservableObject, Identifiable {
                 }
                 prefix = "\(header)\n```\n\(ctx)\n```\n\n"
             }
+            
+            // Add attached contexts (files, etc.) if present
+            if let contexts = msg.attachedContexts, !contexts.isEmpty {
+                for context in contexts {
+                    prefix += formatAttachedContext(context)
+                }
+            }
+            
             return SimpleMessage(role: msg.role, content: prefix + msg.content)
         }
         
@@ -3136,6 +3571,46 @@ final class ChatSession: ObservableObject, Identifiable {
     /// Convenience version using the synchronous system prompt (for token estimation only)
     private func buildMessageArray() -> [SimpleMessage] {
         return buildMessageArray(withSystemPrompt: systemPrompt)
+    }
+    
+    /// Format an attached context (file, terminal, etc.) for inclusion in the prompt
+    private func formatAttachedContext(_ context: PinnedContext) -> String {
+        var result = ""
+        
+        switch context.type {
+        case .file:
+            // Format file context
+            var header = "Attached File: \(context.displayName)"
+            header += "\nPath: \(context.path)"
+            if let range = context.lineRangeDescription {
+                header += " (\(range))"
+            }
+            if let lang = context.language {
+                header += "\nLanguage: \(lang)"
+            }
+            
+            // Use summary if available and content is large
+            let contentToInclude: String
+            if let summary = context.summary, context.isLargeContent {
+                contentToInclude = "[Content summarized due to size]\n\(summary)"
+            } else {
+                contentToInclude = context.content
+            }
+            
+            result = "\(header)\n```\(context.language ?? "")\n\(contentToInclude)\n```\n\n"
+            
+        case .terminal:
+            // Format terminal context
+            let header = "Attached Terminal Output:"
+            result = "\(header)\n```\n\(context.content)\n```\n\n"
+            
+        case .snippet:
+            // Format code snippet
+            let header = "Attached Code Snippet:"
+            result = "\(header)\n```\(context.language ?? "")\n\(context.content)\n```\n\n"
+        }
+        
+        return result
     }
     
     // MARK: - SSE Response Streaming (OpenAI-compatible)

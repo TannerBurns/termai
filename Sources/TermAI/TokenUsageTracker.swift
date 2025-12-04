@@ -515,11 +515,17 @@ final class TokenUsageTracker: ObservableObject {
     
     /// Save to disk on background thread (fire-and-forget after cache update)
     private func saveDailyData(_ data: DailyUsageData, for dateKey: String) {
+        // Skip saves during factory reset to prevent data recreation
+        guard !PersistenceService.isFactoryResetInProgress else { return }
+        
         // Update cache first for immediate availability
         cache[dateKey] = data
         
         // Write to disk on background thread
         DispatchQueue.global(qos: .utility).async { [self] in
+            // Double-check flag in case it changed
+            guard !PersistenceService.isFactoryResetInProgress else { return }
+            
             do {
                 let dir = try usageDirectory()
                 let fileURL = dir.appendingPathComponent("usage_\(dateKey).json")

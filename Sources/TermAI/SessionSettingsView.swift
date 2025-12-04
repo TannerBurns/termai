@@ -954,7 +954,7 @@ struct SessionSettingsView: View {
                     Image(systemName: "info.circle")
                         .font(.system(size: 10))
                     if session.customLocalContextSize != nil {
-                        Text("Auto-detected size for '\(session.model.isEmpty ? "unknown model" : session.model)': \(formatContextSize(TokenEstimator.contextLimit(for: session.model)))")
+                        Text("Auto-detected size for '\(session.model.isEmpty ? "unknown model" : session.model)': \(formatContextSize(ModelDefinition.contextSize(for: session.model)))")
                     } else {
                         Text("Using auto-detected context size: \(formatContextSize(session.contextLimitTokens))")
                     }
