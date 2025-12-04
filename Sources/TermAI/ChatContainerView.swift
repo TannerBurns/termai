@@ -119,13 +119,15 @@ struct ChatContainerView: View {
                         }
                     }
                     
-                    // Test Runner button with progress
-                    TestRunnerButton(
-                        agent: testRunnerWrapper.agent,
-                        onStart: { startTestRunner() },
-                        onShowPanel: { showingTestRunner = true },
-                        isDisabled: !(tabsManager.selectedSession?.isConfigured ?? false)
-                    )
+                    // Test Runner button with progress (only shown if enabled in settings)
+                    if AgentSettings.shared.testRunnerEnabled {
+                        TestRunnerButton(
+                            agent: testRunnerWrapper.agent,
+                            onStart: { startTestRunner() },
+                            onShowPanel: { showingTestRunner = true },
+                            isDisabled: !(tabsManager.selectedSession?.isConfigured ?? false)
+                        )
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
