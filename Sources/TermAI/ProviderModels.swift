@@ -96,13 +96,14 @@ struct ModelDefinition: Identifiable, Equatable {
         lhs.id == rhs.id && lhs.provider == rhs.provider
     }
     
-    /// Get context size for a model by ID, with fallback to TokenEstimator
+    /// Get context size for a model by ID
+    /// Returns the curated context size if known, otherwise a conservative default
     static func contextSize(for modelId: String) -> Int {
         if let model = CuratedModels.find(id: modelId) {
             return model.contextSize
         }
-        // Fallback to TokenEstimator for unknown models
-        return TokenEstimator.contextLimit(for: modelId)
+        // Default for unknown/local models (conservative, user can override in settings)
+        return 32_000
     }
 }
 
@@ -144,7 +145,7 @@ struct CuratedModels {
         ModelDefinition(id: "claude-sonnet-4-5", displayName: "Claude Sonnet 4.5", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
         ModelDefinition(id: "claude-opus-4-5", displayName: "Claude Opus 4.5", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
         ModelDefinition(id: "claude-haiku-4-5", displayName: "Claude Haiku 4.5", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
-        ModelDefinition(id: "claude-opus-4", displayName: "Claude Opus 4", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
+        ModelDefinition(id: "claude-opus-4.1", displayName: "Claude Opus 4.1", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
         ModelDefinition(id: "claude-sonnet-4", displayName: "Claude Sonnet 4", provider: .anthropic, supportsReasoning: true, contextSize: 200_000),
         
         // Claude 3.7 series - 200K context

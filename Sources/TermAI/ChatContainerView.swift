@@ -139,17 +139,11 @@ struct ChatContainerView: View {
             // Selected chat tab content (without redundant header)
             if let selectedSession = tabsManager.selectedSession,
                let index = tabsManager.sessions.firstIndex(where: { $0.id == selectedSession.id }) {
-                Group {
-                    if selectedSession.isConfigured {
-                        ChatTabContentView(
-                            session: selectedSession,
-                            tabIndex: index,
-                            ptyModel: ptyModel
-                        )
-                    } else {
-                        SessionSetupPromptView(session: selectedSession)
-                    }
-                }
+                SessionContentSwitcher(
+                    session: selectedSession,
+                    tabIndex: index,
+                    ptyModel: ptyModel
+                )
                 .id(selectedSession.id) // Force view recreation when session changes
                 .onReceive(NotificationCenter.default.publisher(for: .TermAIExecuteCommand)) { note in
                     // When a command is executed, set up prompt-based capture
@@ -486,6 +480,28 @@ struct CommandApprovalSheet: View {
                          "sudo ", "chmod ", "chown ", "dd ", "mkfs", "format"]
         let lower = command.lowercased()
         return dangerous.contains { lower.contains($0) }
+    }
+}
+
+// MARK: - Session Content Switcher
+/// Observes the session directly to properly switch between setup and chat views when configuration changes
+private struct SessionContentSwitcher: View {
+    @ObservedObject var session: ChatSession
+    let tabIndex: Int
+    @ObservedObject var ptyModel: PTYModel
+    
+    var body: some View {
+        Group {
+            if session.isConfigured {
+                ChatTabContentView(
+                    session: session,
+                    tabIndex: tabIndex,
+                    ptyModel: ptyModel
+                )
+            } else {
+                SessionSetupPromptView(session: session)
+            }
+        }
     }
 }
 
