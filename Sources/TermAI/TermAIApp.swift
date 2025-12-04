@@ -1,6 +1,65 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Safe Resource Bundle Access
+// SPM's auto-generated Bundle.module fatalErrors if bundle not found.
+// This provides a safe accessor that works in both app bundles and swift run.
+private enum ResourceBundle {
+    /// Safely get the resource bundle without crashing
+    static var bundle: Bundle? {
+        // For app bundles: resources are in Contents/Resources/
+        // First try the main bundle directly
+        if Bundle.main.url(forResource: "termAIDock", withExtension: "png") != nil {
+            return Bundle.main
+        }
+        
+        // Try to find SPM module bundle manually (for swift run)
+        // SPM puts it next to the executable or in .build directory
+        let bundleName = "TermAI_TermAI.bundle"
+        
+        // Check next to executable
+        if let execURL = Bundle.main.executableURL {
+            let siblingBundle = execURL.deletingLastPathComponent().appendingPathComponent(bundleName)
+            if let bundle = Bundle(url: siblingBundle) {
+                return bundle
+            }
+        }
+        
+        // Check in app bundle root (for symlink/copy workaround)
+        if let bundleURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent(bundleName) as URL?,
+           let bundle = Bundle(url: bundleURL) {
+            return bundle
+        }
+        
+        return nil
+    }
+    
+    /// Get URL for a resource, checking main bundle first then SPM bundle
+    static func url(forResource name: String, withExtension ext: String, subdirectory: String? = nil) -> URL? {
+        // Try main bundle first (app bundle)
+        if let url = Bundle.main.url(forResource: name, withExtension: ext) {
+            return url
+        }
+        if let subdir = subdirectory,
+           let url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: subdir) {
+            return url
+        }
+        
+        // Try SPM module bundle (swift run)
+        if let bundle = bundle {
+            if let url = bundle.url(forResource: name, withExtension: ext) {
+                return url
+            }
+            if let subdir = subdirectory,
+               let url = bundle.url(forResource: name, withExtension: ext, subdirectory: subdir) {
+                return url
+            }
+        }
+        
+        return nil
+    }
+}
+
 // Global configuration for verbose agent logging
 struct AgentDebugConfig {
     static var verboseLogging: Bool {
@@ -548,20 +607,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         
         // Set Dock/app icon with proper macOS-style rounded rect background
         let dockIcon: NSImage? = {
-            // Load the original icon - check multiple bundle locations
+            // Load the original icon using safe resource bundle accessor
             let originalIcon: NSImage? = {
-                // SPM module bundle (swift run)
-                if let url = Bundle.module.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
-                   let img = NSImage(contentsOf: url) {
-                    return img
-                }
-                // Main bundle directly (app bundle)
-                if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png"),
-                   let img = NSImage(contentsOf: url) {
-                    return img
-                }
-                // Main bundle Resources subdirectory
-                if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
+                if let url = ResourceBundle.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
                    let img = NSImage(contentsOf: url) {
                     return img
                 }
@@ -635,18 +683,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             btn.title = ""
             // Use termAIDock icon as monochrome template for menu bar
             let originalIcon: NSImage? = {
-                // SPM module bundle (swift run)
-                if let url = Bundle.module.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
-                   let img = NSImage(contentsOf: url) {
-                    return img
-                }
-                // Main bundle directly (app bundle)
-                if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png"),
-                   let img = NSImage(contentsOf: url) {
-                    return img
-                }
-                // Main bundle Resources subdirectory
-                if let url = Bundle.main.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
+                if let url = ResourceBundle.url(forResource: "termAIDock", withExtension: "png", subdirectory: "Resources"),
                    let img = NSImage(contentsOf: url) {
                     return img
                 }
@@ -689,18 +726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     
     private func findIcon(named name: String) -> NSImage? {
-        // Try SPM module bundle with Resources subdirectory
-        if let url = Bundle.module.url(forResource: name, withExtension: "icns", subdirectory: "Resources"),
-           let img = NSImage(contentsOf: url) {
-            return img
-        }
-        // Try main bundle
-        if let url = Bundle.main.url(forResource: name, withExtension: "icns"),
-           let img = NSImage(contentsOf: url) {
-            return img
-        }
-        // Try main bundle Resources subdirectory
-        if let url = Bundle.main.url(forResource: name, withExtension: "icns", subdirectory: "Resources"),
+        if let url = ResourceBundle.url(forResource: name, withExtension: "icns", subdirectory: "Resources"),
            let img = NSImage(contentsOf: url) {
             return img
         }
@@ -708,11 +734,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     
     private func findPNG(named name: String) -> NSImage? {
-        if let url = Bundle.module.url(forResource: name, withExtension: "png", subdirectory: "Resources"),
-           let img = NSImage(contentsOf: url) {
-            return img
-        }
-        if let url = Bundle.main.url(forResource: name, withExtension: "png"),
+        if let url = ResourceBundle.url(forResource: name, withExtension: "png", subdirectory: "Resources"),
            let img = NSImage(contentsOf: url) {
             return img
         }

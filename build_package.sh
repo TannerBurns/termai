@@ -138,6 +138,16 @@ PLIST
 
 cp "$BUILD_DIR/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
+
+# Copy SPM resource bundle to Contents/Resources/
+# Our safe ResourceBundle accessor finds it there (avoiding SPM's fatalError-prone Bundle.module)
+RESOURCE_BUNDLE="$BUILD_DIR/TermAI_TermAI.bundle"
+if [[ -d "$RESOURCE_BUNDLE" ]]; then
+  echo "Copying resource bundle…"
+  cp -R "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/"
+else
+  echo "Warning: Resource bundle not found at $RESOURCE_BUNDLE"
+fi
 if [[ -n "$ICNS_SRC" && -f "$ICNS_SRC" ]]; then
   cp "$ICNS_SRC" "$APP_DIR/Contents/Resources/termAIDock.icns"
 fi
