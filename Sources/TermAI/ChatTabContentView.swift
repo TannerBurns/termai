@@ -35,6 +35,18 @@ struct ChatTabContentView: View {
                 .padding(.vertical, 8)
             }
             
+            // Attached files/contexts indicator
+            if !session.pendingAttachedContexts.isEmpty {
+                AttachedContextsBar(
+                    contexts: session.pendingAttachedContexts,
+                    onRemove: { id in session.removeAttachedContext(id: id) },
+                    onUpdateLineRanges: { id, ranges in session.updateAttachedContextLineRanges(id: id, lineRanges: ranges) },
+                    onClearAll: { session.clearAttachedContexts() }
+                )
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+            
             // Messages with improved scroll behavior
             ZStack(alignment: .bottomTrailing) {
                 ScrollViewReader { proxy in
@@ -97,6 +109,7 @@ struct ChatTabContentView: View {
                 isAgentRunning: session.isAgentRunning,
                 cwd: effectiveCwd,
                 gitInfo: ptyModel.gitInfo,
+                session: session,
                 onSend: send,
                 onStop: { session.cancelStreaming() }
             )
@@ -126,6 +139,17 @@ struct ChatTabContentView: View {
             // This allows the session to track user's manual cd commands
             if !session.isAgentRunning {
                 session.lastKnownCwd = newCwd
+            }
+            // Index files for @ mention autocomplete
+            if !newCwd.isEmpty {
+                FilePickerService.shared.indexDirectory(newCwd)
+            }
+        }
+        .onAppear {
+            // Initialize file picker index on appear
+            let cwd = ptyModel.currentWorkingDirectory
+            if !cwd.isEmpty {
+                FilePickerService.shared.indexDirectory(cwd)
             }
         }
     }
@@ -342,10 +366,15 @@ private struct ChatInputArea: View {
     let isAgentRunning: Bool
     let cwd: String
     let gitInfo: GitInfo?
+    @ObservedObject var session: ChatSession
     let onSend: () -> Void
     let onStop: () -> Void
     
     @State private var isFocused: Bool = false
+    @State private var showFilePicker: Bool = false
+    @State private var fileQuery: String = ""
+    @State private var mentionStartIndex: String.Index? = nil
+    @StateObject private var filePicker = FilePickerService.shared
     
     /// Input should only be disabled during the brief sending moment, not during agent execution
     private var isInputDisabled: Bool {
@@ -357,7 +386,7 @@ private struct ChatInputArea: View {
             // Text input with modern styling
             ZStack(alignment: .topLeading) {
                 if messageText.isEmpty {
-                    Text(isAgentRunning ? "Add feedback for the agent..." : "Type your message...")
+                    Text(isAgentRunning ? "Add feedback for the agent..." : "Type @ to attach files, then your message...")
                         .font(.system(size: 13))
                         .foregroundColor(isAgentRunning ? Color.blue.opacity(0.6) : .secondary.opacity(0.6))
                         .padding(.horizontal, 12)
@@ -368,6 +397,13 @@ private struct ChatInputArea: View {
                     text: $messageText,
                     isFocused: $isFocused,
                     isDisabled: isInputDisabled,
+                    onMentionTrigger: { triggered in
+                        if triggered {
+                            showFilePicker = true
+                            fileQuery = ""
+                            mentionStartIndex = messageText.endIndex
+                        }
+                    },
                     onSubmit: {
                         if !isInputDisabled && !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             onSend()
@@ -391,7 +427,53 @@ private struct ChatInputArea: View {
                         lineWidth: isFocused ? 2 : 1
                     )
             )
-            
+            .popover(isPresented: $showFilePicker, arrowEdge: .top) {
+                FileMentionPopover(
+                    query: $fileQuery,
+                    files: filePicker.search(query: fileQueryWithoutRanges),
+                    isLoading: filePicker.isIndexing,
+                    onSelect: { file in
+                        attachFile(file)
+                        showFilePicker = false
+                    },
+                    onDismiss: {
+                        showFilePicker = false
+                        // Remove the @ from the message if user cancelled without selecting
+                        if let startIdx = mentionStartIndex,
+                           startIdx <= messageText.endIndex,
+                           messageText.index(before: startIdx) >= messageText.startIndex {
+                            let atIndex = messageText.index(before: startIdx)
+                            if atIndex < messageText.endIndex && messageText[atIndex] == "@" {
+                                // Only remove if nothing was typed after @
+                                let afterAt = String(messageText[startIdx...]).trimmingCharacters(in: .whitespaces)
+                                if afterAt.isEmpty {
+                                    messageText.remove(at: atIndex)
+                                }
+                            }
+                        }
+                    }
+                )
+            }
+            .onChange(of: messageText) { newValue in
+                // Update file query when typing after @
+                if showFilePicker, let startIdx = mentionStartIndex {
+                    if startIdx <= newValue.endIndex {
+                        fileQuery = String(newValue[startIdx...])
+                        // Close picker if user deleted the @
+                        if let atIdx = newValue.index(startIdx, offsetBy: -1, limitedBy: newValue.startIndex),
+                           atIdx >= newValue.startIndex,
+                           atIdx < newValue.endIndex {
+                            if newValue[atIdx] != "@" {
+                                showFilePicker = false
+                            }
+                        } else if startIdx > newValue.endIndex {
+                            showFilePicker = false
+                        }
+                    } else {
+                        showFilePicker = false
+                    }
+                }
+            }
             // Bottom bar with CWD, git info, stop button, and send button
             HStack(spacing: 8) {
                 // Current working directory with hover tooltip
@@ -465,6 +547,56 @@ private struct ChatInputArea: View {
         .background(.ultraThinMaterial)
     }
     
+    /// Attach a file to the pending context
+    /// Supports line range syntax in fileQuery: "filename:10-50" or "filename:10-50,80-100"
+    /// Line ranges can be edited later through the attached file viewer
+    private func attachFile(_ file: FileEntry) {
+        // Check if there's a line range specification in the query
+        let lineRanges = parseLineRangesFromQuery()
+        
+        // Always just show @filename in the text (line ranges managed via attached badge)
+        if let startIdx = mentionStartIndex,
+           let atIdx = messageText.index(startIdx, offsetBy: -1, limitedBy: messageText.startIndex),
+           atIdx >= messageText.startIndex {
+            messageText.replaceSubrange(atIdx..<messageText.endIndex, with: "@\(file.name) ")
+        }
+        
+        if !lineRanges.isEmpty {
+            // Read file with specific line ranges
+            guard let result = filePicker.readFileWithRanges(at: file.path, ranges: lineRanges) else { return }
+            session.attachFileWithRanges(path: file.path, selectedContent: result.selected, fullContent: result.full, lineRanges: lineRanges)
+        } else {
+            // No line ranges - attach entire file (but store full content for later range editing)
+            guard let content = filePicker.readFile(at: file.path) else { return }
+            // Store with fullContent so line ranges can be edited later
+            session.attachFileWithRanges(path: file.path, selectedContent: content, fullContent: content, lineRanges: [])
+        }
+    }
+    
+    /// Get the file query without the line range specification (for file search)
+    private var fileQueryWithoutRanges: String {
+        guard let colonIndex = fileQuery.lastIndex(of: ":") else { return fileQuery }
+        // Check if what follows the colon looks like a line range (starts with a digit)
+        let afterColon = fileQuery[fileQuery.index(after: colonIndex)...]
+        if let firstChar = afterColon.first, firstChar.isNumber {
+            return String(fileQuery[..<colonIndex])
+        }
+        return fileQuery
+    }
+    
+    /// Parse line ranges from the current file query (e.g., "file:10-50,80-100")
+    private func parseLineRangesFromQuery() -> [LineRange] {
+        // Check if query contains a colon followed by line numbers
+        guard let colonIndex = fileQuery.lastIndex(of: ":") else { return [] }
+        
+        let afterColon = fileQuery[fileQuery.index(after: colonIndex)...]
+        // Verify it looks like a line range (starts with a digit)
+        guard let firstChar = afterColon.first, firstChar.isNumber else { return [] }
+        
+        let rangeStr = String(afterColon)
+        return LineRange.parseMultiple(rangeStr)
+    }
+    
     private func shortenPath(_ path: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         if path.hasPrefix(home) {
@@ -514,11 +646,12 @@ private struct ChatInputArea: View {
     }
 }
 
-// MARK: - Custom Text Editor with Enter/Shift+Enter handling
+// MARK: - Custom Text Editor with Enter/Shift+Enter handling and @mention styling
 private struct ChatTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
     let isDisabled: Bool
+    var onMentionTrigger: ((Bool) -> Void)? = nil
     let onSubmit: () -> Void
     
     func makeCoordinator() -> Coordinator {
@@ -536,7 +669,8 @@ private struct ChatTextEditor: NSViewRepresentable {
         let textView = SubmitTextView()
         textView.delegate = context.coordinator
         textView.onSubmit = onSubmit
-        textView.isRichText = false
+        textView.onMentionTrigger = onMentionTrigger
+        textView.isRichText = true
         textView.allowsUndo = true
         textView.font = NSFont.systemFont(ofSize: 13)
         textView.textColor = NSColor.labelColor
@@ -548,6 +682,12 @@ private struct ChatTextEditor: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.autoresizingMask = [.width]
         
+        // Set default typing attributes
+        textView.typingAttributes = [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.labelColor
+        ]
+        
         scrollView.documentView = textView
         context.coordinator.textView = textView
         
@@ -558,16 +698,24 @@ private struct ChatTextEditor: NSViewRepresentable {
         guard let textView = scrollView.documentView as? SubmitTextView else { return }
         
         if textView.string != text {
+            let selectedRange = textView.selectedRange()
             textView.string = text
+            context.coordinator.applyMentionStyling(to: textView)
+            // Restore cursor position
+            if selectedRange.location <= textView.string.count {
+                textView.setSelectedRange(selectedRange)
+            }
         }
         textView.isEditable = !isDisabled
         textView.isSelectable = !isDisabled
         textView.onSubmit = onSubmit
+        textView.onMentionTrigger = onMentionTrigger
     }
     
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ChatTextEditor
         weak var textView: NSTextView?
+        private var isApplyingStyling = false
         
         init(_ parent: ChatTextEditor) {
             self.parent = parent
@@ -575,7 +723,14 @@ private struct ChatTextEditor: NSViewRepresentable {
         
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            
+            // Update the binding first
             parent.text = textView.string
+            
+            // Apply mention styling
+            if !isApplyingStyling {
+                applyMentionStyling(to: textView)
+            }
         }
         
         func textDidBeginEditing(_ notification: Notification) {
@@ -585,12 +740,60 @@ private struct ChatTextEditor: NSViewRepresentable {
         func textDidEndEditing(_ notification: Notification) {
             parent.isFocused = false
         }
+        
+        /// Apply badge-like styling to @filename mentions (visual only, not clickable)
+        func applyMentionStyling(to textView: NSTextView) {
+            isApplyingStyling = true
+            defer { isApplyingStyling = false }
+            
+            let text = textView.string
+            guard !text.isEmpty else { return }
+            
+            // Save cursor position
+            let selectedRange = textView.selectedRange()
+            
+            // Create attributed string with default styling
+            let attributedString = NSMutableAttributedString(string: text)
+            let defaultAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.labelColor
+            ]
+            attributedString.addAttributes(defaultAttrs, range: NSRange(location: 0, length: text.count))
+            
+            // Pattern for @mentions: @filename.ext (line ranges are managed via attached badge, not in text)
+            let pattern = "@[\\w\\-\\.]+"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: text.count))
+                
+                for match in matches {
+                    // Apply badge-like styling (visual only)
+                    let mentionAttrs: [NSAttributedString.Key: Any] = [
+                        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                        .foregroundColor: NSColor.controlAccentColor,
+                        .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.15)
+                    ]
+                    attributedString.addAttributes(mentionAttrs, range: match.range)
+                }
+            }
+            
+            // Apply the attributed string
+            textView.textStorage?.setAttributedString(attributedString)
+            
+            // Restore cursor position
+            if selectedRange.location <= text.count {
+                textView.setSelectedRange(selectedRange)
+            }
+            
+            // Ensure typing attributes are reset for new input
+            textView.typingAttributes = defaultAttrs
+        }
     }
 }
 
-// Custom NSTextView that handles Enter vs Shift+Enter
+// Custom NSTextView that handles Enter vs Shift+Enter and @ mentions
 private class SubmitTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    var onMentionTrigger: ((Bool) -> Void)?
     
     override func keyDown(with event: NSEvent) {
         // Check for Enter key (keyCode 36)
@@ -603,6 +806,15 @@ private class SubmitTextView: NSTextView {
             // Shift+Enter: insert newline (default behavior)
         }
         super.keyDown(with: event)
+    }
+    
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        super.insertText(string, replacementRange: replacementRange)
+        
+        // Check if @ was typed
+        if let str = string as? String, str == "@" {
+            onMentionTrigger?(true)
+        }
     }
 }
 
@@ -747,16 +959,31 @@ private struct ChatMessageBubble: View {
                 }
             }
             
+            // Attached files badges for user messages
+            if message.role == "user", let contexts = message.attachedContexts, !contexts.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(contexts) { context in
+                            AttachedFileBadge(context: context)
+                        }
+                    }
+                }
+            }
+            
             // Message content
             if let evt = message.agentEvent {
                 AgentEventView(event: evt, ptyModel: ptyModel)
             } else {
-                MarkdownRenderer(text: message.content)
-                    .environmentObject(ptyModel)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(
+                MessageContentWithMentions(
+                    content: message.content,
+                    attachedContexts: message.attachedContexts,
+                    isUserMessage: message.role == "user"
+                )
+                .environmentObject(ptyModel)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(
                         Group {
                             if message.role == "user" {
                                 RoundedRectangle(cornerRadius: 14)
@@ -1318,6 +1545,720 @@ struct AgentControlsBar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(.ultraThinMaterial.opacity(0.5))
+    }
+}
+
+// MARK: - File Mention Popover
+
+/// Autocomplete popover for @ file mentions
+private struct FileMentionPopover: View {
+    @Binding var query: String
+    let files: [FileEntry]
+    let isLoading: Bool
+    let onSelect: (FileEntry) -> Void
+    let onDismiss: () -> Void
+    
+    @State private var selectedIndex: Int = 0
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack(spacing: 8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .foregroundColor(.accentColor)
+                Text("Attach File")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                
+                Spacer()
+                
+                if isLoading {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                }
+                
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
+            
+            Divider()
+            
+            // File list
+            if files.isEmpty {
+                if query.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 20))
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text("Type to search files")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("e.g., main.swift or src/utils")
+                            .font(.caption2)
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 150)
+                } else {
+                    VStack(spacing: 8) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 20))
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text("No matching files")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 150)
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(files.enumerated()), id: \.element.id) { index, file in
+                            FileMentionRow(
+                                file: file,
+                                isSelected: index == selectedIndex,
+                                onSelect: { onSelect(file) }
+                            )
+                            .onHover { hovering in
+                                if hovering {
+                                    selectedIndex = index
+                                }
+                            }
+                        }
+                    }
+                }
+                .frame(minHeight: 150, maxHeight: 250)
+            }
+            
+            // Hint
+            HStack(spacing: 12) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 9))
+                    Text("navigate")
+                        .font(.caption2)
+                }
+                .foregroundColor(.secondary.opacity(0.7))
+                
+                HStack(spacing: 4) {
+                    Image(systemName: "return")
+                        .font(.system(size: 9))
+                    Text("select")
+                        .font(.caption2)
+                }
+                .foregroundColor(.secondary.opacity(0.7))
+                
+                HStack(spacing: 4) {
+                    Text("esc")
+                        .font(.caption2)
+                    Text("cancel")
+                        .font(.caption2)
+                }
+                .foregroundColor(.secondary.opacity(0.7))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.92))
+        }
+        .frame(width: 320)
+        .background(colorScheme == .dark ? Color(white: 0.1) : Color.white)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
+    }
+}
+
+// MARK: - File Mention Row
+
+private struct FileMentionRow: View {
+    let file: FileEntry
+    let isSelected: Bool
+    let onSelect: () -> Void
+    
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 10) {
+                // File icon
+                Image(systemName: file.icon)
+                    .font(.system(size: 12))
+                    .foregroundColor(isSelected ? .accentColor : .secondary)
+                    .frame(width: 20)
+                
+                // File info
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(file.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                    
+                    Text(file.relativePath)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                
+                Spacer()
+                
+                // Language badge
+                if let lang = file.language {
+                    Text(lang)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(Color.secondary.opacity(0.1))
+                        )
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Attached Contexts Bar
+
+/// Horizontal scrolling bar showing attached files/contexts
+private struct AttachedContextsBar: View {
+    let contexts: [PinnedContext]
+    let onRemove: (UUID) -> Void
+    let onUpdateLineRanges: (UUID, [LineRange]) -> Void
+    let onClearAll: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                // Label
+                HStack(spacing: 4) {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 10))
+                    Text("Attached (\(contexts.count))")
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                }
+                .foregroundColor(.secondary)
+                
+                // Scrollable chips
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(contexts) { context in
+                            AttachedContextChip(
+                                context: context,
+                                onRemove: { onRemove(context.id) },
+                                onUpdateLineRanges: { ranges in onUpdateLineRanges(context.id, ranges) }
+                            )
+                        }
+                    }
+                }
+                
+                Spacer()
+                
+                // Clear all button
+                if contexts.count > 1 {
+                    Button(action: onClearAll) {
+                        Text("Clear all")
+                            .font(.caption2)
+                            .foregroundColor(.red.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.ultraThinMaterial)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.accentColor.opacity(0.2), lineWidth: 1)
+            )
+        }
+    }
+}
+
+// MARK: - Attached Context Chip
+
+/// Compact chip showing an attached file/context - clickable to edit line ranges
+private struct AttachedContextChip: View {
+    let context: PinnedContext
+    let onRemove: () -> Void
+    let onUpdateLineRanges: ([LineRange]) -> Void
+    
+    @State private var isHovered: Bool = false
+    @State private var showingEditor: Bool = false
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            // Icon
+            Image(systemName: context.icon)
+                .font(.system(size: 10))
+                .foregroundColor(.accentColor)
+            
+            // Name
+            Text(context.displayName)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+            
+            // Line range if applicable
+            if let range = context.lineRangeDescription {
+                Text("(\(range))")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            
+            // Large content indicator
+            if context.isLargeContent {
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 9))
+                    .foregroundColor(.orange)
+                    .help("Large file - will be summarized")
+            }
+            
+            // Remove button
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(isHovered ? .red : .secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(isHovered ? Color.accentColor.opacity(0.15) : Color.accentColor.opacity(0.1))
+        )
+        .overlay(
+            Capsule()
+                .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+        )
+        .onHover { isHovered = $0 }
+        .onTapGesture {
+            showingEditor = true
+        }
+        .sheet(isPresented: $showingEditor) {
+            FileViewerSheet(
+                context: context,
+                onDismiss: { showingEditor = false },
+                onUpdateLineRanges: { ranges in
+                    onUpdateLineRanges(ranges)
+                    showingEditor = false
+                }
+            )
+        }
+        .help("Click to edit line selection for \(context.displayName)")
+    }
+}
+
+// MARK: - Attached Context Preview
+
+/// Preview popover for attached context
+private struct AttachedContextPreview: View {
+    let context: PinnedContext
+    
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack(spacing: 8) {
+                Image(systemName: context.icon)
+                    .foregroundColor(.accentColor)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(context.displayName)
+                        .font(.system(size: 13, weight: .semibold))
+                    
+                    Text(context.path)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                
+                Spacer()
+                
+                if let range = context.lineRangeDescription {
+                    Text(range)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(Color.secondary.opacity(0.1))
+                        )
+                }
+            }
+            .padding(12)
+            .background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
+            
+            Divider()
+            
+            // Content preview
+            ScrollView {
+                if let lang = context.language {
+                    // Syntax highlighted preview
+                    MultiLanguageHighlighter(colorScheme: colorScheme)
+                        .highlight(String(context.content.prefix(2000)), language: lang)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                } else {
+                    Text(String(context.content.prefix(2000)))
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                }
+                
+                if context.content.count > 2000 {
+                    Text("... (\(context.content.count - 2000) more characters)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
+                }
+            }
+            .frame(maxHeight: 300)
+            
+            // Footer
+            Divider()
+            
+            HStack {
+                Text("\(TokenEstimator.estimateTokens(context.content)) tokens")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                
+                if context.isLargeContent {
+                    Text("• Will be summarized")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.92))
+        }
+        .frame(width: 450)
+        .background(colorScheme == .dark ? Color(white: 0.1) : Color.white)
+    }
+}
+
+// MARK: - Attached File Badge (for message history)
+
+/// Badge shown in message history for attached files
+private struct AttachedFileBadge: View {
+    let context: PinnedContext
+    
+    @State private var showingViewer: Bool = false
+    @State private var isHovered: Bool = false
+    
+    var body: some View {
+        Button(action: { showingViewer = true }) {
+            HStack(spacing: 4) {
+                Image(systemName: context.icon)
+                    .font(.system(size: 9))
+                Text(context.displayName)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                if let range = context.lineRangeDescription {
+                    Text("(\(range))")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .foregroundColor(.accentColor)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(isHovered ? Color.accentColor.opacity(0.2) : Color.accentColor.opacity(0.1))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+        .help("Click to view \(context.displayName)")
+        .sheet(isPresented: $showingViewer) {
+            FileViewerSheet(context: context) {
+                showingViewer = false
+            }
+        }
+    }
+}
+
+// MARK: - Message Content with Mentions
+
+/// Renders message content with @filename mentions as clickable badges
+private struct MessageContentWithMentions: View {
+    let content: String
+    let attachedContexts: [PinnedContext]?
+    let isUserMessage: Bool
+    
+    @EnvironmentObject var ptyModel: PTYModel
+    
+    var body: some View {
+        if isUserMessage, let contexts = attachedContexts, !contexts.isEmpty {
+            // User message with attached files - render with inline mention badges
+            MentionTextView(
+                content: content,
+                attachedContexts: contexts
+            )
+        } else {
+            // Regular message - use markdown renderer
+            MarkdownRenderer(text: content)
+                .environmentObject(ptyModel)
+        }
+    }
+}
+
+// MARK: - Mention Text View
+
+/// Renders text with @filename patterns as clickable badges
+private struct MentionTextView: View {
+    let content: String
+    let attachedContexts: [PinnedContext]
+    
+    @State private var selectedContext: PinnedContext? = nil
+    
+    var body: some View {
+        // Parse content and render with mention badges
+        let segments = parseMentions(content)
+        
+        FlowLayout(spacing: 4) {
+            ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                switch segment {
+                case .text(let text):
+                    Text(text)
+                        .font(.system(size: 13))
+                case .mention(let filename):
+                    InlineMentionBadge(
+                        filename: filename,
+                        context: findContext(for: filename),
+                        onTap: { ctx in
+                            selectedContext = ctx
+                        }
+                    )
+                }
+            }
+        }
+        .sheet(item: $selectedContext) { context in
+            FileViewerSheet(context: context) {
+                selectedContext = nil
+            }
+        }
+    }
+    
+    /// Parse content into text and mention segments
+    private func parseMentions(_ text: String) -> [MentionSegment] {
+        var segments: [MentionSegment] = []
+        var currentIndex = text.startIndex
+        
+        // Pattern to match @filename (alphanumeric, dots, underscores, hyphens)
+        let pattern = "@([\\w\\-\\.]+)"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return [.text(text)]
+        }
+        
+        let nsString = text as NSString
+        let matches = regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsString.length))
+        
+        for match in matches {
+            let matchRange = Range(match.range, in: text)!
+            let filenameRange = Range(match.range(at: 1), in: text)!
+            
+            // Add text before the match
+            if currentIndex < matchRange.lowerBound {
+                let textBefore = String(text[currentIndex..<matchRange.lowerBound])
+                if !textBefore.isEmpty {
+                    segments.append(.text(textBefore))
+                }
+            }
+            
+            // Add the mention
+            let filename = String(text[filenameRange])
+            segments.append(.mention(filename))
+            
+            currentIndex = matchRange.upperBound
+        }
+        
+        // Add remaining text
+        if currentIndex < text.endIndex {
+            let remainingText = String(text[currentIndex...])
+            if !remainingText.isEmpty {
+                segments.append(.text(remainingText))
+            }
+        }
+        
+        return segments.isEmpty ? [.text(text)] : segments
+    }
+    
+    /// Find the attached context that matches a filename
+    private func findContext(for filename: String) -> PinnedContext? {
+        attachedContexts.first { ctx in
+            ctx.displayName == filename ||
+            ctx.displayName.hasPrefix(filename) ||
+            filename.hasPrefix(ctx.displayName.components(separatedBy: ".").first ?? "")
+        }
+    }
+}
+
+/// Segment type for mention parsing
+private enum MentionSegment {
+    case text(String)
+    case mention(String)
+}
+
+// MARK: - Inline Mention Badge
+
+/// Clickable badge for @filename in message text - matches AttachedFileBadge styling
+private struct InlineMentionBadge: View {
+    let filename: String
+    let context: PinnedContext?
+    let onTap: (PinnedContext) -> Void
+    
+    @State private var isHovered: Bool = false
+    
+    var body: some View {
+        if let ctx = context {
+            Button(action: { onTap(ctx) }) {
+                HStack(spacing: 4) {
+                    Image(systemName: ctx.icon)
+                        .font(.system(size: 9))
+                    Text(ctx.displayName)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                    if let range = ctx.lineRangeDescription {
+                        Text("(\(range))")
+                            .font(.system(size: 9))
+                            .foregroundColor(.accentColor.opacity(0.7))
+                    }
+                }
+                .foregroundColor(.accentColor)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(isHovered ? Color.accentColor.opacity(0.2) : Color.accentColor.opacity(0.1))
+                )
+                .overlay(
+                    Capsule()
+                        .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+            .help("Click to view \(ctx.displayName)")
+        } else {
+            // No matching context - show as plain text badge (still styled like attached badge)
+            HStack(spacing: 4) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 9))
+                Text(filename)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(Color.secondary.opacity(0.1))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+            )
+        }
+    }
+}
+
+// MARK: - Flow Layout
+
+/// A simple flow layout that wraps content to multiple lines
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+    
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = arrangeSubviews(proposal: proposal, subviews: subviews)
+        return result.size
+    }
+    
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = arrangeSubviews(proposal: proposal, subviews: subviews)
+        
+        for (index, position) in result.positions.enumerated() {
+            subviews[index].place(
+                at: CGPoint(x: bounds.minX + position.x, y: bounds.minY + position.y),
+                proposal: ProposedViewSize(result.sizes[index])
+            )
+        }
+    }
+    
+    private func arrangeSubviews(proposal: ProposedViewSize, subviews: Subviews) -> ArrangementResult {
+        let maxWidth = proposal.width ?? .infinity
+        
+        var positions: [CGPoint] = []
+        var sizes: [CGSize] = []
+        var currentX: CGFloat = 0
+        var currentY: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var totalHeight: CGFloat = 0
+        var maxLineWidth: CGFloat = 0
+        
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            sizes.append(size)
+            
+            // Check if we need to wrap to next line
+            if currentX + size.width > maxWidth && currentX > 0 {
+                currentX = 0
+                currentY += lineHeight + spacing
+                lineHeight = 0
+            }
+            
+            positions.append(CGPoint(x: currentX, y: currentY))
+            
+            currentX += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+            maxLineWidth = max(maxLineWidth, currentX - spacing)
+        }
+        
+        totalHeight = currentY + lineHeight
+        
+        return ArrangementResult(
+            positions: positions,
+            sizes: sizes,
+            size: CGSize(width: maxLineWidth, height: totalHeight)
+        )
+    }
+    
+    private struct ArrangementResult {
+        var positions: [CGPoint]
+        var sizes: [CGSize]
+        var size: CGSize
     }
 }
 
