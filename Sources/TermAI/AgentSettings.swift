@@ -163,6 +163,11 @@ final class AgentSettings: ObservableObject, Codable {
     /// Reasoning effort for terminal suggestions (for models that support it)
     @Published var terminalSuggestionsReasoningEffort: ReasoningEffort = .none
     
+    // MARK: - Test Runner
+    
+    /// Enable the Test Runner button in the chat UI (disabled by default)
+    @Published var testRunnerEnabled: Bool = false
+    
     /// Check if terminal suggestions are fully configured
     var isTerminalSuggestionsConfigured: Bool {
         terminalSuggestionsEnabled && 
@@ -229,6 +234,7 @@ final class AgentSettings: ObservableObject, Codable {
         case terminalSuggestionsDebounceSeconds
         case readShellHistory
         case terminalSuggestionsReasoningEffort
+        case testRunnerEnabled
         case ollamaBaseURL
         case lmStudioBaseURL
         case vllmBaseURL
@@ -271,6 +277,7 @@ final class AgentSettings: ObservableObject, Codable {
         terminalSuggestionsDebounceSeconds = try container.decodeIfPresent(Double.self, forKey: .terminalSuggestionsDebounceSeconds) ?? 2.5
         readShellHistory = try container.decodeIfPresent(Bool.self, forKey: .readShellHistory) ?? true
         terminalSuggestionsReasoningEffort = try container.decodeIfPresent(ReasoningEffort.self, forKey: .terminalSuggestionsReasoningEffort) ?? .none
+        testRunnerEnabled = try container.decodeIfPresent(Bool.self, forKey: .testRunnerEnabled) ?? false
         ollamaBaseURL = try container.decodeIfPresent(String.self, forKey: .ollamaBaseURL) ?? "http://localhost:11434/v1"
         lmStudioBaseURL = try container.decodeIfPresent(String.self, forKey: .lmStudioBaseURL) ?? "http://localhost:1234/v1"
         vllmBaseURL = try container.decodeIfPresent(String.self, forKey: .vllmBaseURL) ?? "http://localhost:8000/v1"
@@ -311,6 +318,7 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(terminalSuggestionsDebounceSeconds, forKey: .terminalSuggestionsDebounceSeconds)
         try container.encode(readShellHistory, forKey: .readShellHistory)
         try container.encode(terminalSuggestionsReasoningEffort, forKey: .terminalSuggestionsReasoningEffort)
+        try container.encode(testRunnerEnabled, forKey: .testRunnerEnabled)
         try container.encode(ollamaBaseURL, forKey: .ollamaBaseURL)
         try container.encode(lmStudioBaseURL, forKey: .lmStudioBaseURL)
         try container.encode(vllmBaseURL, forKey: .vllmBaseURL)
@@ -404,6 +412,7 @@ final class AgentSettings: ObservableObject, Codable {
         terminalSuggestionsDebounceSeconds = 2.5
         readShellHistory = true
         terminalSuggestionsReasoningEffort = .none
+        testRunnerEnabled = false
         ollamaBaseURL = "http://localhost:11434/v1"
         lmStudioBaseURL = "http://localhost:1234/v1"
         vllmBaseURL = "http://localhost:8000/v1"
