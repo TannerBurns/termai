@@ -194,7 +194,6 @@ enum PinnedContextType: String, Codable, Equatable {
     case snippet    // User-provided code snippet
 }
 
-/// Represents an attached context (file, terminal output, etc.) for a chat message
 /// Represents a line range (start and end are 1-indexed, inclusive)
 struct LineRange: Codable, Equatable, Hashable {
     let start: Int
@@ -241,6 +240,7 @@ struct LineRange: Codable, Equatable, Hashable {
     }
 }
 
+/// Represents an attached context (file, terminal output, etc.) for a chat message
 struct PinnedContext: Codable, Identifiable, Equatable {
     let id: UUID
     let type: PinnedContextType
