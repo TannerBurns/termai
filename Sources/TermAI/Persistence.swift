@@ -1,6 +1,9 @@
 import Foundation
 
 enum PersistenceService {
+    /// Flag to indicate factory reset is in progress - prevents saves during app termination
+    static var isFactoryResetInProgress = false
+    
     static func appSupportDirectory() throws -> URL {
         let fm = FileManager.default
         let url = try fm.url(
@@ -18,6 +21,9 @@ enum PersistenceService {
     // MARK: - Synchronous Methods (for backwards compatibility)
     
     static func saveJSON<T: Encodable>(_ value: T, to filename: String) throws {
+        // Skip saves during factory reset to prevent data recreation
+        guard !isFactoryResetInProgress else { return }
+        
         let dir = try appSupportDirectory()
         let fileURL = dir.appendingPathComponent(filename)
         let data = try JSONEncoder().encode(value)
@@ -35,11 +41,19 @@ enum PersistenceService {
     
     /// Save JSON to file asynchronously - runs file I/O on background thread
     static func saveJSONAsync<T: Encodable>(_ value: T, to filename: String) async throws {
+        // Skip saves during factory reset to prevent data recreation
+        guard !isFactoryResetInProgress else { return }
+        
         // Encode on calling thread (usually fast), then write on background
         let data = try JSONEncoder().encode(value)
         
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .utility).async {
+                // Double-check flag in case it changed
+                guard !isFactoryResetInProgress else {
+                    continuation.resume()
+                    return
+                }
                 do {
                     let dir = try appSupportDirectory()
                     let fileURL = dir.appendingPathComponent(filename)
@@ -71,6 +85,9 @@ enum PersistenceService {
     
     /// Fire-and-forget save - updates happen in background, errors are logged
     static func saveJSONInBackground<T: Encodable>(_ value: T, to filename: String) {
+        // Skip saves during factory reset to prevent data recreation
+        guard !isFactoryResetInProgress else { return }
+        
         // Encode on calling thread to capture the value
         guard let data = try? JSONEncoder().encode(value) else {
             print("[PersistenceService] Failed to encode data for \(filename)")
@@ -78,6 +95,9 @@ enum PersistenceService {
         }
         
         DispatchQueue.global(qos: .utility).async {
+            // Double-check flag in case it changed
+            guard !isFactoryResetInProgress else { return }
+            
             do {
                 let dir = try appSupportDirectory()
                 let fileURL = dir.appendingPathComponent(filename)
@@ -92,6 +112,9 @@ enum PersistenceService {
     /// and clearing UserDefaults entries
     /// This is a destructive operation - the app should quit after calling this
     static func clearAllData() throws {
+        // Set flag FIRST to prevent any saves during app termination
+        isFactoryResetInProgress = true
+        
         let fm = FileManager.default
         let url = try fm.url(
             for: .applicationSupportDirectory,
