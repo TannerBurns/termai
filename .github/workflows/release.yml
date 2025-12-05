@@ -53,6 +53,9 @@ jobs:
           # Clean up certificate file
           rm $RUNNER_TEMP/certificate.p12
 
+      - name: Install create-dmg
+        run: brew install create-dmg
+
       - name: Build, sign, and notarize
         env:
           DEVELOPER_ID: ${{ secrets.DEVELOPER_ID }}
@@ -79,6 +82,7 @@ jobs:
           path: |
             TermAI.zip
             TermAI_notarized.zip
+            TermAI.dmg
           if-no-files-found: warn
 
       - name: Create GitHub Release
@@ -87,6 +91,7 @@ jobs:
         with:
           files: |
             TermAI_notarized.zip
+            TermAI.dmg
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
