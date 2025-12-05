@@ -312,9 +312,9 @@ struct FavoritesSettingsView: View {
     
     // MARK: - Actions
     
-    /// Get all currently used emojis
-    private var existingEmojis: Set<String> {
-        Set(settings.favoriteCommands.map { $0.emoji })
+    /// Get all existing favorites for AI context
+    private var existingFavorites: [ExistingFavorite] {
+        settings.favoriteCommands.map { ExistingFavorite(command: $0.command, emoji: $0.emoji) }
     }
     
     private func addCommand() {
@@ -323,11 +323,11 @@ struct FavoritesSettingsView: View {
         
         isGeneratingEmoji = true
         
-        // Capture existing emojis before async call
-        let usedEmojis = existingEmojis
+        // Capture existing favorites before async call (for AI context)
+        let favorites = existingFavorites
         
         Task {
-            let emoji = await EmojiGenerator.shared.generateEmoji(for: command, avoiding: usedEmojis)
+            let emoji = await EmojiGenerator.shared.generateEmoji(for: command, existingFavorites: favorites)
             
             await MainActor.run {
                 let newFavorite = FavoriteCommand(command: command, emoji: emoji)
@@ -341,11 +341,13 @@ struct FavoritesSettingsView: View {
     private func regenerateEmoji(for command: FavoriteCommand) {
         regeneratingEmojiId = command.id
         
-        // Get emojis to avoid (all except the current command's emoji)
-        let usedEmojis = Set(settings.favoriteCommands.filter { $0.id != command.id }.map { $0.emoji })
+        // Get existing favorites excluding the current one (for AI context)
+        let favorites = settings.favoriteCommands
+            .filter { $0.id != command.id }
+            .map { ExistingFavorite(command: $0.command, emoji: $0.emoji) }
         
         Task {
-            let emoji = await EmojiGenerator.shared.generateEmoji(for: command.command, avoiding: usedEmojis)
+            let emoji = await EmojiGenerator.shared.generateEmoji(for: command.command, existingFavorites: favorites)
             
             await MainActor.run {
                 var updated = command

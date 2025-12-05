@@ -8,6 +8,7 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
     /// User-provided API key overrides (takes precedence over environment)
     @Published private var openAIKeyOverride: String?
     @Published private var anthropicKeyOverride: String?
+    @Published private var googleKeyOverride: String?
     
     /// Cached environment variables from shell (for GUI apps that don't inherit shell env)
     private var shellEnvironment: [String: String] = [:]
@@ -15,6 +16,7 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
     enum CodingKeys: String, CodingKey {
         case openAIKeyOverride
         case anthropicKeyOverride
+        case googleKeyOverride
     }
     
     init() {
@@ -25,6 +27,7 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         openAIKeyOverride = try container.decodeIfPresent(String.self, forKey: .openAIKeyOverride)
         anthropicKeyOverride = try container.decodeIfPresent(String.self, forKey: .anthropicKeyOverride)
+        googleKeyOverride = try container.decodeIfPresent(String.self, forKey: .googleKeyOverride)
         loadShellEnvironment()
     }
     
@@ -32,6 +35,7 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(openAIKeyOverride, forKey: .openAIKeyOverride)
         try container.encodeIfPresent(anthropicKeyOverride, forKey: .anthropicKeyOverride)
+        try container.encodeIfPresent(googleKeyOverride, forKey: .googleKeyOverride)
     }
     
     // MARK: - Shell Environment Loading
@@ -40,7 +44,7 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
     /// GUI apps launched from Finder/Dock don't inherit shell environment variables,
     /// so we parse common shell config files to find API key exports.
     private func loadShellEnvironment() {
-        let envVars = [CloudProvider.openai.apiKeyEnvVariable, CloudProvider.anthropic.apiKeyEnvVariable]
+        let envVars = [CloudProvider.openai.apiKeyEnvVariable, CloudProvider.anthropic.apiKeyEnvVariable, CloudProvider.google.apiKeyEnvVariable]
         let directEnv = ProcessInfo.processInfo.environment
         
         // For each key, check direct env first, then parse config files
@@ -129,6 +133,8 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
             return openAIKeyOverride ?? getEnvVar(provider.apiKeyEnvVariable)
         case .anthropic:
             return anthropicKeyOverride ?? getEnvVar(provider.apiKeyEnvVariable)
+        case .google:
+            return googleKeyOverride ?? getEnvVar(provider.apiKeyEnvVariable)
         }
     }
     
@@ -151,6 +157,8 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
             return openAIKeyOverride == nil && getEnvVar(provider.apiKeyEnvVariable) != nil
         case .anthropic:
             return anthropicKeyOverride == nil && getEnvVar(provider.apiKeyEnvVariable) != nil
+        case .google:
+            return googleKeyOverride == nil && getEnvVar(provider.apiKeyEnvVariable) != nil
         }
     }
     
@@ -161,6 +169,8 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
             return openAIKeyOverride != nil && !openAIKeyOverride!.isEmpty
         case .anthropic:
             return anthropicKeyOverride != nil && !anthropicKeyOverride!.isEmpty
+        case .google:
+            return googleKeyOverride != nil && !googleKeyOverride!.isEmpty
         }
     }
     
@@ -181,6 +191,8 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
             openAIKeyOverride = effectiveKey
         case .anthropic:
             anthropicKeyOverride = effectiveKey
+        case .google:
+            googleKeyOverride = effectiveKey
         }
         save()
     }
@@ -192,6 +204,8 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
             return openAIKeyOverride
         case .anthropic:
             return anthropicKeyOverride
+        case .google:
+            return googleKeyOverride
         }
     }
     
@@ -199,6 +213,7 @@ final class CloudAPIKeyManager: ObservableObject, Codable {
     func clearAllOverrides() {
         openAIKeyOverride = nil
         anthropicKeyOverride = nil
+        googleKeyOverride = nil
         save()
     }
     

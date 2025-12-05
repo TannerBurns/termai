@@ -772,6 +772,11 @@ struct ProvidersSettingsView: View {
                 
                 // Anthropic
                 cloudProviderCard(for: .anthropic)
+                
+                Divider()
+                
+                // Google AI Studio
+                cloudProviderCard(for: .google)
             }
             .settingsCard()
         }
@@ -892,6 +897,7 @@ struct ProvidersSettingsView: View {
         switch provider {
         case .openai: return .green
         case .anthropic: return .orange
+        case .google: return .blue
         }
     }
     

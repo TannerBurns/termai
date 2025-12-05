@@ -572,6 +572,7 @@ private struct SessionHeaderView: View {
             switch provider {
             case .openai: return .green
             case .anthropic: return .orange
+            case .google: return .blue
             }
         }
         return .primary

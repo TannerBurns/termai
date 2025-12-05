@@ -117,7 +117,7 @@ struct MarkdownRenderer: View {
                     // start code block
                     flushParagraph()
                     let afterTicks = String(line.dropFirst(3))
-                    let lang = afterTicks.trimmingCharacters(in: .whitespaces)
+                    let lang = afterTicks.trimmingCharacters(in: .whitespacesAndNewlines)
                     codeLang = lang.isEmpty ? nil : lang
                     inCode = true
                     codeIsClosed = false
@@ -276,7 +276,7 @@ private struct CodeBlockView: View {
     }
     
     var body: some View {
-        let isShell = language?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).matchesAny(["bash", "sh", "shell", "zsh"]) == true
+        let isShell = language?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).matchesAny(["bash", "sh", "shell", "zsh", "fish", "ksh", "csh", "tcsh", "console", "terminal", "command"]) == true
         
         VStack(alignment: .leading, spacing: 0) {
             // Language badge and copy button

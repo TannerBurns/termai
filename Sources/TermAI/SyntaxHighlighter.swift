@@ -101,7 +101,7 @@ struct MultiLanguageHighlighter {
     
     /// Highlight code and return a SwiftUI Text view
     func highlight(_ code: String, language: String?) -> Text {
-        guard let lang = language?.lowercased().trimmingCharacters(in: .whitespaces),
+        guard let lang = language?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines),
               !lang.isEmpty else {
             return Text(code).foregroundColor(theme.plain)
         }
@@ -114,7 +114,7 @@ struct MultiLanguageHighlighter {
         switch language {
         case "swift":
             return SwiftHighlighter.shared.tokenize(code)
-        case "bash", "sh", "shell", "zsh":
+        case "bash", "sh", "shell", "zsh", "fish", "ksh", "csh", "tcsh", "console", "terminal", "command":
             return ShellHighlighter.shared.tokenize(code)
         case "python", "py":
             return PythonHighlighter.shared.tokenize(code)
