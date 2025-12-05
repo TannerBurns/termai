@@ -63,49 +63,55 @@ struct TerminalPane: View {
             .padding(.vertical, 8)
             .background(.ultraThinMaterial)
 
-            // Terminal view with contextual action overlay
-            SwiftTermView(model: ptyModel)
-                .background(Color(NSColor.textBackgroundColor))
-                .overlay(alignment: .bottomTrailing) {
-                    let hasChunk = !ptyModel.lastOutputChunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    // Show action buttons when hovering and there's content to add
-                    // (suggestions bar is now static at bottom, so no conflict)
-                    if (hovering || buttonHovering) && (hasSelection || hasChunk) {
-                        VStack(alignment: .trailing, spacing: 8) {
-                            if hasSelection {
-                                TerminalActionButton(
-                                    label: "Add Selection",
-                                    icon: "text.badge.plus",
-                                    color: .cyan,
-                                    action: addSelectionToChat
-                                )
-                                .onHover { buttonHovering = $0 }
+            // Terminal view with favorites toolbar and contextual action overlay
+            HStack(spacing: 0) {
+                // Favorites toolbar (left side, only shown if favorites exist)
+                FavoritesToolbar(onRunCommand: runFavoriteCommand)
+                
+                // Terminal view
+                SwiftTermView(model: ptyModel)
+                    .background(Color(NSColor.textBackgroundColor))
+                    .overlay(alignment: .bottomTrailing) {
+                        let hasChunk = !ptyModel.lastOutputChunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        // Show action buttons when hovering and there's content to add
+                        // (suggestions bar is now static at bottom, so no conflict)
+                        if (hovering || buttonHovering) && (hasSelection || hasChunk) {
+                            VStack(alignment: .trailing, spacing: 8) {
+                                if hasSelection {
+                                    TerminalActionButton(
+                                        label: "Add Selection",
+                                        icon: "text.badge.plus",
+                                        color: .cyan,
+                                        action: addSelectionToChat
+                                    )
+                                    .onHover { buttonHovering = $0 }
+                                }
+                                if hasChunk {
+                                    TerminalActionButton(
+                                        label: "Add Last Output",
+                                        icon: "plus.circle.fill",
+                                        color: .green,
+                                        action: addLastOutputToChat
+                                    )
+                                    .onHover { buttonHovering = $0 }
+                                }
                             }
-                            if hasChunk {
-                                TerminalActionButton(
-                                    label: "Add Last Output",
-                                    icon: "plus.circle.fill",
-                                    color: .green,
-                                    action: addLastOutputToChat
-                                )
-                                .onHover { buttonHovering = $0 }
-                            }
+                            .padding(12)
+                            .transition(.opacity.combined(with: .scale(scale: 0.95)))
                         }
-                        .padding(12)
-                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     }
-                }
-                .onHover { isHovering in
-                    hovering = isHovering
-                    // Continuously check for selection while hovering
-                    // (SwiftTerm doesn't have a selection change callback)
-                    if isHovering {
-                        checkForSelection()
-                        startSelectionCheckTimer()
-                    } else {
-                        stopSelectionCheckTimer()
+                    .onHover { isHovering in
+                        hovering = isHovering
+                        // Continuously check for selection while hovering
+                        // (SwiftTerm doesn't have a selection change callback)
+                        if isHovering {
+                            checkForSelection()
+                            startSelectionCheckTimer()
+                        } else {
+                            stopSelectionCheckTimer()
+                        }
                     }
-                }
+            }
             
             // AI Suggestions Bar (static at bottom)
             TerminalSuggestionsBar(
@@ -238,6 +244,13 @@ struct TerminalPane: View {
             cwd: ptyModel.currentWorkingDirectory,
             exitCode: ptyModel.lastExitCode
         )
+    }
+    
+    private func runFavoriteCommand(_ command: String) {
+        termPaneLogger.info("Running favorite command: \(command)")
+        // Run the command immediately in the terminal (with newline to execute)
+        ptyModel.sendInput?(command + "\n")
+        // No need to interact with suggestion service for favorites
     }
     
     private func runCommand(_ command: String) {

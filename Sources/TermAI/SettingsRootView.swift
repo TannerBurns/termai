@@ -9,6 +9,7 @@ struct SettingsRootView: View {
         case chatModel = "Chat & Model"
         case providers = "Providers"
         case agent = "Agent"
+        case favorites = "Favorites"
         case appearance = "Appearance"
         case usage = "Usage"
         case data = "Data"
@@ -18,6 +19,7 @@ struct SettingsRootView: View {
             case .chatModel: return "message.fill"
             case .providers: return "server.rack"
             case .agent: return "cpu"
+            case .favorites: return "star.fill"
             case .appearance: return "paintbrush.fill"
             case .usage: return "chart.bar.fill"
             case .data: return "externaldrive.fill"
@@ -59,6 +61,8 @@ struct SettingsRootView: View {
                     ProvidersSettingsView()
                 case .agent:
                     AgentSettingsView()
+                case .favorites:
+                    FavoritesSettingsView()
                 case .appearance:
                     AppearanceSettingsView(ptyModel: ptyModel)
                 case .usage:
