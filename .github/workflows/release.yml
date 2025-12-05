@@ -6,6 +6,9 @@ on:
       - 'v*'  # Triggers on version tags like v1.0.0, v2024.12.03
   workflow_dispatch:  # Allows manual trigger from GitHub UI
 
+permissions:
+  contents: write  # Required to create releases
+
 jobs:
   build:
     runs-on: macos-15  # macOS Sequoia - has newer Xcode/Swift versions
