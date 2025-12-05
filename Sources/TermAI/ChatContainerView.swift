@@ -229,14 +229,11 @@ struct ChatContainerView: View {
                 }
             )
         }
-        .onReceive(NotificationCenter.default.publisher(for: .TermAIFileChangePendingApproval)) { note in
-            guard let sessionId = note.userInfo?["sessionId"] as? UUID,
-                  let approval = note.userInfo?["approval"] as? PendingFileChangeApproval else { return }
-            
-            // Only show if this is for the selected session
-            if sessionId == tabsManager.selectedSessionId {
-                pendingFileChangeApproval = approval
-            }
+        // File change approval is now handled inline in chat via AgentEventView
+        // The sheet is kept for viewing changes via ViewChangesButton but auto-show is disabled
+        .onReceive(NotificationCenter.default.publisher(for: .TermAIFileChangePendingApproval)) { _ in
+            // Inline approval buttons are shown in the chat message
+            // No need to auto-show the sheet anymore
         }
         .sheet(item: $pendingFileChangeApproval) { approval in
             FileChangeApprovalSheet(
