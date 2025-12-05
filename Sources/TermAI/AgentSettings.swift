@@ -168,6 +168,11 @@ final class AgentSettings: ObservableObject, Codable {
     /// Enable the Test Runner button in the chat UI (disabled by default)
     @Published var testRunnerEnabled: Bool = false
     
+    // MARK: - Favorite Commands
+    
+    /// User's favorite terminal commands for quick access
+    @Published var favoriteCommands: [FavoriteCommand] = []
+    
     /// Check if terminal suggestions are fully configured
     var isTerminalSuggestionsConfigured: Bool {
         terminalSuggestionsEnabled && 
@@ -238,6 +243,7 @@ final class AgentSettings: ObservableObject, Codable {
         case ollamaBaseURL
         case lmStudioBaseURL
         case vllmBaseURL
+        case favoriteCommands
     }
     
     init() {}
@@ -281,6 +287,7 @@ final class AgentSettings: ObservableObject, Codable {
         ollamaBaseURL = try container.decodeIfPresent(String.self, forKey: .ollamaBaseURL) ?? "http://localhost:11434/v1"
         lmStudioBaseURL = try container.decodeIfPresent(String.self, forKey: .lmStudioBaseURL) ?? "http://localhost:1234/v1"
         vllmBaseURL = try container.decodeIfPresent(String.self, forKey: .vllmBaseURL) ?? "http://localhost:8000/v1"
+        favoriteCommands = try container.decodeIfPresent([FavoriteCommand].self, forKey: .favoriteCommands) ?? []
     }
     
     func encode(to encoder: Encoder) throws {
@@ -322,6 +329,7 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(ollamaBaseURL, forKey: .ollamaBaseURL)
         try container.encode(lmStudioBaseURL, forKey: .lmStudioBaseURL)
         try container.encode(vllmBaseURL, forKey: .vllmBaseURL)
+        try container.encode(favoriteCommands, forKey: .favoriteCommands)
     }
     
     // MARK: - Persistence
@@ -416,7 +424,36 @@ final class AgentSettings: ObservableObject, Codable {
         ollamaBaseURL = "http://localhost:11434/v1"
         lmStudioBaseURL = "http://localhost:1234/v1"
         vllmBaseURL = "http://localhost:8000/v1"
+        favoriteCommands = []
         saveImmediately()
+    }
+    
+    // MARK: - Favorite Commands Helpers
+    
+    /// Add a new favorite command
+    func addFavoriteCommand(_ command: FavoriteCommand) {
+        favoriteCommands.append(command)
+        save()
+    }
+    
+    /// Update an existing favorite command
+    func updateFavoriteCommand(_ command: FavoriteCommand) {
+        if let index = favoriteCommands.firstIndex(where: { $0.id == command.id }) {
+            favoriteCommands[index] = command
+            save()
+        }
+    }
+    
+    /// Remove a favorite command by ID
+    func removeFavoriteCommand(id: UUID) {
+        favoriteCommands.removeAll { $0.id == id }
+        save()
+    }
+    
+    /// Move favorite commands (for reordering)
+    func moveFavoriteCommands(from source: IndexSet, to destination: Int) {
+        favoriteCommands.move(fromOffsets: source, toOffset: destination)
+        save()
     }
     
     // MARK: - Model Favorites Helpers
