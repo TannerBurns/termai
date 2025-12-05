@@ -19,7 +19,10 @@ struct ChatTabContentView: View {
             
             // Title generation error indicator
             if let error = session.titleGenerationError {
-                ErrorBanner(message: "Title error: \(error)") {
+                ErrorBanner(
+                    message: error.friendlyMessage,
+                    fullDetails: error.fullDetails
+                ) {
                     session.titleGenerationError = nil
                 }
                 .padding(.horizontal, 12)
@@ -297,26 +300,110 @@ private struct GitInfoBadge: View {
 // MARK: - Error Banner
 private struct ErrorBanner: View {
     let message: String
+    var fullDetails: String? = nil
     let onDismiss: () -> Void
     
+    @State private var isExpanded: Bool = false
+    @State private var showCopied: Bool = false
+    
+    private var hasExpandableDetails: Bool {
+        fullDetails != nil && fullDetails != message
+    }
+    
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundColor(.orange)
-                .font(.caption)
-            Text(message)
-                .font(.caption)
-                .foregroundColor(.primary.opacity(0.8))
-                .lineLimit(2)
-            Spacer()
-            Button(action: onDismiss) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            // Main error banner - entire area is clickable if expandable
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                    .font(.caption)
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.primary.opacity(0.8))
+                    .lineLimit(isExpanded ? nil : 2)
+                Spacer()
+                
+                // Show details button (only if there are full details)
+                if hasExpandableDetails {
+                    HStack(spacing: 4) {
+                        Text(isExpanded ? "Hide" : "Details")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2)
+                    }
+                    .foregroundColor(.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.accentColor.opacity(0.1))
+                    )
+                }
+                
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if hasExpandableDetails {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isExpanded.toggle()
+                    }
+                }
+            }
+            
+            // Expanded details section
+            if isExpanded, let details = fullDetails {
+                VStack(alignment: .leading, spacing: 8) {
+                    Divider()
+                        .padding(.horizontal, 12)
+                    
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Full Error Details")
+                                .font(.caption2)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Button(action: {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(details, forType: .string)
+                                showCopied = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                    showCopied = false
+                                }
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
+                                        .font(.caption2)
+                                    Text(showCopied ? "Copied!" : "Copy")
+                                        .font(.caption2)
+                                }
+                                .foregroundColor(showCopied ? .green : .accentColor)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        
+                        ScrollView {
+                            Text(details)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.primary.opacity(0.7))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 150)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+                }
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 10)
                 .fill(.ultraThinMaterial)

@@ -112,6 +112,16 @@ actor LLMClient {
                     timeout: timeout,
                     requestType: requestType
                 )
+            case .google:
+                return try await completeGoogle(
+                    systemPrompt: systemPrompt,
+                    userPrompt: userPrompt,
+                    modelId: modelId,
+                    temperature: temperature,
+                    maxTokens: maxTokens,
+                    timeout: timeout,
+                    requestType: requestType
+                )
             }
         case .local(let localProvider):
             return try await completeLocal(
@@ -189,7 +199,8 @@ actor LLMClient {
         
         guard (200..<300).contains(http.statusCode) else {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw LLMClientError.apiError(statusCode: http.statusCode, message: errorBody)
+            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .openai)
+            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
         }
         
         // Parse response
@@ -293,7 +304,8 @@ actor LLMClient {
         guard (200..<300).contains(http.statusCode) else {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
             llmLogger.error("Anthropic API error: \(errorBody.prefix(200))")
-            throw LLMClientError.apiError(statusCode: http.statusCode, message: errorBody)
+            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .anthropic)
+            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
         }
         
         // Parse response (handles both regular and thinking responses)
@@ -337,6 +349,110 @@ actor LLMClient {
         
         return LLMCompletionResult(
             content: content,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            isEstimated: isEstimated
+        )
+    }
+    
+    // MARK: - Google AI Studio (Gemini)
+    
+    private func completeGoogle(
+        systemPrompt: String,
+        userPrompt: String,
+        modelId: String,
+        temperature: Double,
+        maxTokens: Int,
+        timeout: TimeInterval,
+        requestType: UsageRequestType
+    ) async throws -> LLMCompletionResult {
+        // Google AI Studio uses a different URL format: /models/{model}:generateContent
+        let baseURL = CloudProvider.google.baseURL
+        let url = baseURL.appendingPathComponent("models/\(modelId):generateContent")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = timeout
+        
+        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .google) else {
+            throw LLMClientError.missingAPIKey(provider: "Google")
+        }
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        
+        // Google AI Studio request format
+        // System instruction is separate from contents
+        var bodyDict: [String: Any] = [
+            "contents": [
+                ["role": "user", "parts": [["text": userPrompt]]]
+            ],
+            "generationConfig": [
+                "temperature": temperature,
+                "maxOutputTokens": maxTokens
+            ]
+        ]
+        
+        // Add system instruction if provided
+        if !systemPrompt.isEmpty {
+            bodyDict["systemInstruction"] = [
+                "parts": [["text": systemPrompt]]
+            ]
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+        
+        llmLogger.debug("Google AI request: model=\(modelId)")
+        
+        let estimatedPromptTokens = TokenEstimator.estimateTokens(systemPrompt + userPrompt)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let http = response as? HTTPURLResponse else {
+            throw LLMClientError.invalidResponse
+        }
+        
+        guard (200..<300).contains(http.statusCode) else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            llmLogger.error("Google AI API error: \(errorBody.prefix(200))")
+            // Parse user-friendly error message using unified error handling
+            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .google)
+            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
+        }
+        
+        // Parse Google AI response format
+        struct Part: Decodable { let text: String? }
+        struct Content: Decodable { let parts: [Part]?; let role: String? }
+        struct Candidate: Decodable { let content: Content? }
+        struct UsageMetadata: Decodable { let promptTokenCount: Int?; let candidatesTokenCount: Int? }
+        struct Resp: Decodable { let candidates: [Candidate]?; let usageMetadata: UsageMetadata? }
+        
+        let decoded = try JSONDecoder().decode(Resp.self, from: data)
+        
+        // Extract text from first candidate's content parts
+        guard let candidate = decoded.candidates?.first,
+              let content = candidate.content,
+              let parts = content.parts,
+              let textPart = parts.first(where: { $0.text != nil }),
+              let text = textPart.text else {
+            throw LLMClientError.emptyResponse
+        }
+        
+        // Calculate token usage
+        let promptTokens = decoded.usageMetadata?.promptTokenCount ?? estimatedPromptTokens
+        let completionTokens = decoded.usageMetadata?.candidatesTokenCount ?? TokenEstimator.estimateTokens(text)
+        let isEstimated = decoded.usageMetadata == nil
+        
+        // Record to historical tracker
+        await TokenUsageTracker.shared.recordUsage(
+            provider: "Google",
+            model: modelId,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            isEstimated: isEstimated,
+            requestType: requestType
+        )
+        
+        return LLMCompletionResult(
+            content: text,
             promptTokens: promptTokens,
             completionTokens: completionTokens,
             isEstimated: isEstimated

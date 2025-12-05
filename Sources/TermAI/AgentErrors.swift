@@ -1,5 +1,168 @@
 import Foundation
 
+// MARK: - Chat API Error with User-Friendly Messages
+
+/// Represents an API error with both user-friendly message and full technical details
+struct ChatAPIError: Error, LocalizedError {
+    /// User-friendly error message to display
+    let friendlyMessage: String
+    /// Full technical error details (for debugging/copying)
+    let fullDetails: String
+    /// HTTP status code if applicable
+    let statusCode: Int?
+    /// The provider that generated the error
+    let provider: String?
+    
+    var errorDescription: String? {
+        friendlyMessage
+    }
+    
+    init(friendlyMessage: String, fullDetails: String, statusCode: Int? = nil, provider: String? = nil) {
+        self.friendlyMessage = friendlyMessage
+        self.fullDetails = fullDetails
+        self.statusCode = statusCode
+        self.provider = provider
+    }
+    
+    /// Create from an HTTP error response
+    static func from(statusCode: Int, errorBody: String, provider: CloudProvider) -> ChatAPIError {
+        let friendlyMessage = parseProviderError(statusCode: statusCode, errorBody: errorBody, provider: provider)
+        return ChatAPIError(
+            friendlyMessage: friendlyMessage,
+            fullDetails: "HTTP \(statusCode): \(errorBody)",
+            statusCode: statusCode,
+            provider: provider.rawValue
+        )
+    }
+    
+    /// Parse provider-specific error messages into user-friendly text
+    private static func parseProviderError(statusCode: Int, errorBody: String, provider: CloudProvider) -> String {
+        // Try to parse JSON error response
+        var errorMessage: String? = nil
+        var errorStatus: String? = nil
+        
+        if let data = errorBody.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // OpenAI format: {"error": {"message": "...", "type": "...", "code": "..."}}
+            // Anthropic format: {"error": {"type": "...", "message": "..."}}
+            // Google format: {"error": {"message": "...", "status": "..."}}
+            if let error = json["error"] as? [String: Any] {
+                errorMessage = error["message"] as? String
+                errorStatus = error["status"] as? String
+            }
+        }
+        
+        let providerName = provider.rawValue
+        
+        // Handle common HTTP status codes with provider-specific context
+        switch statusCode {
+        case 400:
+            if let msg = errorMessage?.lowercased() {
+                if msg.contains("api key") || msg.contains("api_key") {
+                    return "Invalid API key format. Please check your \(providerName) API key in Settings."
+                }
+                if msg.contains("model") {
+                    return "Invalid model configuration. The selected model may not support this request."
+                }
+                if msg.contains("content") || msg.contains("safety") {
+                    return "Request was blocked due to content policy. Please modify your message."
+                }
+            }
+            return "Bad request to \(providerName). \(errorMessage ?? "Please check your request.")"
+            
+        case 401:
+            return "Authentication failed. Please verify your \(providerName) API key in Settings."
+            
+        case 403:
+            if let msg = errorMessage?.lowercased() {
+                if msg.contains("permission") || msg.contains("access") {
+                    return "Access denied. Your \(providerName) API key may not have permission for this operation."
+                }
+                if msg.contains("region") || msg.contains("country") {
+                    return "\(providerName) service is not available in your region."
+                }
+            }
+            return "Access forbidden. Please check your \(providerName) API key permissions."
+            
+        case 404:
+            if let msg = errorMessage?.lowercased() {
+                if msg.contains("model") {
+                    return "Model not found. The selected model may not be available or the name is incorrect."
+                }
+            }
+            return "Resource not found on \(providerName). Please check your configuration."
+            
+        case 429:
+            // Rate limiting
+            if let msg = errorMessage?.lowercased() {
+                if msg.contains("quota") || errorStatus == "RESOURCE_EXHAUSTED" {
+                    return "Quota exceeded on \(providerName). Check your usage limits or upgrade your plan."
+                }
+                if msg.contains("token") || msg.contains("rpm") || msg.contains("tpm") {
+                    return "Rate limit reached. Please wait a moment before sending more requests."
+                }
+            }
+            return "Too many requests to \(providerName). Please wait a moment and try again."
+            
+        case 500:
+            return "\(providerName) server error. The service is experiencing issues. Please try again."
+            
+        case 502:
+            return "\(providerName) gateway error. The service may be updating. Please try again in a moment."
+            
+        case 503:
+            if let msg = errorMessage?.lowercased() {
+                if msg.contains("overloaded") || msg.contains("capacity") {
+                    return "\(providerName) is currently overloaded. Please try again in a few minutes."
+                }
+            }
+            return "\(providerName) service is temporarily unavailable. Please try again later."
+            
+        case 504:
+            return "\(providerName) request timed out. The service may be slow. Please try again."
+            
+        case 529:
+            return "\(providerName) is overloaded. Please try again in a few minutes."
+            
+        default:
+            if statusCode >= 500 {
+                return "\(providerName) server error (HTTP \(statusCode)). Please try again later."
+            }
+            // For unknown errors, show a truncated message
+            let truncatedMsg = errorMessage?.prefix(100) ?? errorBody.prefix(100)
+            return "\(providerName) error: \(truncatedMsg)\(truncatedMsg.count >= 100 ? "..." : "")"
+        }
+    }
+}
+
+// MARK: - Published Error State for UI
+
+/// Observable error state that can be displayed in the UI
+class ChatErrorState: ObservableObject {
+    @Published var currentError: ChatAPIError?
+    @Published var isExpanded: Bool = false
+    
+    func setError(_ error: ChatAPIError) {
+        currentError = error
+        isExpanded = false
+    }
+    
+    func setError(friendlyMessage: String, fullDetails: String, statusCode: Int? = nil, provider: String? = nil) {
+        currentError = ChatAPIError(
+            friendlyMessage: friendlyMessage,
+            fullDetails: fullDetails,
+            statusCode: statusCode,
+            provider: provider
+        )
+        isExpanded = false
+    }
+    
+    func clear() {
+        currentError = nil
+        isExpanded = false
+    }
+}
+
 // MARK: - Agent Error Types
 
 /// Specific error types for agent API operations with recovery strategies
