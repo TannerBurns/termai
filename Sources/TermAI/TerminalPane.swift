@@ -14,6 +14,9 @@ struct TerminalPane: View {
     
     // Timer for continuous selection checking while hovering
     @State private var selectionCheckTimer: Timer? = nil
+    
+    // Hovered favorite command for tooltip display
+    @State private var hoveredFavoriteCommand: (command: FavoriteCommand, index: Int)? = nil
 
     let onAddToChat: (String, TerminalContextMeta?) -> Void
     let onToggleChat: () -> Void
@@ -66,15 +69,17 @@ struct TerminalPane: View {
             // Terminal view with favorites toolbar and contextual action overlay
             HStack(spacing: 0) {
                 // Favorites toolbar (left side, only shown if favorites exist)
-                FavoritesToolbar(onRunCommand: runFavoriteCommand)
+                FavoritesToolbarWithTooltip(
+                    onRunCommand: runFavoriteCommand,
+                    hoveredCommandInfo: $hoveredFavoriteCommand
+                )
                 
-                // Terminal view
+                // Terminal view with action overlay
                 SwiftTermView(model: ptyModel)
                     .background(Color(NSColor.textBackgroundColor))
                     .overlay(alignment: .bottomTrailing) {
                         let hasChunk = !ptyModel.lastOutputChunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         // Show action buttons when hovering and there's content to add
-                        // (suggestions bar is now static at bottom, so no conflict)
                         if (hovering || buttonHovering) && (hasSelection || hasChunk) {
                             VStack(alignment: .trailing, spacing: 8) {
                                 if hasSelection {
@@ -111,6 +116,20 @@ struct TerminalPane: View {
                             stopSelectionCheckTimer()
                         }
                     }
+            }
+            // Favorite command tooltip - rendered as overlay on entire terminal section
+            // This ensures it appears above both toolbar and terminal
+            .overlay(alignment: .topLeading) {
+                if let info = hoveredFavoriteCommand {
+                    CommandTooltip(command: info.command.command, name: info.command.name)
+                        .fixedSize()
+                        .offset(
+                            x: FavoritesToolbar.toolbarWidth + 4, // Position to the right of the toolbar with small gap
+                            y: FavoritesToolbar.topPadding + CGFloat(info.index) * (FavoritesToolbar.buttonSize + FavoritesToolbar.buttonSpacing)
+                        )
+                        .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .leading)))
+                        .allowsHitTesting(false)
+                }
             }
             
             // AI Suggestions Bar (static at bottom)
@@ -454,6 +473,7 @@ struct TerminalSuggestionsHeaderView: View {
             switch cloudProvider {
             case .openai: return .green
             case .anthropic: return .orange
+            case .google: return .blue
             }
         case .local(let localProvider):
             switch localProvider {

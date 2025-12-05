@@ -6,11 +6,13 @@ import Foundation
 enum CloudProvider: String, CaseIterable, Codable {
     case openai = "OpenAI"
     case anthropic = "Anthropic"
+    case google = "Google"
     
     var apiKeyEnvVariable: String {
         switch self {
         case .openai: return "OPENAI_API_KEY"
         case .anthropic: return "ANTHROPIC_API_KEY"
+        case .google: return "GOOGLE_API_KEY"
         }
     }
     
@@ -18,6 +20,7 @@ enum CloudProvider: String, CaseIterable, Codable {
         switch self {
         case .openai: return URL(string: "https://api.openai.com/v1")!
         case .anthropic: return URL(string: "https://api.anthropic.com/v1")!
+        case .google: return URL(string: "https://generativelanguage.googleapis.com/v1beta")!
         }
     }
     
@@ -25,6 +28,7 @@ enum CloudProvider: String, CaseIterable, Codable {
         switch self {
         case .openai: return "brain.head.profile"
         case .anthropic: return "sparkle"
+        case .google: return "wand.and.sparkles"
         }
     }
     
@@ -32,6 +36,7 @@ enum CloudProvider: String, CaseIterable, Codable {
         switch self {
         case .openai: return "green"
         case .anthropic: return "orange"
+        case .google: return "blue"
         }
     }
     
@@ -156,9 +161,19 @@ struct CuratedModels {
         ModelDefinition(id: "claude-3-5-haiku", displayName: "Claude Haiku 3.5", provider: .anthropic, supportsReasoning: false, contextSize: 200_000),
     ]
     
+    /// Google AI Studio models (Gemini) with reasoning support and context sizes
+    static let google: [ModelDefinition] = [
+        // Gemini 3 series - 1M context
+        ModelDefinition(id: "gemini-3-pro-preview", displayName: "Gemini 3 Pro", provider: .google, supportsReasoning: true, contextSize: 1_000_000),
+        
+        // Gemini 2.5 series - 1M context
+        ModelDefinition(id: "gemini-2.5-pro", displayName: "Gemini 2.5 Pro", provider: .google, supportsReasoning: true, contextSize: 1_000_000),
+        ModelDefinition(id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", provider: .google, supportsReasoning: true, contextSize: 1_000_000),
+    ]
+    
     /// All curated models
     static var all: [ModelDefinition] {
-        openAI + anthropic
+        openAI + anthropic + google
     }
     
     /// Get models for a specific provider
@@ -166,6 +181,7 @@ struct CuratedModels {
         switch provider {
         case .openai: return openAI
         case .anthropic: return anthropic
+        case .google: return google
         }
     }
     

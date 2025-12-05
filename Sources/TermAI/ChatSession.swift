@@ -470,7 +470,7 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var providerName: String
     @Published var availableModels: [String] = []
     @Published var modelFetchError: String? = nil
-    @Published var titleGenerationError: String? = nil
+    @Published var titleGenerationError: ChatAPIError? = nil
     
     // Generation settings
     @Published var temperature: Double = 0.7
@@ -797,6 +797,26 @@ final class ChatSession: ObservableObject, Identifiable {
                     ],
                     "system": "You are a helpful assistant that summarizes code and technical content concisely."
                 ]
+            case .google:
+                // Google AI Studio uses a different URL and message format
+                url = CloudProvider.google.baseURL.appendingPathComponent("models/\(model):generateContent")
+                if let key = CloudAPIKeyManager.shared.getAPIKey(for: .google) {
+                    headers["x-goog-api-key"] = key
+                }
+                // Google uses a different message format
+                // Note: Gemini 2.5 models use reasoning tokens, so we need more output tokens
+                // to accommodate both thinking and the actual response
+                messageBody = [
+                    "contents": [
+                        ["role": "user", "parts": [["text": prompt]]]
+                    ],
+                    "systemInstruction": [
+                        "parts": [["text": "You are a helpful assistant that summarizes code and technical content concisely. Be direct and concise."]]
+                    ],
+                    "generationConfig": [
+                        "maxOutputTokens": max(maxTokens, 2048)  // Ensure enough tokens for reasoning + response
+                    ]
+                ]
             }
         case .local(let provider):
             switch provider {
@@ -833,6 +853,13 @@ final class ChatSession: ObservableObject, Identifiable {
             // Anthropic format
             if let content = json["content"] as? [[String: Any]],
                let text = content.first?["text"] as? String {
+                return text
+            }
+            // Google AI format
+            if let candidates = json["candidates"] as? [[String: Any]],
+               let content = candidates.first?["content"] as? [String: Any],
+               let parts = content["parts"] as? [[String: Any]],
+               let text = parts.first?["text"] as? String {
                 return text
             }
             // Ollama format
@@ -3045,7 +3072,10 @@ final class ChatSession: ObservableObject, Identifiable {
         // Skip if model is not set
         guard !model.isEmpty else {
             await MainActor.run { [weak self] in
-                self?.titleGenerationError = "Cannot generate title: No model selected"
+                self?.titleGenerationError = ChatAPIError(
+                    friendlyMessage: "Cannot generate title: No model selected",
+                    fullDetails: "No model is currently selected. Please select a model in settings."
+                )
             }
             return
         }
@@ -3071,6 +3101,9 @@ final class ChatSession: ObservableObject, Identifiable {
                 case .anthropic:
                     // Use Anthropic endpoint
                     url = URL(string: "https://api.anthropic.com/v1/messages")!
+                case .google:
+                    // Use Google AI endpoint
+                    url = CloudProvider.google.baseURL.appendingPathComponent("models/\(self.model):generateContent")
                 }
             } else {
                 url = self.apiBaseURL.appendingPathComponent("chat/completions")
@@ -3092,6 +3125,10 @@ final class ChatSession: ObservableObject, Identifiable {
                     request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
                     if let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .anthropic) {
                         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+                    }
+                case .google:
+                    if let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .google) {
+                        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
                     }
                 }
             } else if let apiKey = self.apiKey {
@@ -3133,6 +3170,24 @@ final class ChatSession: ObservableObject, Identifiable {
                             ]
                         ]
                         requestData = try JSONSerialization.data(withJSONObject: bodyDict)
+                        
+                    case .google:
+                        // Google AI format
+                        // Note: Gemini 2.5 models use reasoning tokens, so we need more output tokens
+                        // to accommodate both thinking (can use 200-500+ tokens) and the actual response
+                        let bodyDict: [String: Any] = [
+                            "contents": [
+                                ["role": "user", "parts": [["text": titlePrompt]]]
+                            ],
+                            "systemInstruction": [
+                                "parts": [["text": "You are a helpful assistant that generates concise titles. Respond with ONLY the title, nothing else."]]
+                            ],
+                            "generationConfig": [
+                                "maxOutputTokens": 1024,  // Higher limit to account for reasoning tokens
+                                "temperature": self.temperature
+                            ]
+                        ]
+                        requestData = try JSONSerialization.data(withJSONObject: bodyDict)
                     }
                 } else {
                     // Local provider format (Ollama, LM Studio, vLLM)
@@ -3169,22 +3224,40 @@ final class ChatSession: ObservableObject, Identifiable {
                 
                 guard !Task.isCancelled else { 
                     await MainActor.run { [weak self] in
-                        self?.titleGenerationError = "Title generation was cancelled"
+                        self?.titleGenerationError = ChatAPIError(
+                            friendlyMessage: "Title generation was cancelled",
+                            fullDetails: "The title generation request was cancelled by the user."
+                        )
                     }
                     return 
                 }
                 
                 guard let http = response as? HTTPURLResponse else {
                     await MainActor.run { [weak self] in
-                        self?.titleGenerationError = "Invalid response from server"
+                        self?.titleGenerationError = ChatAPIError(
+                            friendlyMessage: "Invalid response from server",
+                            fullDetails: "The server returned an invalid response that could not be processed."
+                        )
                     }
                     return
                 }
                 
                 guard (200..<300).contains(http.statusCode) else {
                     let errorBody = String(data: data, encoding: .utf8) ?? "No error details"
+                    // Use provider-specific error parsing
+                    let apiError: ChatAPIError
+                    if case .cloud(let cloudProvider) = self.providerType {
+                        apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: cloudProvider)
+                    } else {
+                        apiError = ChatAPIError(
+                            friendlyMessage: "Title generation failed (HTTP \(http.statusCode))",
+                            fullDetails: "HTTP \(http.statusCode): \(errorBody)",
+                            statusCode: http.statusCode,
+                            provider: self.providerName
+                        )
+                    }
                     await MainActor.run { [weak self] in
-                        self?.titleGenerationError = "Title generation failed (HTTP \(http.statusCode)): \(errorBody)"
+                        self?.titleGenerationError = apiError
                     }
                     return
                 }
@@ -3210,6 +3283,13 @@ final class ChatSession: ObservableObject, Identifiable {
                 struct AnthropicContentBlock: Decodable { let type: String; let text: String? }
                 struct AnthropicResponse: Decodable { let content: [AnthropicContentBlock]; let usage: AnthropicUsage? }
                 
+                // Google AI response format with usage
+                struct GooglePart: Decodable { let text: String? }
+                struct GoogleContent: Decodable { let parts: [GooglePart]?; let role: String? }
+                struct GoogleCandidate: Decodable { let content: GoogleContent? }
+                struct GoogleUsageMetadata: Decodable { let promptTokenCount: Int?; let candidatesTokenCount: Int? }
+                struct GoogleResponse: Decodable { let candidates: [GoogleCandidate]?; let usageMetadata: GoogleUsageMetadata? }
+                
                 var generatedTitle: String? = nil
                 var promptTokens: Int? = nil
                 var completionTokens: Int? = nil
@@ -3227,6 +3307,35 @@ final class ChatSession: ObservableObject, Identifiable {
                         generatedTitle = text
                         promptTokens = decoded.usage?.input_tokens
                         completionTokens = decoded.usage?.output_tokens
+                    }
+                } else if case .cloud(let cloudProvider) = self.providerType, cloudProvider == .google {
+                    // Google AI format - try structured decoding first
+                    if let decoded = try? JSONDecoder().decode(GoogleResponse.self, from: data),
+                       let candidate = decoded.candidates?.first,
+                       let content = candidate.content,
+                       let parts = content.parts,
+                       let textPart = parts.first(where: { $0.text != nil }),
+                       let text = textPart.text {
+                        generatedTitle = text
+                        promptTokens = decoded.usageMetadata?.promptTokenCount
+                        completionTokens = decoded.usageMetadata?.candidatesTokenCount
+                    } else {
+                        // Fallback: Try manual JSON parsing for Google responses
+                        // This handles cases where the response structure differs slightly
+                        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           let candidates = json["candidates"] as? [[String: Any]],
+                           let firstCandidate = candidates.first,
+                           let content = firstCandidate["content"] as? [String: Any],
+                           let parts = content["parts"] as? [[String: Any]],
+                           let firstPart = parts.first,
+                           let text = firstPart["text"] as? String {
+                            generatedTitle = text
+                            // Try to get usage metadata
+                            if let usageMetadata = json["usageMetadata"] as? [String: Any] {
+                                promptTokens = usageMetadata["promptTokenCount"] as? Int
+                                completionTokens = usageMetadata["candidatesTokenCount"] as? Int
+                            }
+                        }
                     }
                 } else {
                     // Try OpenAI format first
@@ -3258,7 +3367,11 @@ final class ChatSession: ObservableObject, Identifiable {
                     
                     let providerForTracking: String
                     if case .cloud(let cloudProvider) = self.providerType {
-                        providerForTracking = cloudProvider == .anthropic ? "Anthropic" : "OpenAI"
+                        switch cloudProvider {
+                        case .anthropic: providerForTracking = "Anthropic"
+                        case .google: providerForTracking = "Google"
+                        case .openai: providerForTracking = "OpenAI"
+                        }
                     } else {
                         providerForTracking = self.providerName
                     }
@@ -3279,29 +3392,49 @@ final class ChatSession: ObservableObject, Identifiable {
                     }
                 } else {
                     let responseBody = String(data: data, encoding: .utf8) ?? "Unable to decode response"
+                    let providerInfo = self.providerName
+                    let modelInfo = self.model
                     await MainActor.run { [weak self] in
-                        self?.titleGenerationError = "Could not parse title from response. Response: \(responseBody)"
+                        self?.titleGenerationError = ChatAPIError(
+                            friendlyMessage: "Could not parse title from response",
+                            fullDetails: """
+                            Provider: \(providerInfo)
+                            Model: \(modelInfo)
+                            
+                            Response body:
+                            \(responseBody)
+                            """,
+                            provider: providerInfo
+                        )
                     }
                 }
             } catch {
-                let errorMessage: String
+                let apiError: ChatAPIError
                 if let urlError = error as? URLError {
+                    let friendlyMessage: String
                     switch urlError.code {
                     case .timedOut:
-                        errorMessage = "Request timed out (URLError)"
+                        friendlyMessage = "Request timed out"
                     case .notConnectedToInternet:
-                        errorMessage = "No internet connection"
+                        friendlyMessage = "No internet connection"
                     case .cannotConnectToHost:
-                        errorMessage = "Cannot connect to host: \(self.apiBaseURL.host ?? "unknown")"
+                        friendlyMessage = "Cannot connect to server"
                     default:
-                        errorMessage = "Network error: \(urlError.localizedDescription)"
+                        friendlyMessage = "Network error"
                     }
+                    apiError = ChatAPIError(
+                        friendlyMessage: friendlyMessage,
+                        fullDetails: "URLError: \(urlError.localizedDescription)\nCode: \(urlError.code.rawValue)"
+                    )
                 } else {
-                    errorMessage = "Title generation error: \(error.localizedDescription)"
+                    apiError = ChatAPIError(
+                        friendlyMessage: "Title generation error",
+                        fullDetails: error.localizedDescription
+                    )
                 }
                 
                 await MainActor.run { [weak self] in
-                    self?.titleGenerationError = errorMessage
+                    self?.titleGenerationError = apiError
                 }
             }
         }
@@ -3314,7 +3447,10 @@ final class ChatSession: ObservableObject, Identifiable {
                 await MainActor.run { [weak self] in
                     // Only set timeout error if we still don't have a title
                     if self?.sessionTitle.isEmpty == true {
-                        self?.titleGenerationError = "Title generation timed out after 90 seconds"
+                        self?.titleGenerationError = ChatAPIError(
+                            friendlyMessage: "Title generation timed out",
+                            fullDetails: "The request took longer than 90 seconds and was cancelled."
+                        )
                     }
                 }
             }
@@ -3330,6 +3466,8 @@ final class ChatSession: ObservableObject, Identifiable {
                 return try await requestOpenAIStream(assistantIndex: assistantIndex)
             case .anthropic:
                 return try await requestAnthropicStream(assistantIndex: assistantIndex)
+            case .google:
+                return try await requestGoogleStream(assistantIndex: assistantIndex)
             }
         } else {
             return try await requestLocalProviderStream(assistantIndex: assistantIndex)
@@ -3496,6 +3634,68 @@ final class ChatSession: ObservableObject, Identifiable {
         )
     }
     
+    // MARK: - Google AI Studio Streaming (Gemini)
+    private func requestGoogleStream(assistantIndex: Int) async throws -> String {
+        // Google AI Studio uses a different URL format: /models/{model}:streamGenerateContent?alt=sse
+        let baseURL = CloudProvider.google.baseURL
+        guard var urlComponents = URLComponents(url: baseURL.appendingPathComponent("models/\(model):streamGenerateContent"), resolvingAgainstBaseURL: false) else {
+            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid Google API URL"])
+        }
+        urlComponents.queryItems = [URLQueryItem(name: "alt", value: "sse")]
+        
+        guard let url = urlComponents.url else {
+            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid Google API URL"])
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .google) else {
+            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Google API key not found. Set GOOGLE_API_KEY environment variable."])
+        }
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        
+        // Get full system prompt asynchronously to avoid race condition
+        let sysPrompt = await getSystemPromptAsync()
+        let allMessages = buildMessageArray(withSystemPrompt: sysPrompt)
+        
+        // Build Google AI request format
+        // Convert messages to Google format (user/model roles, parts array)
+        var googleContents: [[String: Any]] = []
+        for msg in allMessages.filter({ $0.role != "system" }) {
+            let role = msg.role == "assistant" ? "model" : "user"
+            googleContents.append([
+                "role": role,
+                "parts": [["text": msg.content]]
+            ])
+        }
+        
+        var bodyDict: [String: Any] = [
+            "contents": googleContents,
+            "generationConfig": [
+                "temperature": temperature,
+                "maxOutputTokens": maxTokens
+            ]
+        ]
+        
+        // Add system instruction if provided
+        if !sysPrompt.isEmpty {
+            bodyDict["systemInstruction"] = [
+                "parts": [["text": sysPrompt]]
+            ]
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+        
+        return try await streamGoogleResponse(
+            request: request,
+            assistantIndex: assistantIndex,
+            modelName: model,
+            systemPromptUsed: sysPrompt
+        )
+    }
+    
     // MARK: - Message Building Helper
     private struct SimpleMessage {
         let role: String
@@ -3632,6 +3832,11 @@ final class ChatSession: ObservableObject, Identifiable {
             for try await line in bytes.lines {
                 errorBody += line
             }
+            // Use provider-specific error parsing for cloud providers
+            if case .cloud(let cloudProvider) = providerType {
+                let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: cloudProvider)
+                throw NSError(domain: "ChatAPI", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: apiError.friendlyMessage, "fullDetails": apiError.fullDetails])
+            }
             throw NSError(domain: "ChatAPI", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode): \(errorBody)"])
         }
         
@@ -3724,7 +3929,9 @@ final class ChatSession: ObservableObject, Identifiable {
             for try await line in bytes.lines {
                 errorBody += line
             }
-            throw NSError(domain: "ChatAPI", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode): \(errorBody)"])
+            // Use provider-specific error parsing for Anthropic
+            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .anthropic)
+            throw NSError(domain: "ChatAPI", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: apiError.friendlyMessage, "fullDetails": apiError.fullDetails])
         }
         
         var accumulated = ""
@@ -3808,6 +4015,107 @@ final class ChatSession: ObservableObject, Identifiable {
             model: modelName,
             promptTokens: finalInputTokens,
             completionTokens: finalOutputTokens,
+            isEstimated: isEstimated
+        )
+        
+        return accumulated
+    }
+    
+    // MARK: - Google AI Studio Response Streaming
+    private func streamGoogleResponse(
+        request: URLRequest,
+        assistantIndex: Int,
+        modelName: String,
+        systemPromptUsed: String? = nil
+    ) async throws -> String {
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "ChatAPI", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
+        }
+        
+        if !(200..<300).contains(http.statusCode) {
+            // Try to read error message
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+            }
+            // Parse user-friendly error messages for Google API errors
+            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .google)
+            throw NSError(domain: "ChatAPI", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: apiError.friendlyMessage, "fullDetails": apiError.fullDetails])
+        }
+        
+        var accumulated = ""
+        let index = assistantIndex
+        
+        // Token usage tracking
+        var promptTokens: Int? = nil
+        var completionTokens: Int? = nil
+        
+        // Throttle UI updates
+        let updateInterval: TimeInterval = 0.05
+        var lastUpdateTime = Date.distantPast
+        
+        // Google AI SSE response structures
+        struct Part: Decodable { let text: String? }
+        struct Content: Decodable { let parts: [Part]?; let role: String? }
+        struct Candidate: Decodable { let content: Content? }
+        struct UsageMetadata: Decodable { let promptTokenCount: Int?; let candidatesTokenCount: Int? }
+        struct GoogleStreamChunk: Decodable { let candidates: [Candidate]?; let usageMetadata: UsageMetadata? }
+        
+        streamLoop: for try await line in bytes.lines {
+            if Task.isCancelled { break streamLoop }
+            
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard let data = payload.data(using: .utf8) else { continue }
+            
+            if let chunk = try? JSONDecoder().decode(GoogleStreamChunk.self, from: data) {
+                var didAccumulate = false
+                
+                // Extract text from candidates
+                if let candidate = chunk.candidates?.first,
+                   let content = candidate.content,
+                   let parts = content.parts {
+                    for part in parts {
+                        if let text = part.text, !text.isEmpty {
+                            accumulated += text
+                            didAccumulate = true
+                        }
+                    }
+                }
+                
+                // Capture usage metadata (usually in final chunk)
+                if let usage = chunk.usageMetadata {
+                    promptTokens = usage.promptTokenCount
+                    completionTokens = usage.candidatesTokenCount
+                }
+                
+                if didAccumulate {
+                    let now = Date()
+                    if now.timeIntervalSince(lastUpdateTime) >= updateInterval {
+                        messages[index].content = accumulated
+                        messages = messages
+                        lastUpdateTime = now
+                    }
+                }
+            }
+        }
+        
+        // Ensure final state is always reflected in UI
+        messages[index].content = accumulated
+        messages = messages
+        
+        // Record token usage
+        let sysPromptForEstimation = systemPromptUsed ?? systemPrompt
+        let finalPromptTokens = promptTokens ?? TokenEstimator.estimateTokens(sysPromptForEstimation + messages.map { $0.content }.joined())
+        let finalCompletionTokens = completionTokens ?? TokenEstimator.estimateTokens(accumulated)
+        let isEstimated = promptTokens == nil || completionTokens == nil
+        
+        TokenUsageTracker.shared.recordUsage(
+            provider: "Google",
+            model: modelName,
+            promptTokens: finalPromptTokens,
+            completionTokens: finalCompletionTokens,
             isEstimated: isEstimated
         )
         
