@@ -10,19 +10,21 @@ struct FavoritesToolbar: View {
     @Environment(\.colorScheme) var colorScheme
     
     // Button dimensions for positioning
-    private let buttonSize: CGFloat = 36
-    private let buttonSpacing: CGFloat = 4
-    private let topPadding: CGFloat = 8
+    static let buttonSize: CGFloat = 36
+    static let buttonSpacing: CGFloat = 4
+    static let topPadding: CGFloat = 8
+    static let toolbarWidth: CGFloat = 44
     
-    private var hoveredCommand: FavoriteCommand? {
+    /// Expose hover state for external tooltip rendering
+    var hoveredCommandInfo: (command: FavoriteCommand, index: Int)? {
         guard let index = hoveredIndex, index < settings.favoriteCommands.count else { return nil }
-        return settings.favoriteCommands[index]
+        return (settings.favoriteCommands[index], index)
     }
     
     var body: some View {
         if !settings.favoriteCommands.isEmpty {
             // Toolbar with buttons
-            VStack(spacing: buttonSpacing) {
+            VStack(spacing: Self.buttonSpacing) {
                 ForEach(Array(settings.favoriteCommands.enumerated()), id: \.element.id) { index, command in
                     FavoriteCommandButton(
                         command: command,
@@ -40,9 +42,9 @@ struct FavoritesToolbar: View {
                 
                 Spacer()
             }
-            .padding(.vertical, topPadding)
+            .padding(.vertical, Self.topPadding)
             .padding(.horizontal, 4)
-            .frame(width: 44)
+            .frame(width: Self.toolbarWidth)
             .background(
                 Rectangle()
                     .fill(colorScheme == .dark 
@@ -57,18 +59,58 @@ struct FavoritesToolbar: View {
                     .frame(width: 1),
                 alignment: .trailing
             )
-            // Tooltip as overlay - floats over content without affecting layout
-            .overlay(alignment: .topLeading) {
-                if let command = hoveredCommand, let index = hoveredIndex {
-                    CommandTooltip(command: command.command, name: command.name)
-                        .offset(
-                            x: 44, // Position to the right of the toolbar
-                            y: topPadding + CGFloat(index) * (buttonSize + buttonSpacing)
-                        )
-                        .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .leading)))
-                        .allowsHitTesting(false)
+        }
+    }
+}
+
+/// Wrapper view that renders FavoritesToolbar and reports hover state for external tooltip rendering
+struct FavoritesToolbarWithTooltip: View {
+    @ObservedObject private var settings = AgentSettings.shared
+    let onRunCommand: (String) -> Void
+    
+    /// Binding to report hovered command info to parent for tooltip rendering
+    @Binding var hoveredCommandInfo: (command: FavoriteCommand, index: Int)?
+    
+    @Environment(\.colorScheme) var colorScheme
+    
+    var body: some View {
+        if !settings.favoriteCommands.isEmpty {
+            // Toolbar content
+            VStack(spacing: FavoritesToolbar.buttonSpacing) {
+                ForEach(Array(settings.favoriteCommands.enumerated()), id: \.element.id) { index, command in
+                    FavoriteCommandButton(
+                        command: command,
+                        isHovered: hoveredCommandInfo?.index == index,
+                        onHover: { isHovered in
+                            withAnimation(.easeInOut(duration: 0.12)) {
+                                hoveredCommandInfo = isHovered ? (command, index) : nil
+                            }
+                        },
+                        onTap: {
+                            onRunCommand(command.command)
+                        }
+                    )
                 }
+                
+                Spacer()
             }
+            .padding(.vertical, FavoritesToolbar.topPadding)
+            .padding(.horizontal, 4)
+            .frame(width: FavoritesToolbar.toolbarWidth)
+            .background(
+                Rectangle()
+                    .fill(colorScheme == .dark 
+                        ? Color(white: 0.08) 
+                        : Color(white: 0.95))
+            )
+            .overlay(
+                Rectangle()
+                    .fill(colorScheme == .dark 
+                        ? Color.white.opacity(0.06) 
+                        : Color.black.opacity(0.08))
+                    .frame(width: 1),
+                alignment: .trailing
+            )
         }
     }
 }
