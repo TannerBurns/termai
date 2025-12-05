@@ -520,27 +520,32 @@ struct TerminalSuggestionsHeaderView: View {
     private var providerSelector: some View {
         Menu {
             // Cloud Providers Section
-            if !availableCloudProviders.isEmpty {
-                Text("Cloud Providers")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                ForEach(availableCloudProviders, id: \.rawValue) { provider in
-                    Button(action: {
-                        selectCloudProvider(provider)
-                    }) {
-                        HStack {
-                            Image(systemName: provider.icon)
-                            Text(provider.rawValue)
-                            if agentSettings.terminalSuggestionsProvider == .cloud(provider) {
-                                Image(systemName: "checkmark")
-                            }
+            Text("Cloud Providers")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            
+            ForEach(CloudProvider.allCases, id: \.rawValue) { provider in
+                let isAvailable = apiKeyManager.hasAPIKey(for: provider)
+                Button(action: {
+                    selectCloudProvider(provider)
+                }) {
+                    HStack {
+                        Image(systemName: provider.icon)
+                        Text(provider.rawValue)
+                        if !isAvailable {
+                            Text("No API Key")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
+                        if agentSettings.terminalSuggestionsProvider == .cloud(provider) {
+                            Image(systemName: "checkmark")
                         }
                     }
                 }
-                
-                Divider()
+                .disabled(!isAvailable)
             }
+            
+            Divider()
             
             Text("Local Providers")
                 .font(.caption)
