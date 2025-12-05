@@ -580,27 +580,32 @@ private struct SessionHeaderView: View {
             // Provider selector - clickable chip
             Menu {
                 // Cloud Providers Section
-                if !availableCloudProviders.isEmpty {
-                    Text("Cloud Providers")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    
-                    ForEach(availableCloudProviders, id: \.rawValue) { provider in
-                        Button(action: {
-                            session.switchToCloudProvider(provider)
-                        }) {
-                            HStack {
-                                Image(systemName: provider.icon)
-                                Text(provider.rawValue)
-                                if session.providerType == .cloud(provider) {
-                                    Image(systemName: "checkmark")
-                                }
+                Text("Cloud Providers")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                ForEach(CloudProvider.allCases, id: \.rawValue) { provider in
+                    let isAvailable = CloudAPIKeyManager.shared.hasAPIKey(for: provider)
+                    Button(action: {
+                        session.switchToCloudProvider(provider)
+                    }) {
+                        HStack {
+                            Image(systemName: provider.icon)
+                            Text(provider.rawValue)
+                            if !isAvailable {
+                                Text("No API Key")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+                            if session.providerType == .cloud(provider) {
+                                Image(systemName: "checkmark")
                             }
                         }
                     }
-                    
-                    Divider()
+                    .disabled(!isAvailable)
                 }
+                
+                Divider()
                 
                 Text("Local Providers")
                     .font(.caption)
@@ -1827,27 +1832,43 @@ private struct SessionSetupPromptView: View {
         )
     }
     
+    private func providerDescription(for provider: CloudProvider) -> String {
+        switch provider {
+        case .openai: return "GPT-4, GPT-5, o-series models"
+        case .anthropic: return "Claude 3.5, Claude 4 models"
+        case .google: return "Gemini Pro, Gemini Flash models"
+        }
+    }
+    
+    private func providerColor(for provider: CloudProvider) -> Color {
+        switch provider {
+        case .openai: return .green
+        case .anthropic: return .orange
+        case .google: return .blue
+        }
+    }
+    
     @ViewBuilder
     private var providerPicker: some View {
         VStack(spacing: 8) {
             // Cloud providers section
-            if !availableCloudProviders.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Cloud Providers")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 4)
-                    
-                    ForEach(availableCloudProviders, id: \.rawValue) { provider in
-                        providerRow(
-                            name: provider.rawValue,
-                            icon: provider.icon,
-                            description: provider == .openai ? "GPT-4, GPT-5, o-series models" : "Claude 3.5, Claude 4 models",
-                            isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .cloud(provider),
-                            color: provider == .openai ? .green : .orange
-                        ) {
-                            session.switchToCloudProvider(provider)
-                        }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Cloud Providers")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 4)
+                
+                ForEach(CloudProvider.allCases, id: \.rawValue) { provider in
+                    let isAvailable = CloudAPIKeyManager.shared.hasAPIKey(for: provider)
+                    providerRow(
+                        name: provider.rawValue,
+                        icon: provider.icon,
+                        description: providerDescription(for: provider),
+                        isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .cloud(provider),
+                        isAvailable: isAvailable,
+                        color: providerColor(for: provider)
+                    ) {
+                        session.switchToCloudProvider(provider)
                     }
                 }
             }
@@ -1898,6 +1919,7 @@ private struct SessionSetupPromptView: View {
         icon: String,
         description: String,
         isSelected: Bool,
+        isAvailable: Bool = true,
         color: Color,
         action: @escaping () -> Void
     ) -> some View {
@@ -1906,22 +1928,36 @@ private struct SessionSetupPromptView: View {
                 // Provider icon
                 ZStack {
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(isSelected ? color : color.opacity(0.15))
+                        .fill(isSelected ? color : (isAvailable ? color.opacity(0.15) : Color.gray.opacity(0.1)))
                         .frame(width: 36, height: 36)
                     
                     Image(systemName: icon)
                         .font(.system(size: 16))
-                        .foregroundColor(isSelected ? .white : color)
+                        .foregroundColor(isSelected ? .white : (isAvailable ? color : .gray.opacity(0.4)))
                 }
                 
                 // Provider info
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(name)
-                        .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-                        .foregroundColor(.primary)
+                    HStack(spacing: 6) {
+                        Text(name)
+                            .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                            .foregroundColor(isAvailable ? .primary : .secondary.opacity(0.6))
+                        
+                        if !isAvailable {
+                            Text("No API Key")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.orange)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.orange.opacity(0.15))
+                                )
+                        }
+                    }
                     Text(description)
                         .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(isAvailable ? .secondary : .secondary.opacity(0.5))
                         .lineLimit(1)
                 }
                 
@@ -1945,6 +1981,8 @@ private struct SessionSetupPromptView: View {
             )
         }
         .buttonStyle(.plain)
+        .disabled(!isAvailable)
+        .opacity(isAvailable ? 1.0 : 0.7)
     }
     
     @ViewBuilder
