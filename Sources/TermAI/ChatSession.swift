@@ -1738,8 +1738,9 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         let error: String?
     }
     
-    /// Execute a step using native tool calling APIs
+    /// Execute a step using native tool calling APIs with streaming support
     /// Returns when the model either responds with text (no tool calls) or signals completion
+    /// Text responses are streamed to the UI in real-time for better UX
     private func executeStepWithNativeTools(
         userRequest: String,
         goal: String,
@@ -1826,8 +1827,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             loopCount += 1
             
             do {
-                // Call LLM with tools
-                let result = try await LLMClient.shared.completeWithTools(
+                // Stream LLM response with tools using the new streaming API
+                let stream = LLMClient.shared.streamWithTools(
                     systemPrompt: systemPrompt,
                     messages: conversationMessages,
                     tools: toolSchemas,
@@ -1837,16 +1838,107 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                     timeout: 120
                 )
                 
-                // Update token tracking
-                agentSessionTokensUsed += result.totalTokens
-                if result.promptTokens > accumulatedContextTokens {
-                    accumulatedContextTokens = result.promptTokens
+                // Track streaming state
+                var accumulatedText = ""
+                var completedToolCalls: [ParsedToolCall] = []
+                var _stopReason: String? = nil  // Available for future debugging/logging
+                var streamingMessageIndex: Int? = nil
+                
+                // Throttle UI updates during text streaming
+                let updateInterval: TimeInterval = 0.05  // 50ms
+                var lastUpdateTime = Date.distantPast
+                
+                // Process streaming events
+                for try await event in stream {
+                    // Check for cancellation
+                    if agentCancelled {
+                        return NativeToolStepResult(
+                            textResponse: nil,
+                            toolsExecuted: allToolsExecuted,
+                            isDone: false,
+                            error: "Cancelled by user"
+                        )
+                    }
+                    
+                    switch event {
+                    case .textDelta(let delta):
+                        // Accumulate text
+                        accumulatedText += delta
+                        
+                        // Create or update streaming message in UI
+                        if streamingMessageIndex == nil {
+                            // Create a new assistant message for streaming text
+                            messages.append(ChatMessage(
+                                role: "assistant",
+                                content: accumulatedText
+                            ))
+                            streamingMessageIndex = messages.count - 1
+                            messages = messages
+                        } else {
+                            // Throttle UI updates
+                            let now = Date()
+                            if now.timeIntervalSince(lastUpdateTime) >= updateInterval {
+                                messages[streamingMessageIndex!].content = accumulatedText
+                                messages = messages
+                                lastUpdateTime = now
+                            }
+                        }
+                        
+                    case .toolCallStart(let id, let name):
+                        AgentDebugConfig.log("[NativeTools] Tool call started: \(name) (id: \(id))")
+                        
+                        // Check if this is a task status update - these are silent
+                        let isTaskStatusUpdate = name == "plan_and_track"
+                        
+                        // Add status message for tool usage (skip for task updates)
+                        if !isTaskStatusUpdate {
+                            messages.append(ChatMessage(
+                                role: "assistant",
+                                content: "",
+                                agentEvent: AgentEvent(
+                                    kind: "step",
+                                    title: "Using tool: \(name)",
+                                    details: "Preparing arguments...",
+                                    command: nil,
+                                    output: nil,
+                                    collapsed: true
+                                )
+                            ))
+                            messages = messages
+                            persistMessages()
+                        }
+                        
+                    case .toolCallDelta(_, _):
+                        // Arguments are being streamed - we wait for toolCallComplete
+                        break
+                        
+                    case .toolCallComplete(let toolCall):
+                        completedToolCalls.append(toolCall)
+                        AgentDebugConfig.log("[NativeTools] Tool call complete: \(toolCall.name) with args: \(toolCall.arguments)")
+                        
+                    case .usage(let promptTokens, let completionTokens):
+                        // Update token tracking
+                        agentSessionTokensUsed += promptTokens + completionTokens
+                        if promptTokens > accumulatedContextTokens {
+                            accumulatedContextTokens = promptTokens
+                        }
+                        currentContextTokens = accumulatedContextTokens
+                        
+                    case .done(let reason):
+                        _stopReason = reason
+                    }
                 }
-                currentContextTokens = accumulatedContextTokens
+                
+                // Ensure final text is reflected in UI
+                if let index = streamingMessageIndex {
+                    messages[index].content = accumulatedText
+                    messages = messages
+                    persistMessages()
+                }
                 
                 // Check if model returned text without tool calls (indicating completion)
-                if !result.hasToolCalls {
-                    lastTextResponse = result.content
+                if completedToolCalls.isEmpty {
+                    lastTextResponse = accumulatedText.isEmpty ? nil : accumulatedText
                     return NativeToolStepResult(
                         textResponse: lastTextResponse,
                         toolsExecuted: allToolsExecuted,
@@ -1858,21 +1950,19 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                 // Execute all tool calls
                 var toolResults: [(id: String, name: String, result: String, isError: Bool)] = []
                 
-                for toolCall in result.toolCalls {
-                    AgentDebugConfig.log("[NativeTools] Executing tool: \(toolCall.name) with args: \(toolCall.arguments)")
-                    
+                for toolCall in completedToolCalls {
                     // Check if this is a task status update (complete_task or start_task) - these are silent
                     let isTaskStatusUpdate = toolCall.name == "plan_and_track" && 
                         (toolCall.stringArguments["complete_task"] != nil || toolCall.stringArguments["start_task"] != nil)
                     
-                    // Add status message for UI (skip for task status updates to reduce clutter)
+                    // Update the tool status message with actual arguments
                     if !isTaskStatusUpdate {
                         messages.append(ChatMessage(
                             role: "assistant",
                             content: "",
                             agentEvent: AgentEvent(
                                 kind: "step",
-                                title: "Using tool: \(toolCall.name)",
+                                title: "Executing: \(toolCall.name)",
                                 details: "Args: \(toolCall.stringArguments)",
                                 command: nil,
                                 output: nil,
@@ -1962,8 +2052,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                 case .cloud(.anthropic):
                     // Anthropic: assistant message with tool_use content blocks
                     let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsAnthropic(
-                        content: result.content,
-                        toolCalls: result.toolCalls
+                        content: accumulatedText.isEmpty ? nil : accumulatedText,
+                        toolCalls: completedToolCalls
                     )
                     conversationMessages.append(assistantMsg)
                     // Tool results as user message with tool_result blocks
@@ -1973,8 +2063,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                 case .cloud(.google):
                     // Google: model message with functionCall parts, then function response
                     let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsOpenAI(
-                        content: result.content,
-                        toolCalls: result.toolCalls
+                        content: accumulatedText.isEmpty ? nil : accumulatedText,
+                        toolCalls: completedToolCalls
                     )
                     conversationMessages.append(assistantMsg)
                     let googleResults = toolResults.map { (name: $0.name, result: ["output": $0.result] as [String: Any]) }
@@ -1983,8 +2073,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                 default:
                     // OpenAI and local - assistant with tool_calls, then tool role messages
                     let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsOpenAI(
-                        content: result.content,
-                        toolCalls: result.toolCalls
+                        content: accumulatedText.isEmpty ? nil : accumulatedText,
+                        toolCalls: completedToolCalls
                     )
                     conversationMessages.append(assistantMsg)
                     for tr in toolResults {
