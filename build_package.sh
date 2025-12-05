@@ -187,7 +187,22 @@ else
   echo "Notarization skipped (set APPLE_ID, TEAM_ID, APP_PASSWORD to enable)."
 fi
 
+step 9 "Creating DMG installer…"
+DMG_PATH="$ROOT/${APP_NAME}.dmg"
+rm -f "$DMG_PATH"
+create-dmg \
+  --volname "$APP_NAME" \
+  --window-pos 200 120 \
+  --window-size 600 400 \
+  --icon-size 100 \
+  --icon "$APP_NAME.app" 150 185 \
+  --app-drop-link 450 185 \
+  "$DMG_PATH" \
+  "$APP_DIR"
+echo "Created: $DMG_PATH"
+
 echo "Done. App: $APP_DIR"
 echo "Zip:  $ZIP_PATH"
+echo "DMG:  $DMG_PATH"
 
 
