@@ -131,7 +131,8 @@ final class AgentSettings: ObservableObject, Codable {
     @Published var autoApproveReadOnly: Bool = true
     
     /// Whether to require user approval before applying file changes (write, edit, insert, delete)
-    @Published var requireFileEditApproval: Bool = true
+    /// Note: Destructive operations (delete_file, rm, rmdir) ALWAYS require approval regardless of this setting
+    @Published var requireFileEditApproval: Bool = false
     
     // MARK: - Debug
     
@@ -272,7 +273,7 @@ final class AgentSettings: ObservableObject, Codable {
         appAppearance = try container.decodeIfPresent(AppearanceMode.self, forKey: .appAppearance) ?? .system
         requireCommandApproval = try container.decodeIfPresent(Bool.self, forKey: .requireCommandApproval) ?? false
         autoApproveReadOnly = try container.decodeIfPresent(Bool.self, forKey: .autoApproveReadOnly) ?? true
-        requireFileEditApproval = try container.decodeIfPresent(Bool.self, forKey: .requireFileEditApproval) ?? true
+        requireFileEditApproval = try container.decodeIfPresent(Bool.self, forKey: .requireFileEditApproval) ?? false
         verboseLogging = try container.decodeIfPresent(Bool.self, forKey: .verboseLogging) ?? false
         agentTemperature = try container.decodeIfPresent(Double.self, forKey: .agentTemperature) ?? 0.2
         titleTemperature = try container.decodeIfPresent(Double.self, forKey: .titleTemperature) ?? 1.0
@@ -410,7 +411,7 @@ final class AgentSettings: ObservableObject, Codable {
         appAppearance = .system
         requireCommandApproval = false
         autoApproveReadOnly = true
-        requireFileEditApproval = true
+        requireFileEditApproval = false
         verboseLogging = false
         agentTemperature = 0.2
         titleTemperature = 1.0
@@ -509,8 +510,32 @@ final class AgentSettings: ObservableObject, Codable {
         }
     }
     
+    // MARK: - Destructive Command Detection
+    
+    /// Destructive commands that always require approval (file deletion)
+    private static let destructiveCommandPrefixes = [
+        "rm ", "rm\t", "rmdir ", "rmdir\t"
+    ]
+    
+    /// Check if a command is destructive (file deletion) - these always require approval
+    func isDestructiveCommand(_ command: String) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // Check for rm/rmdir as standalone commands
+        if trimmed == "rm" || trimmed == "rmdir" {
+            return true
+        }
+        // Check for rm/rmdir with arguments
+        return Self.destructiveCommandPrefixes.contains { prefix in
+            trimmed.hasPrefix(prefix)
+        }
+    }
+    
     /// Determine if a command should be auto-approved based on settings
     func shouldAutoApprove(_ command: String) -> Bool {
+        // Never auto-approve destructive commands
+        if isDestructiveCommand(command) {
+            return false
+        }
         if !requireCommandApproval {
             return true
         }

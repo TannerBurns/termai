@@ -87,6 +87,10 @@ struct AgentEvent: Codable, Equatable {
     var collapsed: Bool? = true
     var checklistItems: [TaskChecklistItem]? = nil
     var fileChange: FileChange? = nil
+    /// For pending approvals - the approval ID to respond to
+    var pendingApprovalId: UUID? = nil
+    /// Tool name for the pending approval
+    var pendingToolName: String? = nil
 }
 
 // MARK: - Task Checklist
@@ -374,7 +378,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
 
 /// A completely self-contained chat session with its own state, messages, and streaming
 @MainActor
-final class ChatSession: ObservableObject, Identifiable {
+final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, PlanTrackDelegate {
     let id: UUID
     
     // Chat state
@@ -549,9 +553,10 @@ final class ChatSession: ObservableObject, Identifiable {
     }
     
     /// Async version with agent mode - use this for LLM calls
+    /// Uses simplified prompt for native tool calling (tools sent via API)
     private func getAgentSystemPromptAsync() async -> String {
         let info = await SystemInfo.cachedAsync
-        return info.injectIntoPromptWithAgentMode()
+        return info.injectIntoPromptWithNativeToolCalling()
     }
     
     // Private streaming state
@@ -1218,7 +1223,14 @@ final class ChatSession: ObservableObject, Identifiable {
         // Reset cancellation state and transition to starting phase
         agentCancelled = false
         transitionToPhase(.starting)
+        
+        // Set up shell executor and plan track delegate for native tool calling
+        AgentToolRegistry.shared.setShellExecutor(self)
+        AgentToolRegistry.shared.setPlanTrackDelegate(self)
         defer { 
+            // Clean up delegate references
+            AgentToolRegistry.shared.setShellExecutor(nil)
+            AgentToolRegistry.shared.setPlanTrackDelegate(nil)
             if !agentExecutionPhase.isTerminal {
                 transitionToPhase(.idle)
             }
@@ -1227,111 +1239,10 @@ final class ChatSession: ObservableObject, Identifiable {
         // Append user message first
         appendUserMessage(userPrompt)
         
-        // Add an agent status message (collapsed) indicating decision in progress
-        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent deciding next action…", details: "Evaluating whether to run commands or reply directly.", command: nil, output: nil, collapsed: true)))
-        messages = messages
-        persistMessages()
-        
-        // Check cancellation before first API call
-        if checkCancelled(location: "before decision") { return }
-        
-        transitionToPhase(.deciding)
-        
-        // Gather environment context for informed decision-making
-        let envContext = await gatherQuickContext()
-        
-        // Ask the model whether to run commands or reply
-        let decisionPrompt = """
-        You are operating in agent mode inside a terminal-centric app. Commands you run execute DIRECTLY in the user's real shell session (via PTY) - environment changes like `source venv/bin/activate`, `export`, `cd`, etc. WILL persist in their terminal.
-
-        CURRENT ENVIRONMENT (may be incomplete if no commands run yet):
-        \(envContext.formatted())
-
-        Given the user's request below, decide one of two actions:
-        - RESPOND: ONLY for pure questions/explanations where no action is requested
-        - RUN: For ANY request that implies running commands or performing actions
-
-        BIAS TOWARD ACTION: When in doubt, choose RUN. The user is asking you to DO something.
-        - "activate venv" → RUN (try common paths: venv, .venv, env)
-        - "run tests" → RUN (figure out the test command)
-        - "install dependencies" → RUN
-        - "build the project" → RUN
-        - "what does X do?" → RESPOND (pure question)
-        - "explain Y" → RESPOND (pure explanation)
-
-        NOTE: The environment info above may not reflect the user's actual terminal directory. 
-        If the request is clearly actionable, choose RUN and discover the environment during execution.
-
-        Reply strictly in JSON on one line with keys: {"action":"RESPOND|RUN", "reason":"short sentence"}.
-        User: \(userPrompt)
-        """
-        let decision = await callOneShotJSON(prompt: decisionPrompt)
-        
-        // Check cancellation after API call
-        if checkCancelled(location: "after decision") { return }
-        
-        AgentDebugConfig.log("[Agent] Decision: \(decision.raw)")
-        
-        // Replace last agent status with decision
-        if let lastIdx = messages.indices.last, messages[lastIdx].agentEvent != nil {
-            let jsonText = decision.raw
-            messages[lastIdx] = ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent decision", details: jsonText, command: nil, output: nil, collapsed: true))
-        }
-        messages = messages
-        persistMessages()
-        
-        guard decision.action == "RUN" else {
-            // Fall back to normal streaming reply using the same request path
-            let assistantIndex = messages.count
-            messages.append(ChatMessage(role: "assistant", content: ""))
-            streamingMessageId = messages[assistantIndex].id
-            messages = messages
-            do {
-                _ = try await requestChatCompletionStream(assistantIndex: assistantIndex)
-            } catch is CancellationError {
-                // ignore
-            } catch {
-                await MainActor.run {
-                    self.messages.append(ChatMessage(role: "assistant", content: "Error: \(error.localizedDescription)"))
-                }
-            }
-            await MainActor.run {
-                self.streamingMessageId = nil
-                self.persistMessages()
-            }
-            return
-        }
-        
-        // Generate a concrete goal
-        transitionToPhase(.settingGoal)
-        let goalPrompt = """
-        Convert the user's request below into a concise actionable goal a shell-capable agent should accomplish.
-        
-        CURRENT ENVIRONMENT (reference only, may be incomplete):
-        \(envContext.formatted())
-        
-        Create an actionable goal. Don't over-constrain based on environment - the user knows their setup.
-        Examples:
-        - "activate venv" → "Activate Python virtual environment"
-        - "run tests" → "Run the project's test suite"
-        - "build" → "Build the project"
-        
-        Reply as JSON: {"goal":"short goal phrase"}.
-        User: \(userPrompt)
-        """
-        let goal = await callOneShotJSON(prompt: goalPrompt)
-        if checkCancelled(location: "after goal") { return }
-        
-        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Goal", details: goal.raw, command: nil, output: nil, collapsed: true)))
-        messages = messages
-        persistMessages()
-        
         // Clear any stale data from previous agent runs
         AgentToolRegistry.shared.clearSession()
         
         // Agent context maintained as a growing log of tool/command outputs
-        // NOTE: Don't add GOAL/CHECKLIST here - they're shown separately in the step prompt
-        // Adding them here causes confusion with outdated state in the context
         agentContextLog = []
         
         // Reset token tracking for this new agent run
@@ -1339,60 +1250,12 @@ final class ChatSession: ObservableObject, Identifiable {
         accumulatedContextTokens = 0
         currentContextTokens = 0
         
-        // Planning phase (if enabled)
-        var agentPlan: [String] = []
-        var estimatedSteps: Int = 10
-        agentChecklist = nil  // Reset checklist
+        // Reset checklist - agent will create one via plan_and_track tool if needed
+        agentChecklist = nil
         
-        if AgentSettings.shared.enablePlanning {
-            if checkCancelled(location: "before planning") { return }
-            transitionToPhase(.planning)
-            let planPrompt = """
-            Create a numbered plan (3-10 steps) to achieve this goal.
-            Each step should be a concrete action that can be verified.
-            Consider: what commands to run, what to check, what could go wrong.
-            IMPORTANT: Include a final verification step to confirm the goal is achieved.
-            Reply JSON: {"plan": ["step 1 description", "step 2 description", ..., "Verify: <verification action>"], "estimated_commands": 5}
-            GOAL: \(goal.goal ?? "")
-            ENVIRONMENT:
-            - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
-            - Shell: /bin/zsh
-            """
-            AgentDebugConfig.log("[Agent] Planning prompt =>\n\(planPrompt)")
-            let planResult = await callOneShotJSON(prompt: planPrompt)
-            if checkCancelled(location: "after planning") { return }
-            AgentDebugConfig.log("[Agent] Plan: \(planResult.raw)")
-            
-            if let steps = planResult.plan, !steps.isEmpty {
-                agentPlan = steps
-                estimatedSteps = planResult.estimatedCommands ?? steps.count
-                
-                // Create the task checklist from the plan
-                agentChecklist = TaskChecklist(from: steps, goal: goal.goal ?? "")
-                
-                // Display checklist with status indicators
-                let checklistDisplay = agentChecklist!.displayString
-                messages.append(ChatMessage(
-                    role: "assistant",
-                    content: "",
-                    agentEvent: AgentEvent(
-                        kind: "checklist",
-                        title: "Task Checklist (\(steps.count) items)",
-                        details: checklistDisplay,
-                        command: nil,
-                        output: nil,
-                        collapsed: false,
-                        checklistItems: agentChecklist!.items
-                    )
-                ))
-                // NOTE: Don't add checklist to agentContextLog - it's shown separately in step prompt
-                // and would show stale state as the checklist updates
-            } else {
-                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Plan", details: "Could not generate plan, proceeding with adaptive execution", command: nil, output: nil, collapsed: true)))
-            }
-            messages = messages
-            persistMessages()
-        }
+        // Store user prompt for use in reflection/stuck detection
+        let userRequest = userPrompt
+        
         // Observe terminal completion events targeted to this session
         if commandFinishedObserver == nil {
             commandFinishedObserver = NotificationCenter.default.addObserver(forName: .TermAICommandFinished, object: nil, queue: .main) { [weak self] note in
@@ -1425,14 +1288,12 @@ final class ChatSession: ObservableObject, Identifiable {
         
         var iterations = 0
         let maxIterations = AgentSettings.shared.maxIterations
-        var fixAttempts = 0
-        let maxFixAttempts = AgentSettings.shared.maxFixAttempts
         var recentCommands: [String] = []  // Track recent commands for stuck detection
-        var currentPlanStep = 0
-        var emptyResponseCount = 0  // Track consecutive empty LLM responses
-        var unknownToolCount = 0  // Track consecutive unknown tool calls to prevent loops
         let reflectionInterval = AgentSettings.shared.reflectionInterval
         let stuckThreshold = AgentSettings.shared.stuckDetectionThreshold
+        
+        // Estimate steps based on checklist if set, otherwise 0 (unknown)
+        var estimatedSteps: Int { agentChecklist?.items.count ?? 0 }
         
         stepLoop: while maxIterations == 0 || iterations < maxIterations {
             // Check for cancellation at start of each iteration
@@ -1475,7 +1336,8 @@ final class ChatSession: ObservableObject, Identifiable {
                 }
                 
                 // Build checklist status for reflection
-                let checklistStatus = agentChecklist?.displayString ?? (agentPlan.isEmpty ? "No plan" : agentPlan.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "; "))
+                let checklistStatus = agentChecklist?.displayString ?? "No checklist set"
+                let goalForReflection = agentChecklist?.goalDescription ?? userRequest
                 
                 let reflectionPrompt = """
                 Reflect on progress toward the goal. Assess what has been accomplished and what remains.
@@ -1497,7 +1359,7 @@ final class ChatSession: ObservableObject, Identifiable {
                     "new_approach": "optional new strategy if should_adjust is true"
                 }
                 
-                GOAL: \(goal.goal ?? "")
+                GOAL: \(goalForReflection)
                 CHECKLIST:\n\(checklistStatus)
                 CONTEXT:\n\(agentContextLog.suffix(20).joined(separator: "\n"))
                 """
@@ -1528,12 +1390,13 @@ final class ChatSession: ObservableObject, Identifiable {
                 }
                 
                 if isStuck {
+                    let goalForStuck = agentChecklist?.goalDescription ?? userRequest
                     let stuckPrompt = """
                     The agent appears stuck, running similar commands repeatedly without progress.
                     Recent commands: \(lastN.joined(separator: "; "))
                     Decide: is this truly stuck? If so, suggest a completely different approach.
                     Reply JSON: {"is_stuck": true/false, "new_approach": "different strategy to try", "should_stop": true/false}
-                    GOAL: \(goal.goal ?? "")
+                    GOAL: \(goalForStuck)
                     """
                     AgentDebugConfig.log("[Agent] Stuck detection prompt =>\n\(stuckPrompt)")
                     let stuckResult = await callOneShotJSON(prompt: stuckPrompt)
@@ -1565,620 +1428,103 @@ final class ChatSession: ObservableObject, Identifiable {
                 contextBlob = await summarizeContext(agentContextLog, maxSize: AgentSettings.shared.maxContextSize)
             }
             
-            // Build checklist/plan context for the step prompt
+            // Build checklist context for the step prompt (checklist is set via plan_and_track tool)
+            // Also auto-mark first pending task as in-progress if none are currently in-progress
             let checklistContext: String
-            if let checklist = agentChecklist {
-                checklistContext = checklist.displayString
-            } else if !agentPlan.isEmpty {
-                let planWithMarkers = agentPlan.enumerated().map { idx, step in
-                    let marker = idx < currentPlanStep ? "✓" : (idx == currentPlanStep ? "→" : "○")
-                    return "\(marker) \(idx + 1). \(step)"
-                }.joined(separator: "\n")
-                checklistContext = "PLAN:\n\(planWithMarkers)\nCurrent step: \(currentPlanStep + 1) of \(agentPlan.count)"
+            if var checklist = agentChecklist {
+                // Auto-mark first pending task as in-progress
+                if checklist.items.first(where: { $0.status == .inProgress }) == nil,
+                   let firstPending = checklist.items.first(where: { $0.status == .pending }) {
+                    checklist.markInProgress(firstPending.id)
+                    agentChecklist = checklist
+                    updateChecklistMessage()
+                    agentContextLog.append("TASK STARTED: #\(firstPending.id) - \(firstPending.description)")
+                }
+                
+                // Build context with current task highlighted
+                var context = checklist.displayString
+                if let current = checklist.currentItem {
+                    context += "\n\nCURRENT TASK: #\(current.id) - \(current.description)"
+                }
+                checklistContext = context
             } else {
                 checklistContext = ""
             }
             
-            let stepPrompt = """
-            You are a terminal agent executing commands in the user's REAL shell (PTY). Based on the GOAL and CONTEXT below, decide the next action.
+            // Execute step using native tool calling API
+            AgentDebugConfig.log("[Agent] Using native tool calling for step \(iterations)")
             
-            GOAL REMINDER: \(goal.goal ?? "")
-            Progress: Step \(iterations) of max \(maxIterations == 0 ? "unlimited" : String(maxIterations))
+            // Use checklist goal if set, otherwise user's original request
+            let currentGoal = agentChecklist?.goalDescription ?? userRequest
             
-            AVAILABLE TOOLS (prefer these over complex shell commands):
-            FILE OPERATIONS:
-            1. "write_file" - Create or overwrite entire file. Args: path, content, mode (overwrite|append)
-            2. "edit_file" - Edit file by replacing specific text. Args: path, old_text, new_text, replace_all (true/false)
-            3. "insert_lines" - Insert content at line number. Args: path, line_number, content
-            4. "delete_lines" - Delete line range. Args: path, start_line, end_line
-            5. "read_file" - Read file contents. Args: path, start_line (optional), end_line (optional)
-            6. "list_dir" - List directory. Args: path, recursive (true|false)
-            7. "search_files" - Find files by pattern. Args: path, pattern (e.g. "*.swift")
+            let nativeResult = await executeStepWithNativeTools(
+                userRequest: userRequest,
+                goal: currentGoal,
+                contextLog: agentContextLog,
+                checklistContext: checklistContext,
+                iterations: iterations,
+                maxIterations: maxIterations
+            )
             
-            SHELL & PROCESS:
-            8. "command" - Run a simple shell command (ls, mkdir, cd, git, npm, node, source, python, etc.)
-            9. "run_background" - Start server/process in background. Args: command, wait_for (text to detect startup), timeout
-            10. "check_process" - Check process status. Args: pid, port, or list=true
-            11. "stop_process" - Stop a background process. Args: pid, or all=true
-            
-            VERIFICATION:
-            12. "http_request" - Test API endpoints. Args: url, method (GET/POST/PUT/DELETE), body, headers
-            13. "search_output" - Search previous command outputs. Args: pattern
-            
-            CONTEXT LOG FORMAT (how to read the CONTEXT section):
-            - "RAN: <command>" = command that was executed
-            - "OUTPUT: ..." = command output (may be empty for silent commands)
-            - "EXIT_CODE: N" = exit code (0=success, non-zero=failure)
-            - "CWD: /path" = current working directory after command
-            - Many commands (cd, source, mkdir, export) succeed SILENTLY with no output
-            
-            RULES:
-            - For creating NEW files, use write_file tool
-            - For EDITING existing files, use edit_file (search/replace) or insert_lines/delete_lines
-            - For reading files, use read_file tool instead of cat
-            - Use shell commands for: mkdir, ls, cd, git, grep, find, npm, node, source, python, etc.
-            - Environment commands (source venv/bin/activate, export, cd) run in user's real shell and PERSIST
-            - For servers: use run_background to start, http_request to test endpoints
-            - For MARKDOWN: Always include blank lines before headings (## Title) when inserting
-            - ALWAYS verify your edits by reading the file after making changes
-            - Before declaring done, VERIFY the goal is achieved (check files exist, test endpoints, etc.)
-            - Output strictly valid JSON on ONE line
-            
-            RESPONSE FORMAT:
-            {"step":"description", "tool":"tool_name", "command":"shell command if tool=command", "tool_args":{"path":"...", "content":"..."}, "checklist_item": 1}
-            
-            NOTE: Include "checklist_item" with the item number you're working on from the checklist.
-            
-            ENVIRONMENT:
-            - CWD: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
-            - Shell: /bin/zsh (user's real shell - environment changes persist)
-            
-            \(checklistContext)
-            
-            CONTEXT:\n\(contextBlob)
-            """
-            AgentDebugConfig.log("[Agent] Step prompt =>\n\(stepPrompt)")
-            let step = await callOneShotJSONWithRetry(prompt: stepPrompt)
-            
-            // Check for cancellation after LLM call
-            if agentCancelled {
-                AgentDebugConfig.log("[Agent] Cancelled after step prompt")
-                break stepLoop
-            }
-            
-            let commandToRun = step.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let toolToUse = step.tool?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "command"
-            let toolArgs = step.toolArgs ?? [:]
-            let workingOnChecklistItem = step.checklistItem
-            
-            // Mark checklist item as in progress
-            if let itemId = workingOnChecklistItem, var checklist = agentChecklist {
-                checklist.markInProgress(itemId)
-                agentChecklist = checklist  // Explicit reassignment triggers @Published
-                updateChecklistMessage()
-            }
-            
-            // Check if this is a tool call rather than a shell command
-            if toolToUse != "command" && !toolToUse.isEmpty {
-                
-                // Special handling for "done" tool - LLM is signaling completion
-                // This prevents infinite loops where the LLM keeps calling "done"
-                if toolToUse == "done" || toolToUse == "complete" || toolToUse == "finish" {
-                    AgentDebugConfig.log("[Agent] Detected completion signal via tool='\(toolToUse)', running assessment...")
-                    
-                    // Run a goal assessment to verify if we're actually done
-                    let checklistStatus = (self.agentChecklist?.items ?? []).map { 
-                        let status = $0.status == .completed ? "✓" : ($0.status == .failed ? "✗" : "○")
-                        return "\(status) \($0.description)"
-                    }.joined(separator: "\n")
-                    
-                    let completedCount = (self.agentChecklist?.items ?? []).filter { $0.status == .completed }.count
-                    let totalCount = self.agentChecklist?.items.count ?? 0
-                    
-                    let assessPrompt = """
-                    The agent is signaling completion. Verify if the GOAL is actually achieved.
-                    The goal is ONLY complete if ALL checklist items are marked ✓ (completed).
-                    
-                    NOTE: Exit code 0 = success. Commands like cd, source, mkdir, export succeed silently (no output).
-                    
-                    Reply JSON: {"done":true|false, "reason":"short explanation"}.
-                    GOAL: \(goal.goal ?? "")
-                    CHECKLIST (\(completedCount)/\(totalCount) completed):
-                    \(checklistStatus)
-                    RECENT CONTEXT:\n\(agentContextLog.suffix(10).joined(separator: "\n"))
-                    """
-                    
-                    let assess = await callOneShotJSON(prompt: assessPrompt)
-                    if checkCancelled(location: "after done-tool assess") { break stepLoop }
-                    AgentDebugConfig.log("[Agent] Done-tool assessment: \(assess.raw)")
-                    
-                    if assess.done == true {
-                        // Actually complete - summarize and finish
-                        transitionToPhase(.summarizing)
-                        let summaryPrompt = """
-                        Summarize concisely what was done to achieve the goal and the result. Reply markdown.
-                        GOAL: \(goal.goal ?? "")
-                        CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
-                        """
-                        let summaryText = await callOneShotText(prompt: summaryPrompt)
-                        messages.append(ChatMessage(role: "assistant", content: summaryText))
-                        messages = messages
-                        persistMessages()
-                        transitionToPhase(.completed)
-                        break stepLoop
-                    } else {
-                        // Not actually done - add context to help LLM understand what's still needed
-                        let incompleteItems = (self.agentChecklist?.items ?? []).filter { $0.status != .completed }
-                        let itemsList = incompleteItems.map { "- \($0.description)" }.joined(separator: "\n")
-                        
-                        agentContextLog.append("COMPLETION CHECK: Not done yet. Remaining items:\n\(itemsList)")
-                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Not yet complete", details: "Still need to complete:\n\(itemsList)", command: nil, output: nil, collapsed: false)))
-                        messages = messages
-                        persistMessages()
-                        continue stepLoop
-                    }
-                }
-                
-                // Execute agent tool
-                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "step", title: step.step ?? "Using tool: \(toolToUse)", details: "Args: \(toolArgs)", command: nil, output: nil, collapsed: true)))
-                messages = messages
-                persistMessages()
-                
-                if let tool = AgentToolRegistry.shared.get(toolToUse) {
-                    // Add session ID for file coordination
-                    var argsWithSession = toolArgs
-                    argsWithSession["_sessionId"] = self.id.uuidString
-                    
-                    // Check if this is a file operation and show waiting status if needed
-                    let isFileOp = ["write_file", "edit_file", "insert_lines", "delete_lines"].contains(toolToUse)
-                    let previousPhase = agentExecutionPhase
-                    if isFileOp, let path = toolArgs["path"] {
-                        // Check if we'll need to wait for this file
-                        if let lockHolder = FileLockManager.shared.lockHolder(for: path), lockHolder != self.id {
-                            transitionToPhase(.waitingForFileLock(file: path))
-                            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "⏳ Waiting for file access", details: "Another session is editing: \(URL(fileURLWithPath: path).lastPathComponent)", command: nil, output: nil, collapsed: false)))
-                            messages = messages
-                            persistMessages()
-                        }
-                    }
-                    
-                    // Execute tool - use approval flow for file operations if enabled
-                    let result: AgentToolResult
-                    if isFileOp {
-                        result = await executeFileToolWithApproval(
-                            tool: tool,
-                            toolName: toolToUse,
-                            args: argsWithSession,
-                            cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd
-                        )
-                    } else {
-                        result = await tool.execute(args: argsWithSession, cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd)
-                    }
-                    
-                    // Restore execution phase if we were waiting
-                    if case .waitingForFileLock = agentExecutionPhase {
-                        agentExecutionPhase = previousPhase
-                    }
-                    
-                    if checkCancelled(location: "after tool execution") { break stepLoop }
-                    
-                    let resultOutput = result.success ? result.output : "ERROR: \(result.error ?? "Unknown error")"
-                    
-                    agentContextLog.append("TOOL: \(toolToUse) \(toolArgs)")
-                    agentContextLog.append("RESULT: \(resultOutput.prefix(AgentSettings.shared.maxOutputCapture))")
-                    
-                    // Include file change info in the result message if available
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: result.success ? "Tool succeeded" : "Tool failed", details: String(resultOutput.prefix(500)), command: nil, output: resultOutput, collapsed: true, fileChange: result.fileChange)))
-                    messages = messages
-                    persistMessages()
-                    
-                    // Update checklist item status
-                    if let itemId = workingOnChecklistItem, var checklist = agentChecklist {
-                        if result.success {
-                            checklist.markCompleted(itemId, note: "Done")
-                        } else {
-                            checklist.markFailed(itemId, note: result.error?.prefix(50).description)
-                        }
-                        agentChecklist = checklist  // Explicit reassignment triggers @Published
-                        updateChecklistMessage()
-                    }
-                    
-                    // Advance plan step if we completed something
-                    if result.success && !agentPlan.isEmpty && currentPlanStep < agentPlan.count {
-                        currentPlanStep += 1
-                    }
-                    
-                    // For write/edit operations, do a quick goal assessment
-                    // Only check completion if ALL checklist items are done
-                    let pendingItems = (self.agentChecklist?.items ?? []).filter { $0.status == .pending || $0.status == .inProgress }
-                    if result.success && pendingItems.isEmpty && (toolToUse == "write_file" || toolToUse == "edit_file" || toolToUse == "insert_lines") {
-                        let checklistStatus = (self.agentChecklist?.items ?? []).map { "\($0.status.rawValue) \($0.description)" }.joined(separator: "\n")
-                        let quickAssess = """
-                        Based on the tool result and checklist status, is the GOAL now complete? 
-                        The goal is ONLY complete if ALL checklist items are marked ✓ (completed).
-                        Reply JSON: {"done":true|false, "reason":"short"}.
-                        GOAL: \(goal.goal ?? "")
-                        CHECKLIST:
-                        \(checklistStatus)
-                        TOOL USED: \(toolToUse)
-                        RESULT: \(resultOutput.prefix(500))
-                        """
-                        let assessResult = await callOneShotJSON(prompt: quickAssess)
-                        if checkCancelled(location: "after tool assess") { break stepLoop }
-                        
-                        if assessResult.done == true {
-                            AgentDebugConfig.log("[Agent] Goal completed after tool: \(assessResult.raw)")
-                            transitionToPhase(.summarizing)
-                            let summaryPrompt = """
-                            Summarize concisely what was done to achieve the goal and the result. Reply markdown.
-                            GOAL: \(goal.goal ?? "")
-                            CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
-                            """
-                            let summaryText = await callOneShotText(prompt: summaryPrompt)
-                            messages.append(ChatMessage(role: "assistant", content: summaryText))
-                            messages = messages
-                            persistMessages()
-                            transitionToPhase(.completed)
-                            break stepLoop
-                        }
-                    }
-                    // Reset unknown tool counter on successful tool call
-                    unknownToolCount = 0
-                } else {
-                    // Unknown tool - track and prevent infinite loops
-                    unknownToolCount += 1
-                    AgentDebugConfig.log("[Agent] Unknown tool '\(toolToUse)' (attempt \(unknownToolCount))")
-                    
-                    agentContextLog.append("TOOL: \(toolToUse) - not found. Use one of: read_file, write_file, edit_file, insert_lines, delete_lines, list_dir, search_files, run_background, check_process, stop_process, http_request, or 'command' for shell commands.")
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Unknown tool: \(toolToUse)", details: "Available tools: \(AgentToolRegistry.shared.allTools().map { $0.name }.joined(separator: ", ")), or use 'command' for shell commands", command: nil, output: nil, collapsed: true)))
-                    messages = messages
-                    persistMessages()
-                    
-                    // Fail-safe: stop if we get too many unknown tool calls in a row
-                    if unknownToolCount >= 3 {
-                        AgentDebugConfig.log("[Agent] Too many unknown tool calls, stopping")
-                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent stopped", details: "Unable to continue - the model keeps requesting unavailable tools. Please rephrase your request.", command: nil, output: nil, collapsed: false)))
-                        messages = messages
-                        persistMessages()
-                        break stepLoop
-                    }
-                }
-                
-                continue stepLoop
-            }
-            
-            // Handle empty response from LLM
-            let stepDescription = step.step?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if commandToRun.isEmpty && stepDescription.isEmpty && toolToUse == "command" {
-                // No valid action from LLM - log and continue (retries already attempted)
-                AgentDebugConfig.log("[Agent] No action returned from LLM after retries, continuing...")
-                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "⚠️ Temporary issue", details: "Could not determine next action. Retrying...", command: nil, output: nil, collapsed: true)))
-                messages = messages
-                persistMessages()
-                emptyResponseCount += 1
-                
-                // Fail-safe: if we get too many empty responses in a row, stop
-                if emptyResponseCount >= 3 {
-                    AgentDebugConfig.log("[Agent] Too many empty responses, stopping")
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent stopped", details: "Unable to continue - received too many empty responses from the model.", command: nil, output: nil, collapsed: true)))
-                    messages = messages
-                    persistMessages()
-                    break stepLoop
-                }
-                continue stepLoop
-            }
-            
-            // Reset counters on successful action (command execution)
-            emptyResponseCount = 0
-            unknownToolCount = 0
-            
-            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "step", title: stepDescription.isEmpty ? "Next step" : stepDescription, details: nil, command: commandToRun, output: nil, collapsed: true)))
-            messages = messages
-            persistMessages()
-            
-            // If tool action but command is empty, it was handled above - skip command execution
-            guard !commandToRun.isEmpty else { continue stepLoop }
-            
-            // Execute command with optional approval flow
-            let capturedOut: String?
-            if AgentSettings.shared.requireCommandApproval && !AgentSettings.shared.shouldAutoApprove(commandToRun) {
-                // Use approval flow
-                capturedOut = await executeCommandWithApproval(commandToRun)
-                
-                // Track command for stuck detection
-                recentCommands.append(commandToRun)
-                if recentCommands.count > 10 { recentCommands.removeFirst() }
-                
-                // Check if command was rejected
-                if capturedOut == nil && !agentContextLog.contains(where: { $0.contains("RAN: \(commandToRun)") }) {
-                    // Command was rejected, skip this iteration
-                    continue stepLoop
-                }
-            } else {
-                // Direct execution without approval
-                let runningTitle = "Executing command in terminal"
-                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: runningTitle, details: "\(commandToRun)", command: commandToRun, output: nil, collapsed: false)))
-                messages = messages
-                persistMessages()
-                
-                AgentDebugConfig.log("[Agent] Executing command: \(commandToRun)")
-                NotificationCenter.default.post(name: .TermAIExecuteCommand, object: nil, userInfo: [
-                    "sessionId": self.id,
-                    "command": commandToRun
-                ])
-                
-                capturedOut = await waitForCommandOutput(matching: commandToRun, timeout: AgentSettings.shared.commandTimeout)
-                agentContextLog.append("RAN: \(commandToRun)")
-                recentCommands.append(commandToRun)
-                if recentCommands.count > 10 { recentCommands.removeFirst() }
-                
-                // Track tool call execution
-                TokenUsageTracker.shared.recordToolCall(
-                    provider: providerName,
-                    model: model,
-                    command: commandToRun
-                )
-                
-                if let out = capturedOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // Store in buffer for search
-                    AgentToolRegistry.shared.storeOutput(out, command: commandToRun)
-                    // Summarize if output is long
-                    let processedOutput = await summarizeOutput(out, command: commandToRun)
-                    agentContextLog.append("OUTPUT: \(processedOutput)")
-                }
-            }
-            
-            AgentDebugConfig.log("[Agent] Command finished. cwd=\(self.lastKnownCwd), exit=\(lastExitCodeString())\nOutput (first 500 chars):\n\((capturedOut ?? "(no output)").prefix(500))")
-            
-            // Check for cancellation after command execution
-            if agentCancelled {
-                AgentDebugConfig.log("[Agent] Cancelled after command execution")
-                break stepLoop
-            }
-            
-            // Check for user feedback after command execution
-            if let feedback = consumePendingFeedback() {
-                agentContextLog.append("USER FEEDBACK (after command): \(feedback)")
+            // Check for errors
+            if let error = nativeResult.error {
+                AgentDebugConfig.log("[Agent] Native tool calling error: \(error)")
                 messages.append(ChatMessage(
                     role: "assistant",
                     content: "",
                     agentEvent: AgentEvent(
                         kind: "status",
-                        title: "Received user feedback",
-                        details: "Adjusting next action based on your input.",
+                        title: "Agent Error",
+                        details: error,
                         command: nil,
                         output: nil,
-                        collapsed: true
+                        collapsed: false
                     )
                 ))
                 messages = messages
                 persistMessages()
+                break stepLoop
             }
             
-            // Advance plan step if command succeeded
-            if lastExitCodeString() == "0" && !agentPlan.isEmpty && currentPlanStep < agentPlan.count {
-                currentPlanStep += 1
-            }
-            
-            // Analyze command outcome; propose fixes if failed
-            let analyzePrompt = """
-            Analyze the following command execution and decide outcome and next action.
-            
-            INTERPRETATION GUIDE:
-            - EXIT_CODE 0 = success (even if output is empty - many commands succeed silently)
-            - EXIT_CODE non-zero = failure (check output for error messages)
-            - Commands like cd, source, export, mkdir often produce NO output on success
-            - "(no output)" with EXIT_CODE 0 typically means the command succeeded
-            
-            Reply strictly as JSON on one line with keys:
-            {"outcome":"success|fail|uncertain", "reason":"short", "next":"continue|stop|fix", "fixed_command":"optional replacement if next=fix else empty"}
-            GOAL: \(goal.goal ?? "")
-            COMMAND: \(commandToRun)
-            EXIT_CODE: \(lastExitCodeString())
-            OUTPUT:\n\(capturedOut ?? "(no output)")
-            CWD: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
-            """
-            AgentDebugConfig.log("[Agent] Analyze prompt =>\n\(analyzePrompt)")
-            let analysis = await callOneShotJSON(prompt: analyzePrompt)
-            if checkCancelled(location: "after analysis") { break stepLoop }
-            AgentDebugConfig.log("[Agent] Analysis: \(analysis.raw)")
-            
-            // Update checklist item status for shell commands (mirrors tool execution logic)
-            if let itemId = workingOnChecklistItem, var checklist = agentChecklist {
-                let outcome = analysis.outcome?.lowercased() ?? ""
-                if outcome == "success" {
-                    checklist.markCompleted(itemId, note: "Done")
-                } else if outcome == "fail" {
-                    checklist.markFailed(itemId, note: analysis.reason?.prefix(50).description)
-                }
-                // "uncertain" leaves it in progress for now
-                agentChecklist = checklist  // Explicit reassignment triggers @Published
-                updateChecklistMessage()
-            }
-            
-            if analysis.next == "fix", let fixed = analysis.fixed_command?.trimmingCharacters(in: .whitespacesAndNewlines), !fixed.isEmpty, fixAttempts < maxFixAttempts {
-                fixAttempts += 1
-                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Fixing command and retrying", details: fixed, command: fixed, output: nil, collapsed: false)))
-                messages = messages
-                persistMessages()
-                
-                // Execute fix command with optional approval
-                let fixOut: String?
-                if AgentSettings.shared.requireCommandApproval && !AgentSettings.shared.shouldAutoApprove(fixed) {
-                    fixOut = await executeCommandWithApproval(fixed)
-                    if fixOut == nil && !agentContextLog.contains(where: { $0.contains("RAN: \(fixed)") }) {
-                        // Fix command was rejected, continue without fix
-                        continue stepLoop
-                    }
-                } else {
-                    AgentDebugConfig.log("[Agent] Fixing by executing: \(fixed)")
-                    NotificationCenter.default.post(name: .TermAIExecuteCommand, object: nil, userInfo: [
-                        "sessionId": self.id,
-                        "command": fixed
-                    ])
-                    fixOut = await waitForCommandOutput(matching: fixed, timeout: AgentSettings.shared.commandTimeout)
-                    agentContextLog.append("RAN: \(fixed)")
-                    recentCommands.append(fixed)
-                    if recentCommands.count > 10 { recentCommands.removeFirst() }
-                    
-                    if let out = fixOut, !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        let processedOutput = await summarizeOutput(out, command: fixed)
-                        agentContextLog.append("OUTPUT: \(processedOutput)")
+            // Update checklist based on tool results (auto-mark in-progress items for file operations)
+            for (toolName, result) in nativeResult.toolsExecuted {
+                // Mark checklist items based on file operations
+                if ["write_file", "edit_file", "insert_lines", "delete_lines"].contains(toolName) {
+                    if result.success, var checklist = agentChecklist {
+                        // Find an in-progress item to mark complete
+                        if let inProgressItem = checklist.items.first(where: { $0.status == .inProgress }) {
+                            checklist.markCompleted(inProgressItem.id, note: "Done")
+                            agentChecklist = checklist
+                            updateChecklistMessage()
+                        }
                     }
                 }
-                // Immediately reassess after a fix attempt based on exit code, output, and checklist
-                let postFixItems = self.agentChecklist?.items ?? []
-                let postFixChecklistStatus = postFixItems.map { "\($0.status.rawValue) \($0.description)" }.joined(separator: "\n")
-                let postFixCompletedCount = postFixItems.filter { $0.status == .completed }.count
-                let postFixTotalCount = postFixItems.count
-                let quickAssessPrompt = """
-                Decide if the GOAL is now achieved after the fix attempt.
-                The goal is ONLY complete if ALL checklist items are marked ✓ (completed).
-                
-                NOTE: Exit code 0 = success. Commands like cd, source, mkdir, export succeed silently (no output).
-                
-                Reply JSON: {"done":true|false, "reason":"short"}.
-                GOAL: \(goal.goal ?? "")
-                CHECKLIST (\(postFixCompletedCount)/\(postFixTotalCount) completed):
-                \(postFixChecklistStatus)
-                BASE CONTEXT:
-                - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
-                - Last Command: \(fixed)
-                - Last Exit Code: \(lastExitCodeString())
-                - Last Output: \((fixOut ?? "(none - command succeeded silently)").prefix(AgentSettings.shared.maxOutputCapture))
-                CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
-                """
-                AgentDebugConfig.log("[Agent] Post-fix assess prompt =>\n\(quickAssessPrompt)")
-                let quickAssess = await callOneShotJSON(prompt: quickAssessPrompt)
-                AgentDebugConfig.log("[Agent] Post-fix assess: \(quickAssess.raw)")
-                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Post-fix assessment", details: quickAssess.raw, command: nil, output: nil, collapsed: true)))
-                messages = messages
-                persistMessages()
-                if quickAssess.done == true {
+            }
+            
+            // Check if done
+            if nativeResult.isDone {
+                if let response = nativeResult.textResponse, !response.isEmpty {
+                    // Model provided a text response (completion or answer)
                     transitionToPhase(.summarizing)
-                    let summaryPrompt = """
-                    Summarize concisely what was done to achieve the goal and the result. Reply markdown.
-                    GOAL: \(goal.goal ?? "")
-                    CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
-                    """
-                    AgentDebugConfig.log("[Agent] Summary prompt =>\n\(summaryPrompt)")
-                    let summaryText = await callOneShotText(prompt: summaryPrompt)
-                    messages.append(ChatMessage(role: "assistant", content: summaryText))
+                    messages.append(ChatMessage(role: "assistant", content: response))
                     messages = messages
                     persistMessages()
                     transitionToPhase(.completed)
                     break stepLoop
+                } else if nativeResult.toolsExecuted.isEmpty {
+                    // No tools and no text - something went wrong
+                    AgentDebugConfig.log("[Agent] Native tool calling returned no tools and no text")
                 }
             }
-            
-            // Ask if goal achieved, with latest context and checklist status
-            let assessItems = self.agentChecklist?.items ?? []
-            let checklistStatus = assessItems.map { "\($0.status.rawValue) \($0.description)" }.joined(separator: "\n")
-            let completedCount = assessItems.filter { $0.status == .completed }.count
-            let totalCount = assessItems.count
-            let assessPrompt = """
-            Given the GOAL, CHECKLIST, and CONTEXT, decide if the goal is accomplished.
-            The goal is ONLY complete if ALL checklist items are marked ✓ (completed).
-            
-            NOTE: Exit code 0 = success. Many commands (cd, source, mkdir, export) succeed silently with no output.
-            
-            Reply JSON: {"done":true|false, "reason":"short"}.
-            GOAL: \(goal.goal ?? "")
-            CHECKLIST (\(completedCount)/\(totalCount) completed):
-            \(checklistStatus)
-            BASE CONTEXT:
-            - Current Working Directory: \(self.lastKnownCwd.isEmpty ? "(unknown)" : self.lastKnownCwd)
-            - Last Command: \(commandToRun)
-            - Last Exit Code: \(lastExitCodeString())
-            - Last Output: \((capturedOut ?? "(none - command succeeded silently)").prefix(AgentSettings.shared.maxOutputCapture))
-            CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
-            """
-            AgentDebugConfig.log("[Agent] Assess prompt =>\n\(assessPrompt)")
-            let assess = await callOneShotJSON(prompt: assessPrompt)
-            if checkCancelled(location: "after assess") { break stepLoop }
-            AgentDebugConfig.log("[Agent] Assess result => \(assess.raw)")
-            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Assessment", details: assess.raw, command: nil, output: nil, collapsed: true)))
-            messages = messages
-            persistMessages()
-            
-            if assess.done == true {
-                // Run verification phase if enabled
-                if AgentSettings.shared.enableVerificationPhase {
-                    transitionToPhase(.verifying)
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "🔍 Verification Phase", details: "Running final verification before completing...", command: nil, output: nil, collapsed: false)))
-                    messages = messages
-                    persistMessages()
-                    
-                    let verificationPassed = await runVerificationPhase(goal: goal.goal ?? "", context: agentContextLog)
-                    if checkCancelled(location: "after verification") { break stepLoop }
-                    
-                    if !verificationPassed {
-                        // Verification failed, continue trying
-                        agentContextLog.append("VERIFICATION: Failed - continuing to fix issues")
-                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "⚠️ Verification incomplete", details: "Some checks did not pass. Continuing to address issues...", command: nil, output: nil, collapsed: true)))
-                        messages = messages
-                        persistMessages()
-                        continue stepLoop
-                    }
-                    
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "✓ Verification passed", details: "All checks completed successfully", command: nil, output: nil, collapsed: true)))
-                    messages = messages
-                    persistMessages()
-                }
-                
-                // Mark all remaining checklist items as complete
-                if var checklist = agentChecklist {
-                    for item in checklist.remainingItems {
-                        checklist.markCompleted(item.id, note: "Done")
-                    }
-                    agentChecklist = checklist
-                    updateChecklistMessage()
-                }
-                
-                // Summarize actions
-                transitionToPhase(.summarizing)
-                let summaryPrompt = """
-                Summarize concisely what was done to achieve the goal and the result. Reply markdown.
-                GOAL: \(goal.goal ?? "")
-                CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
-                """
-                let summaryText = await callOneShotText(prompt: summaryPrompt)
-                messages.append(ChatMessage(role: "assistant", content: summaryText))
-                messages = messages
-                persistMessages()
-                transitionToPhase(.completed)
-                break stepLoop
-            } else {
-                // Only ask about continuing if we've done many iterations (to avoid API call overhead)
-                // The normal flow is to just continue to the next step
-                if iterations > 0 && iterations % 20 == 0 {
-                    // Every 20 iterations, check if we should continue or stop
-                    let contPrompt = """
-                    Decide whether to CONTINUE or STOP given diminishing returns. Reply JSON: {"decision":"CONTINUE|STOP", "reason":"short"}.
-                    GOAL: \(goal.goal ?? "")
-                    CONTEXT (last 10 entries):\n\(agentContextLog.suffix(10).joined(separator: "\n"))
-                    """
-                    let cont = await callOneShotJSONWithRetry(prompt: contPrompt, maxRetries: 2)
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Continue check", details: cont.raw, command: nil, output: nil, collapsed: true)))
-                    messages = messages
-                    persistMessages()
-                    if cont.decision == "STOP" { 
-                        let summaryPrompt = """
-                        Summarize what was done so far and suggest next steps. Reply markdown.
-                        GOAL: \(goal.goal ?? "")
-                        CONTEXT:\n\(agentContextLog.joined(separator: "\n"))
-                        """
-                        let summaryText = await callOneShotText(prompt: summaryPrompt)
-                        messages.append(ChatMessage(role: "assistant", content: summaryText))
-                        messages = messages
-                        persistMessages()
-                        break stepLoop
-                    }
-                }
-                // Otherwise, just continue to next step
-            }
+            // Continue to next iteration
         }
     }
+    
+    // MARK: - JSON Helper Structs (for decision prompts, not tool execution)
+    
+    // Legacy JSON tool execution code has been removed.
+    // Tool calling now exclusively uses native provider APIs (executeStepWithNativeTools).
+    // The structs below are only used for simple decision prompts (RUN vs RESPOND, done assessment, etc.)
     
     // Helper to decode any JSON value and convert to string
     private struct AnyCodable: Decodable {
@@ -2203,7 +1549,9 @@ final class ChatSession: ObservableObject, Identifiable {
         }
     }
     
-    /// Unified Codable struct for all agent JSON responses - decoded in a single pass
+    /// Unified Codable struct for agent JSON responses - decoded in a single pass
+    /// Used for simple decision prompts (RUN vs RESPOND, done assessment, planning, etc.)
+    /// Tool execution now uses native provider APIs exclusively (see executeStepWithNativeTools).
     private struct UnifiedAgentJSON: Decodable {
         // Decision fields
         let action: String?
@@ -2214,19 +1562,9 @@ final class ChatSession: ObservableObject, Identifiable {
         let plan: [String]?
         let estimated_commands: Int?
         
-        // Step/Command fields
-        let step: String?
-        let command: String?
-        let tool: String?
-        var tool_args: [String: String]?
-        let checklist_item: Int?
-        
         // Assessment fields
         let done: Bool?
         let decision: String?
-        let outcome: String?
-        let next: String?
-        let fixed_command: String?
         
         // Reflection fields
         let progress_percent: Int?
@@ -2239,56 +1577,9 @@ final class ChatSession: ObservableObject, Identifiable {
         // Stuck recovery fields
         let is_stuck: Bool?
         let should_stop: Bool?
-        
-        private enum CodingKeys: String, CodingKey {
-            case action, reason, goal, plan, estimated_commands
-            case step, command, tool, tool_args, checklist_item
-            case done, decision, outcome, next, fixed_command
-            case progress_percent, on_track, completed, remaining, should_adjust, new_approach
-            case is_stuck, should_stop
-        }
-        
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            
-            // Decode simple fields
-            action = try container.decodeIfPresent(String.self, forKey: .action)
-            reason = try container.decodeIfPresent(String.self, forKey: .reason)
-            goal = try container.decodeIfPresent(String.self, forKey: .goal)
-            plan = try container.decodeIfPresent([String].self, forKey: .plan)
-            estimated_commands = try container.decodeIfPresent(Int.self, forKey: .estimated_commands)
-            step = try container.decodeIfPresent(String.self, forKey: .step)
-            command = try container.decodeIfPresent(String.self, forKey: .command)
-            tool = try container.decodeIfPresent(String.self, forKey: .tool)
-            checklist_item = try container.decodeIfPresent(Int.self, forKey: .checklist_item)
-            done = try container.decodeIfPresent(Bool.self, forKey: .done)
-            decision = try container.decodeIfPresent(String.self, forKey: .decision)
-            outcome = try container.decodeIfPresent(String.self, forKey: .outcome)
-            next = try container.decodeIfPresent(String.self, forKey: .next)
-            fixed_command = try container.decodeIfPresent(String.self, forKey: .fixed_command)
-            progress_percent = try container.decodeIfPresent(Int.self, forKey: .progress_percent)
-            on_track = try container.decodeIfPresent(Bool.self, forKey: .on_track)
-            completed = try container.decodeIfPresent([String].self, forKey: .completed)
-            remaining = try container.decodeIfPresent([String].self, forKey: .remaining)
-            should_adjust = try container.decodeIfPresent(Bool.self, forKey: .should_adjust)
-            new_approach = try container.decodeIfPresent(String.self, forKey: .new_approach)
-            is_stuck = try container.decodeIfPresent(Bool.self, forKey: .is_stuck)
-            should_stop = try container.decodeIfPresent(Bool.self, forKey: .should_stop)
-            
-            // Handle tool_args with mixed types
-            if let rawArgs = try? container.decodeIfPresent([String: AnyCodable].self, forKey: .tool_args) {
-                var stringArgs: [String: String] = [:]
-                for (key, value) in rawArgs {
-                    stringArgs[key] = value.stringValue
-                }
-                tool_args = stringArgs
-            } else {
-                tool_args = nil
-            }
-        }
     }
     
-    /// Parsed JSON response from the agent
+    /// Parsed JSON response from the agent (for decision prompts only)
     struct AgentJSONResponse {
         let raw: String
         var action: String? = nil
@@ -2296,16 +1587,8 @@ final class ChatSession: ObservableObject, Identifiable {
         var goal: String? = nil
         var plan: [String]? = nil
         var estimatedCommands: Int? = nil
-        var step: String? = nil
-        var command: String? = nil
-        var tool: String? = nil
-        var toolArgs: [String: String]? = nil
-        var checklistItem: Int? = nil
         var done: Bool? = nil
         var decision: String? = nil
-        var outcome: String? = nil
-        var next: String? = nil
-        var fixed_command: String? = nil
         var progressPercent: Int? = nil
         var onTrack: Bool? = nil
         var completed: [String]? = nil
@@ -2345,16 +1628,8 @@ final class ChatSession: ObservableObject, Identifiable {
             response.goal = unified.goal
             response.plan = unified.plan
             response.estimatedCommands = unified.estimated_commands
-            response.step = unified.step
-            response.command = unified.command
-            response.tool = unified.tool
-            response.toolArgs = unified.tool_args
-            response.checklistItem = unified.checklist_item
             response.done = unified.done
             response.decision = unified.decision
-            response.outcome = unified.outcome
-            response.next = unified.next
-            response.fixed_command = unified.fixed_command
             response.progressPercent = unified.progress_percent
             response.onTrack = unified.on_track
             response.completed = unified.completed
@@ -2376,10 +1651,12 @@ final class ChatSession: ObservableObject, Identifiable {
             let response = await callOneShotJSON(prompt: prompt)
             lastResponse = response
             
-            // Check for valid response - need at least a step description or command
-            let hasContent = (response.step != nil && !response.step!.isEmpty) ||
-                           (response.command != nil && !response.command!.isEmpty) ||
-                           (response.tool != nil && !response.tool!.isEmpty)
+            // Check for valid response - need at least one meaningful field
+            let hasContent = (response.action != nil && !response.action!.isEmpty) ||
+                           (response.goal != nil && !response.goal!.isEmpty) ||
+                           (response.plan != nil && !response.plan!.isEmpty) ||
+                           (response.done != nil) ||
+                           (response.decision != nil && !response.decision!.isEmpty)
             
             // Check for error response
             let isError = response.raw.contains("\"error\"") ||
@@ -2449,6 +1726,304 @@ final class ChatSession: ObservableObject, Identifiable {
         } catch {
             return "{\"error\":\"\(error.localizedDescription)\"}"
         }
+    }
+    
+    // MARK: - Native Tool Calling
+    
+    /// Result of a native tool calling step
+    struct NativeToolStepResult {
+        let textResponse: String?
+        let toolsExecuted: [(name: String, result: AgentToolResult)]
+        let isDone: Bool
+        let error: String?
+    }
+    
+    /// Execute a step using native tool calling APIs
+    /// Returns when the model either responds with text (no tool calls) or signals completion
+    private func executeStepWithNativeTools(
+        userRequest: String,
+        goal: String,
+        contextLog: [String],
+        checklistContext: String,
+        iterations: Int,
+        maxIterations: Int
+    ) async -> NativeToolStepResult {
+        // Build the system prompt with workflow guidance
+        // On first iteration with no checklist, guide the agent to consider using plan_and_track
+        let planningGuidance: String
+        if iterations == 1 && checklistContext.isEmpty {
+            planningGuidance = """
+            
+            IMPORTANT - START BY PLANNING:
+            Before doing any work, call plan_and_track to set your goal and create a task checklist.
+            This helps track progress and ensures systematic execution.
+            
+            Example: plan_and_track(goal="Build a REST API", tasks=["Set up project structure", "Create endpoints", "Add error handling", "Test the API"])
+            
+            Only skip planning for truly trivial single-command requests (e.g., "run pwd", "list files").
+            """
+        } else if !checklistContext.isEmpty {
+            planningGuidance = """
+            
+            TASK TRACKING:
+            - Focus on completing the CURRENT TASK shown above
+            - When you finish a task, call plan_and_track with complete_task=<id> to mark it done
+            - The next pending task will automatically become current
+            """
+        } else {
+            planningGuidance = ""
+        }
+        
+        let systemPrompt = """
+        You are a terminal agent executing commands in the user's real shell (PTY).
+        Environment changes (cd, source, export) persist in the user's session.
+        
+        USER REQUEST: \(userRequest)
+        \(goal != userRequest ? "GOAL: \(goal)" : "")
+        Progress: Step \(iterations) of max \(maxIterations == 0 ? "unlimited" : String(maxIterations))
+        
+        ENVIRONMENT:
+        - CWD: \(self.lastKnownCwd.isEmpty ? "(discover with pwd or list_dir .)" : self.lastKnownCwd)
+        - Shell: /bin/zsh
+        
+        \(checklistContext.isEmpty ? "" : "CHECKLIST:\n\(checklistContext)")
+        \(planningGuidance)
+        
+        RULES:
+        - Use the provided tools to accomplish the request
+        - For file operations, prefer file tools (read_file, edit_file, etc.) over shell commands
+        - Verify your changes by reading files after editing
+        - When the task is complete, respond with a summary (no tool calls)
+        """
+        
+        // Build the context as user message
+        let contextMessage = "CONTEXT LOG:\n\(contextLog.joined(separator: "\n"))"
+        
+        // Initial messages for the conversation
+        var conversationMessages: [[String: Any]] = [
+            ["role": "user", "content": contextMessage]
+        ]
+        
+        // Get tool schemas based on provider
+        let toolSchemas: [[String: Any]]
+        switch providerType {
+        case .cloud(.anthropic):
+            toolSchemas = AgentToolRegistry.shared.allSchemas(for: providerType)
+        case .cloud(.google):
+            toolSchemas = AgentToolRegistry.shared.allTools().map { $0.schema.toGoogle() }
+        default:
+            // OpenAI and local providers use OpenAI format
+            toolSchemas = AgentToolRegistry.shared.allSchemas(for: providerType)
+        }
+        
+        var allToolsExecuted: [(name: String, result: AgentToolResult)] = []
+        var lastTextResponse: String? = nil
+        var loopCount = 0
+        let maxToolLoops = 20 // Prevent infinite tool calling loops
+        
+        // Tool calling loop - continue until model stops calling tools or we hit limit
+        while loopCount < maxToolLoops {
+            loopCount += 1
+            
+            do {
+                // Call LLM with tools
+                let result = try await LLMClient.shared.completeWithTools(
+                    systemPrompt: systemPrompt,
+                    messages: conversationMessages,
+                    tools: toolSchemas,
+                    provider: providerType,
+                    modelId: model,
+                    maxTokens: 64000,
+                    timeout: 120
+                )
+                
+                // Update token tracking
+                agentSessionTokensUsed += result.totalTokens
+                if result.promptTokens > accumulatedContextTokens {
+                    accumulatedContextTokens = result.promptTokens
+                }
+                currentContextTokens = accumulatedContextTokens
+                
+                // Check if model returned text without tool calls (indicating completion)
+                if !result.hasToolCalls {
+                    lastTextResponse = result.content
+                    return NativeToolStepResult(
+                        textResponse: lastTextResponse,
+                        toolsExecuted: allToolsExecuted,
+                        isDone: true,
+                        error: nil
+                    )
+                }
+                
+                // Execute all tool calls
+                var toolResults: [(id: String, name: String, result: String, isError: Bool)] = []
+                
+                for toolCall in result.toolCalls {
+                    AgentDebugConfig.log("[NativeTools] Executing tool: \(toolCall.name) with args: \(toolCall.arguments)")
+                    
+                    // Check if this is a task status update (complete_task or start_task) - these are silent
+                    let isTaskStatusUpdate = toolCall.name == "plan_and_track" && 
+                        (toolCall.stringArguments["complete_task"] != nil || toolCall.stringArguments["start_task"] != nil)
+                    
+                    // Add status message for UI (skip for task status updates to reduce clutter)
+                    if !isTaskStatusUpdate {
+                        messages.append(ChatMessage(
+                            role: "assistant",
+                            content: "",
+                            agentEvent: AgentEvent(
+                                kind: "step",
+                                title: "Using tool: \(toolCall.name)",
+                                details: "Args: \(toolCall.stringArguments)",
+                                command: nil,
+                                output: nil,
+                                collapsed: true
+                            )
+                        ))
+                        messages = messages
+                        persistMessages()
+                    }
+                    
+                    // Execute the tool
+                    if let tool = AgentToolRegistry.shared.get(toolCall.name) {
+                        var args = toolCall.stringArguments
+                        args["_sessionId"] = self.id.uuidString
+                        
+                        // Check if this is a file operation that needs approval flow
+                        let isFileOp = ["write_file", "edit_file", "insert_lines", "delete_lines", "delete_file"].contains(toolCall.name)
+                        let toolResult: AgentToolResult
+                        if isFileOp {
+                            toolResult = await executeFileToolWithApproval(
+                                tool: tool,
+                                toolName: toolCall.name,
+                                args: args,
+                                cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd
+                            )
+                        } else {
+                            toolResult = await tool.execute(
+                                args: args,
+                                cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd
+                            )
+                        }
+                        
+                        allToolsExecuted.append((name: toolCall.name, result: toolResult))
+                        
+                        let resultString = toolResult.success ? toolResult.output : "ERROR: \(toolResult.error ?? "Unknown error")"
+                        toolResults.append((
+                            id: toolCall.id,
+                            name: toolCall.name,
+                            result: resultString,
+                            isError: !toolResult.success
+                        ))
+                        
+                        // Update context log (but keep it brief for task status updates)
+                        if !isTaskStatusUpdate {
+                            agentContextLog.append("TOOL: \(toolCall.name) \(toolCall.stringArguments)")
+                            agentContextLog.append("RESULT: \(resultString.prefix(AgentSettings.shared.maxOutputCapture))")
+                        }
+                        
+                        // Add result status message (skip for task status updates - checklist UI shows the update)
+                        if !isTaskStatusUpdate {
+                            messages.append(ChatMessage(
+                                role: "assistant",
+                                content: "",
+                                agentEvent: AgentEvent(
+                                    kind: "status",
+                                    title: toolResult.success ? "Tool succeeded" : "Tool failed",
+                                    details: String(resultString.prefix(500)),
+                                    command: nil,
+                                    output: resultString,
+                                    collapsed: true,
+                                    fileChange: toolResult.fileChange
+                                )
+                            ))
+                            messages = messages
+                            persistMessages()
+                        }
+                    } else {
+                        // Unknown tool
+                        let errorMsg = "Unknown tool: \(toolCall.name)"
+                        toolResults.append((id: toolCall.id, name: toolCall.name, result: errorMsg, isError: true))
+                        agentContextLog.append("TOOL ERROR: \(errorMsg)")
+                    }
+                    
+                    // Check for cancellation
+                    if agentCancelled {
+                        return NativeToolStepResult(
+                            textResponse: nil,
+                            toolsExecuted: allToolsExecuted,
+                            isDone: false,
+                            error: "Cancelled by user"
+                        )
+                    }
+                }
+                
+                // Add assistant message with tool calls and tool results based on provider
+                switch providerType {
+                case .cloud(.anthropic):
+                    // Anthropic: assistant message with tool_use content blocks
+                    let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsAnthropic(
+                        content: result.content,
+                        toolCalls: result.toolCalls
+                    )
+                    conversationMessages.append(assistantMsg)
+                    // Tool results as user message with tool_result blocks
+                    let anthropicResults = toolResults.map { (toolUseId: $0.id, result: $0.result, isError: $0.isError) }
+                    conversationMessages.append(ToolResultFormatter.userMessageWithToolResultsAnthropic(results: anthropicResults))
+                    
+                case .cloud(.google):
+                    // Google: model message with functionCall parts, then function response
+                    let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsOpenAI(
+                        content: result.content,
+                        toolCalls: result.toolCalls
+                    )
+                    conversationMessages.append(assistantMsg)
+                    let googleResults = toolResults.map { (name: $0.name, result: ["output": $0.result] as [String: Any]) }
+                    conversationMessages.append(ToolResultFormatter.functionResponseMessageGoogle(results: googleResults))
+                    
+                default:
+                    // OpenAI and local - assistant with tool_calls, then tool role messages
+                    let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsOpenAI(
+                        content: result.content,
+                        toolCalls: result.toolCalls
+                    )
+                    conversationMessages.append(assistantMsg)
+                    for tr in toolResults {
+                        conversationMessages.append(ToolResultFormatter.formatForOpenAI(toolCallId: tr.id, result: tr.result))
+                    }
+                }
+                
+            } catch let error as LLMClientError {
+                if case .toolsNotSupported(let model) = error {
+                    return NativeToolStepResult(
+                        textResponse: nil,
+                        toolsExecuted: allToolsExecuted,
+                        isDone: false,
+                        error: "Agent mode is not available with '\(model)'. This model does not support tool calling. Please select a different model or disable native tool calling in settings."
+                    )
+                }
+                return NativeToolStepResult(
+                    textResponse: nil,
+                    toolsExecuted: allToolsExecuted,
+                    isDone: false,
+                    error: error.localizedDescription
+                )
+            } catch {
+                return NativeToolStepResult(
+                    textResponse: nil,
+                    toolsExecuted: allToolsExecuted,
+                    isDone: false,
+                    error: error.localizedDescription
+                )
+            }
+        }
+        
+        // Hit max tool loops
+        return NativeToolStepResult(
+            textResponse: "Reached maximum tool execution limit. Please try a more specific request.",
+            toolsExecuted: allToolsExecuted,
+            isDone: true,
+            error: nil
+        )
     }
     
     // MARK: - Quick Environment Context
@@ -2908,12 +2483,154 @@ final class ChatSession: ObservableObject, Identifiable {
         return output
     }
     
+    // MARK: - ShellCommandExecutor Protocol
+    
+    /// Execute a shell command via the terminal PTY (ShellCommandExecutor protocol)
+    /// This is used by the ShellCommandTool in the native tool calling flow
+    nonisolated func executeShellCommand(_ command: String, requireApproval: Bool) async -> (success: Bool, output: String, exitCode: Int) {
+        // Execute the command
+        // Always require approval for destructive commands (rm, rmdir), regardless of settings
+        let output: String?
+        if AgentSettings.shared.isDestructiveCommand(command) ||
+           (requireApproval && !AgentSettings.shared.shouldAutoApprove(command)) {
+            output = await executeCommandWithApproval(command)
+        } else {
+            // Direct execution
+            await MainActor.run {
+                AgentDebugConfig.log("[ShellTool] Executing command: \(command)")
+                NotificationCenter.default.post(
+                    name: .TermAIExecuteCommand,
+                    object: nil,
+                    userInfo: [
+                        "sessionId": self.id,
+                        "command": command
+                    ]
+                )
+            }
+            output = await waitForCommandOutput(matching: command, timeout: AgentSettings.shared.commandTimeout)
+            
+            await MainActor.run {
+                agentContextLog.append("RAN: \(command)")
+                TokenUsageTracker.shared.recordToolCall(
+                    provider: providerName,
+                    model: model,
+                    command: command
+                )
+            }
+        }
+        
+        // Get exit code from context log
+        let exitCode = await MainActor.run { () -> Int in
+            let exitStr = lastExitCodeString()
+            return Int(exitStr) ?? -1
+        }
+        
+        let success = exitCode == 0
+        let outputStr = output ?? ""
+        
+        // Store output for later search
+        if !outputStr.isEmpty {
+            await MainActor.run {
+                AgentToolRegistry.shared.storeOutput(outputStr, command: command)
+            }
+        }
+        
+        return (success: success, output: outputStr, exitCode: exitCode)
+    }
+    
+    // MARK: - PlanTrackDelegate Protocol
+    
+    /// Set the agent's goal and optionally create a task checklist
+    func setGoalAndTasks(goal: String, tasks: [String]?) {
+        // Store the goal in context for reference
+        agentContextLog.append("GOAL SET: \(goal)")
+        
+        // Create checklist if tasks provided
+        if let tasks = tasks, !tasks.isEmpty {
+            agentChecklist = TaskChecklist(from: tasks, goal: goal)
+            
+            // Add a checklist message to the UI
+            let checklistDisplay = agentChecklist!.displayString
+            messages.append(ChatMessage(
+                role: "assistant",
+                content: "",
+                agentEvent: AgentEvent(
+                    kind: "checklist",
+                    title: "Task Checklist (\(tasks.count) items)",
+                    details: checklistDisplay,
+                    command: nil,
+                    output: nil,
+                    collapsed: false,
+                    checklistItems: agentChecklist!.items
+                )
+            ))
+            messages = messages
+            persistMessages()
+        } else {
+            // Just goal, no tasks - add a simple status message
+            messages.append(ChatMessage(
+                role: "assistant",
+                content: "",
+                agentEvent: AgentEvent(
+                    kind: "status",
+                    title: "Goal",
+                    details: goal,
+                    command: nil,
+                    output: nil,
+                    collapsed: true
+                )
+            ))
+            messages = messages
+            persistMessages()
+        }
+    }
+    
+    /// Mark a task as in-progress
+    func markTaskInProgress(id taskId: Int) {
+        guard var checklist = agentChecklist else { return }
+        
+        checklist.markInProgress(taskId)
+        agentChecklist = checklist
+        
+        // Update the checklist message in UI
+        updateChecklistMessage()
+        
+        // Log start
+        agentContextLog.append("TASK STARTED: #\(taskId)")
+    }
+    
+    /// Mark a task as complete
+    func markTaskComplete(id taskId: Int, note: String?) {
+        guard var checklist = agentChecklist else { return }
+        
+        checklist.markCompleted(taskId, note: note)
+        agentChecklist = checklist
+        
+        // Update the checklist message in UI
+        updateChecklistMessage()
+        
+        // Log completion
+        let noteStr = note.map { " (\($0))" } ?? ""
+        agentContextLog.append("TASK COMPLETED: #\(taskId)\(noteStr)")
+    }
+    
+    /// Get the current checklist status for context
+    func getChecklistStatus() -> String? {
+        return agentChecklist?.displayString
+    }
+    
     // MARK: - File Change Approval
     
     /// Request user approval for a file change before applying it
-    private func requestFileChangeApproval(fileChange: FileChange, toolName: String, toolArgs: [String: String]) async -> Bool {
+    /// - Parameters:
+    ///   - fileChange: The file change to approve
+    ///   - toolName: Name of the tool requesting the change
+    ///   - toolArgs: Arguments passed to the tool
+    ///   - forceApproval: If true, always require approval regardless of settings (for destructive operations)
+    private func requestFileChangeApproval(fileChange: FileChange, toolName: String, toolArgs: [String: String], forceApproval: Bool = false) async -> Bool {
         // Check if approval is required
-        guard AgentSettings.shared.requireFileEditApproval else {
+        // Always require approval if forceApproval is true (for destructive operations like delete_file)
+        guard AgentSettings.shared.requireFileEditApproval || forceApproval else {
             return true
         }
         
@@ -2937,7 +2654,7 @@ final class ChatSession: ObservableObject, Identifiable {
             ]
         )
         
-        // Add a pending approval message
+        // Add a pending approval message with inline approval buttons
         messages.append(ChatMessage(
             role: "assistant",
             content: "",
@@ -2948,7 +2665,9 @@ final class ChatSession: ObservableObject, Identifiable {
                 command: nil,
                 output: nil,
                 collapsed: false,
-                fileChange: fileChange
+                fileChange: fileChange,
+                pendingApprovalId: approvalId,
+                pendingToolName: toolName
             )
         ))
         messages = messages
@@ -3008,15 +2727,18 @@ final class ChatSession: ObservableObject, Identifiable {
         cwd: String?
     ) async -> AgentToolResult {
         // Check if this is a FileOperationTool that can provide previews
+        // Always require approval for RequiresApprovalTool (like delete_file)
+        let alwaysRequiresApproval = (tool as? RequiresApprovalTool)?.alwaysRequiresApproval ?? false
         if let fileOpTool = tool as? FileOperationTool,
-           AgentSettings.shared.requireFileEditApproval {
+           (AgentSettings.shared.requireFileEditApproval || alwaysRequiresApproval) {
             // Get the preview of changes
             if let fileChange = await fileOpTool.prepareChange(args: args, cwd: cwd) {
-                // Request approval
+                // Request approval (force approval for destructive operations)
                 let approved = await requestFileChangeApproval(
                     fileChange: fileChange,
                     toolName: toolName,
-                    toolArgs: args
+                    toolArgs: args,
+                    forceApproval: alwaysRequiresApproval
                 )
                 
                 if !approved {

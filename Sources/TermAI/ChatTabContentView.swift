@@ -1202,8 +1202,14 @@ private struct AgentEventView: View {
     @State private var expanded: Bool = false
     @State private var showCopied: Bool = false
     @State private var showingDiffSheet: Bool = false
+    @State private var approvalHandled: Bool = false
     let event: AgentEvent
     let ptyModel: PTYModel
+    
+    /// Check if this event has a pending approval that hasn't been handled
+    private var hasPendingApproval: Bool {
+        event.pendingApprovalId != nil && !approvalHandled
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1224,9 +1230,46 @@ private struct AgentEventView: View {
                 
                 Spacer()
                 
-                // View Changes button (shown when there's a file change)
-                if let fileChange = event.fileChange {
-                    ViewChangesButton(fileChange: fileChange)
+                // Inline approval buttons (shown for pending approvals)
+                if hasPendingApproval, let approvalId = event.pendingApprovalId {
+                    HStack(spacing: 8) {
+                        // View Changes button (opens modal with approve/reject)
+                        if let fileChange = event.fileChange {
+                            ViewChangesButton(
+                                fileChange: fileChange,
+                                pendingApprovalId: approvalId,
+                                toolName: event.pendingToolName,
+                                onApprovalHandled: { approvalHandled = true }
+                            )
+                        }
+                        
+                        // Reject button (X)
+                        Button(action: { rejectApproval(approvalId) }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 24, height: 24)
+                                .background(Circle().fill(Color.red))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Reject")
+                        
+                        // Approve button (checkmark)
+                        Button(action: { approveApproval(approvalId) }) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 24, height: 24)
+                                .background(Circle().fill(Color.green))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Approve")
+                    }
+                } else {
+                    // View Changes button (shown when there's a file change but not pending)
+                    if let fileChange = event.fileChange {
+                        ViewChangesButton(fileChange: fileChange)
+                    }
                 }
                 
                 // Action buttons (shown when there's a command)
@@ -1380,6 +1423,30 @@ private struct AgentEventView: View {
     private func rerunCommand(_ cmd: String) {
         // Send command to terminal
         ptyModel.sendInput?(cmd + "\n")
+    }
+    
+    private func approveApproval(_ approvalId: UUID) {
+        approvalHandled = true
+        NotificationCenter.default.post(
+            name: .TermAIFileChangeApprovalResponse,
+            object: nil,
+            userInfo: [
+                "approvalId": approvalId,
+                "approved": true
+            ]
+        )
+    }
+    
+    private func rejectApproval(_ approvalId: UUID) {
+        approvalHandled = true
+        NotificationCenter.default.post(
+            name: .TermAIFileChangeApprovalResponse,
+            object: nil,
+            userInfo: [
+                "approvalId": approvalId,
+                "approved": false
+            ]
+        )
     }
 }
 
