@@ -123,27 +123,129 @@ final class TestRunnerAgent: ObservableObject {
     
     // MARK: - Phase 1: Analysis
     
+    /// Tools available for test runner analysis
+    private let analysisToolNames = ["read_file", "list_dir", "search_files", "shell"]
+    
     private func analyzeProject() async throws -> TestAnalysisResult {
         // First, gather project information
         let projectInfo = await gatherProjectInfo()
         
-        // Use LLM with high reasoning to analyze the project
-        let analysisPrompt = buildAnalysisPrompt(projectInfo: projectInfo)
+        // Use native tool calling for dynamic project analysis
+        return try await analyzeProjectWithNativeTools(projectInfo: projectInfo)
+    }
+    
+    /// Analyze project using native tool calling for dynamic exploration
+    private func analyzeProjectWithNativeTools(projectInfo: ProjectInfo) async throws -> TestAnalysisResult {
+        // System prompt for native tool calling
+        let systemPrompt = """
+        You are a test runner assistant analyzing a project to determine how to run tests.
+        You have access to tools to explore the project structure and read configuration files.
         
-        let response = try await LLMClient.shared.complete(
-            systemPrompt: testAnalysisSystemPrompt,
-            userPrompt: analysisPrompt,
-            provider: provider,
-            modelId: modelId,
-            reasoningEffort: .high,  // Use high reasoning for complex project analysis
-            temperature: 0.1,
-            maxTokens: 4000,
-            timeout: 60,
-            requestType: .testRunner
-        )
+        Your goal:
+        1. Identify the test framework being used
+        2. Determine the correct command to run tests
+        3. Identify any setup commands needed (like activating virtualenv, starting Docker)
+        4. Identify any blockers (missing dependencies, Docker not running, etc.)
         
-        // Parse the LLM response
-        return try parseAnalysisResponse(response, projectInfo: projectInfo)
+        Use the tools to explore the project. When you have enough information, respond with a JSON configuration.
+        
+        JSON Format for final response (no tool calls):
+        {
+            "framework": "pytest|jest|xctest|swift_test|go_test|cargo_test|rspec|unknown",
+            "command": "the exact command to run tests",
+            "setup_commands": ["any commands needed before running tests"],
+            "environment": {"KEY": "VALUE"},
+            "blockers": [{"issue": "description", "fix_command": "command to fix it"}],
+            "confidence": "high|medium|low"
+        }
+        """
+        
+        // Initial context from gathered info
+        let initialContext = buildAnalysisPrompt(projectInfo: projectInfo)
+        
+        // Get tool schemas
+        let toolSchemas = analysisToolNames.compactMap { toolName -> [String: Any]? in
+            guard let tool = AgentToolRegistry.shared.get(toolName) else { return nil }
+            switch provider {
+            case .cloud(.anthropic):
+                return tool.schema.toAnthropic()
+            case .cloud(.google):
+                return tool.schema.toGoogle()
+            default:
+                return tool.schema.toOpenAI()
+            }
+        }
+        
+        var messages: [[String: Any]] = [
+            ["role": "user", "content": initialContext + "\n\nAnalyze this project and determine the test configuration. Use tools if you need more information."]
+        ]
+        
+        var additionalContext: [String] = []
+        let maxToolSteps = 10
+        
+        for step in 1...maxToolSteps {
+            guard !Task.isCancelled else { throw CancellationError() }
+            
+            let result = try await LLMClient.shared.completeWithTools(
+                systemPrompt: systemPrompt,
+                messages: messages,
+                tools: toolSchemas,
+                provider: provider,
+                modelId: modelId,
+                maxTokens: 4000,
+                timeout: 60
+            )
+            
+            // Check if model returned final response (no tool calls)
+            if !result.hasToolCalls {
+                if let content = result.content {
+                    testRunnerLogger.info("Analysis complete after \(step) steps")
+                    return try parseAnalysisResponse(content, projectInfo: projectInfo)
+                }
+                throw TestRunnerError.analysisError("Empty response from model")
+            }
+            
+            // Execute tool calls
+            for toolCall in result.toolCalls {
+                guard analysisToolNames.contains(toolCall.name) else { continue }
+                guard let tool = AgentToolRegistry.shared.get(toolCall.name) else { continue }
+                
+                testRunnerLogger.debug("Analysis step \(step): \(toolCall.name) with args \(toolCall.stringArguments)")
+                
+                let toolResult = await tool.execute(args: toolCall.stringArguments, cwd: projectPath)
+                
+                if toolResult.success {
+                    let truncated = String(toolResult.output.prefix(2000))
+                    additionalContext.append("[\(toolCall.name)] \(toolCall.stringArguments): \(truncated)")
+                } else {
+                    additionalContext.append("[\(toolCall.name)] ERROR: \(toolResult.error ?? "unknown")")
+                }
+            }
+            
+            // Add assistant message with tool calls
+            let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsOpenAI(
+                content: result.content,
+                toolCalls: result.toolCalls
+            )
+            messages.append(assistantMsg)
+            
+            // Add tool results based on provider
+            switch provider {
+            case .cloud(.anthropic):
+                let results = result.toolCalls.enumerated().map { (idx, call) -> (toolUseId: String, result: String, isError: Bool) in
+                    let context = additionalContext.count > idx ? additionalContext[additionalContext.count - result.toolCalls.count + idx] : "No result"
+                    return (toolUseId: call.id, result: context, isError: context.contains("ERROR"))
+                }
+                messages.append(ToolResultFormatter.userMessageWithToolResultsAnthropic(results: results))
+            default:
+                for (idx, call) in result.toolCalls.enumerated() {
+                    let context = additionalContext.count > idx ? additionalContext[additionalContext.count - result.toolCalls.count + idx] : "No result"
+                    messages.append(ToolResultFormatter.formatForOpenAI(toolCallId: call.id, result: context))
+                }
+            }
+        }
+        
+        throw TestRunnerError.analysisError("Analysis exceeded maximum tool steps")
     }
     
     private func gatherProjectInfo() async -> ProjectInfo {
@@ -1334,6 +1436,7 @@ struct LLMTestAnalysis {
 
 enum TestRunnerError: LocalizedError {
     case analysisParsingFailed(String)
+    case analysisError(String)
     case setupFailed(String, String)
     case timeout
     case noTestsFound
@@ -1342,6 +1445,8 @@ enum TestRunnerError: LocalizedError {
         switch self {
         case .analysisParsingFailed(let reason):
             return "Failed to parse analysis response: \(reason)"
+        case .analysisError(let reason):
+            return "Analysis failed: \(reason)"
         case .setupFailed(let command, let output):
             return "Setup command failed: \(command)\n\(output)"
         case .timeout:

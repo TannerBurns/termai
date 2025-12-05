@@ -5,6 +5,7 @@ import Foundation
 protocol AgentTool {
     var name: String { get }
     var description: String { get }
+    var schema: ToolSchema { get }
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult
 }
 
@@ -46,6 +47,45 @@ struct AgentToolResult {
     static func failure(_ error: String, fileChange: FileChange? = nil, skipResultMessage: Bool = false) -> AgentToolResult {
         AgentToolResult(success: false, output: "", error: error, fileChange: fileChange, skipResultMessage: skipResultMessage)
     }
+}
+
+// MARK: - Shell Command Executor Protocol
+
+/// Protocol for executing shell commands in the terminal PTY
+/// ChatSession implements this to allow ShellCommandTool to delegate execution
+protocol ShellCommandExecutor: AnyObject {
+    /// Execute a shell command and return the result
+    /// - Parameters:
+    ///   - command: The shell command to execute
+    ///   - requireApproval: Whether to require user approval before execution
+    /// - Returns: Tuple of (success, output, exitCode)
+    func executeShellCommand(_ command: String, requireApproval: Bool) async -> (success: Bool, output: String, exitCode: Int)
+}
+
+// MARK: - Plan and Track Delegate Protocol
+
+/// Protocol for managing agent goal and task tracking
+/// ChatSession implements this to allow PlanAndTrackTool to update the UI
+@MainActor
+protocol PlanTrackDelegate: AnyObject {
+    /// Set the agent's goal and optionally create a task checklist
+    /// - Parameters:
+    ///   - goal: The goal statement for this agent run
+    ///   - tasks: Optional list of task descriptions to create a checklist
+    func setGoalAndTasks(goal: String, tasks: [String]?)
+    
+    /// Mark a task as in-progress (starting work on it)
+    /// - Parameter id: The 1-based task ID
+    func markTaskInProgress(id: Int)
+    
+    /// Mark a task as complete
+    /// - Parameters:
+    ///   - id: The 1-based task ID
+    ///   - note: Optional completion note
+    func markTaskComplete(id: Int, note: String?)
+    
+    /// Get the current checklist status for context
+    func getChecklistStatus() -> String?
 }
 
 // MARK: - File Operation Protocol
@@ -452,6 +492,12 @@ final class AgentToolRegistry {
     private var outputBuffer: OutputBuffer
     private var memoryStore: MemoryStore
     
+    /// Reference to the shell command tool for executor configuration
+    private var shellCommandTool: ShellCommandTool?
+    
+    /// Reference to the plan and track tool for delegate configuration
+    private var planAndTrackTool: PlanAndTrackTool?
+    
     private init() {
         self.outputBuffer = OutputBuffer()
         self.memoryStore = MemoryStore()
@@ -464,6 +510,7 @@ final class AgentToolRegistry {
         register(EditFileTool())
         register(InsertLinesTool())
         register(DeleteLinesTool())
+        register(DeleteFileTool())
         register(ListDirectoryTool())
         register(SearchOutputTool(buffer: outputBuffer))
         register(MemoryTool(store: memoryStore))
@@ -473,6 +520,14 @@ final class AgentToolRegistry {
         register(CheckProcessTool())
         register(StopProcessTool())
         register(HttpRequestTool())
+        // Shell command tool (executor set later by ChatSession)
+        let shellTool = ShellCommandTool()
+        shellCommandTool = shellTool
+        register(shellTool)
+        // Plan and track tool (delegate set later by ChatSession)
+        let planTool = PlanAndTrackTool()
+        planAndTrackTool = planTool
+        register(planTool)
     }
     
     func register(_ tool: AgentTool) {
@@ -485,6 +540,16 @@ final class AgentToolRegistry {
     
     func allTools() -> [AgentTool] {
         Array(tools.values)
+    }
+    
+    /// Set the shell command executor (called by ChatSession when starting agent mode)
+    func setShellExecutor(_ executor: ShellCommandExecutor?) {
+        shellCommandTool?.executor = executor
+    }
+    
+    /// Set the plan track delegate (called by ChatSession when starting agent mode)
+    func setPlanTrackDelegate(_ delegate: PlanTrackDelegate?) {
+        planAndTrackTool?.delegate = delegate
     }
     
     /// Store output in the buffer for later search
@@ -501,6 +566,30 @@ final class AgentToolRegistry {
     /// Get tool descriptions for the agent prompt
     func toolDescriptions() -> String {
         tools.values.map { "- \($0.name): \($0.description)" }.sorted().joined(separator: "\n")
+    }
+    
+    /// Get all tool schemas in provider-specific format
+    /// - Parameter provider: The provider type to format schemas for
+    /// - Returns: Array of schema dictionaries ready for API requests
+    func allSchemas(for provider: ProviderType) -> [[String: Any]] {
+        allTools().map { tool in
+            switch provider {
+            case .cloud(.openai):
+                return tool.schema.toOpenAI()
+            case .cloud(.anthropic):
+                return tool.schema.toAnthropic()
+            case .cloud(.google):
+                return tool.schema.toGoogle()
+            case .local:
+                // Local providers use OpenAI-compatible format
+                return tool.schema.toOpenAI()
+            }
+        }
+    }
+    
+    /// Get tool schemas wrapped for Google API format (needs functionDeclarations wrapper)
+    func googleToolsPayload() -> [[String: Any]] {
+        [["functionDeclarations": allTools().map { $0.schema.toGoogle() }]]
     }
 }
 
@@ -604,6 +693,18 @@ struct ReadFileTool: AgentTool {
     let name = "read_file"
     let description = "Read contents of a file. Args: path (required), start_line (optional), end_line (optional)"
     
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Read the contents of a file at the specified path",
+            parameters: [
+                ToolParameter(name: "path", type: .string, description: "Path to the file to read", required: true),
+                ToolParameter(name: "start_line", type: .integer, description: "Starting line number (1-based, optional)", required: false),
+                ToolParameter(name: "end_line", type: .integer, description: "Ending line number (1-based, inclusive, optional)", required: false)
+            ]
+        )
+    }
+    
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let path = args["path"], !path.isEmpty else {
             return .failure("Missing required argument: path")
@@ -660,6 +761,18 @@ struct ReadFileTool: AgentTool {
 struct WriteFileTool: AgentTool, FileOperationTool {
     let name = "write_file"
     let description = "Write content to a file. Args: path (required), content (required), mode ('overwrite' or 'append', default: overwrite)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Write content to a file, creating it if it doesn't exist",
+            parameters: [
+                ToolParameter(name: "path", type: .string, description: "Path to the file to write", required: true),
+                ToolParameter(name: "content", type: .string, description: "Content to write to the file", required: true),
+                ToolParameter(name: "mode", type: .string, description: "Write mode: 'overwrite' (default) or 'append'", required: false, enumValues: ["overwrite", "append"])
+            ]
+        )
+    }
     
     func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
         guard let path = args["path"], !path.isEmpty,
@@ -777,6 +890,19 @@ struct WriteFileTool: AgentTool, FileOperationTool {
 struct EditFileTool: AgentTool, FileOperationTool {
     let name = "edit_file"
     let description = "Edit a file by replacing specific text. Args: path (required), old_text (required - exact text to find), new_text (required - replacement text), replace_all (optional, 'true'/'false', default: false)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Edit a file by finding and replacing specific text",
+            parameters: [
+                ToolParameter(name: "path", type: .string, description: "Path to the file to edit", required: true),
+                ToolParameter(name: "old_text", type: .string, description: "Exact text to find and replace (must match exactly including whitespace)", required: true),
+                ToolParameter(name: "new_text", type: .string, description: "Replacement text (can be empty to delete)", required: true),
+                ToolParameter(name: "replace_all", type: .boolean, description: "Replace all occurrences (default: false, only first match)", required: false)
+            ]
+        )
+    }
     
     func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
         guard let path = args["path"], !path.isEmpty,
@@ -928,6 +1054,18 @@ struct InsertLinesTool: AgentTool, FileOperationTool {
     let name = "insert_lines"
     let description = "Insert lines at a specific position in a file. Args: path (required), line_number (required - 1-based, lines inserted BEFORE this line), content (required). TIP: For markdown, include a leading blank line if inserting after content."
     
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Insert lines at a specific position in a file (lines inserted BEFORE the specified line number)",
+            parameters: [
+                ToolParameter(name: "path", type: .string, description: "Path to the file", required: true),
+                ToolParameter(name: "line_number", type: .integer, description: "Line number where to insert (1-based, content inserted BEFORE this line)", required: true),
+                ToolParameter(name: "content", type: .string, description: "Content to insert (can be multiple lines)", required: true)
+            ]
+        )
+    }
+    
     func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
         guard let path = args["path"], !path.isEmpty,
               let lineNumStr = args["line_number"], let lineNumber = Int(lineNumStr), lineNumber >= 1,
@@ -1058,6 +1196,18 @@ struct DeleteLinesTool: AgentTool, FileOperationTool {
     let name = "delete_lines"
     let description = "Delete a range of lines from a file. Args: path (required), start_line (required, 1-based), end_line (required, 1-based, inclusive)"
     
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Delete a range of lines from a file",
+            parameters: [
+                ToolParameter(name: "path", type: .string, description: "Path to the file", required: true),
+                ToolParameter(name: "start_line", type: .integer, description: "Starting line number to delete (1-based)", required: true),
+                ToolParameter(name: "end_line", type: .integer, description: "Ending line number to delete (1-based, inclusive)", required: true)
+            ]
+        )
+    }
+    
     func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
         guard let path = args["path"], !path.isEmpty,
               let startStr = args["start_line"], let startLine = Int(startStr), startLine >= 1,
@@ -1181,11 +1331,99 @@ struct DeleteLinesTool: AgentTool, FileOperationTool {
     }
 }
 
+// MARK: - Delete File Tool
+
+/// A tool that always requires user approval before execution
+protocol RequiresApprovalTool: AgentTool {
+    /// This tool always requires user approval, regardless of settings
+    var alwaysRequiresApproval: Bool { get }
+}
+
+extension RequiresApprovalTool {
+    var alwaysRequiresApproval: Bool { true }
+}
+
+struct DeleteFileTool: AgentTool, FileOperationTool, RequiresApprovalTool {
+    let name = "delete_file"
+    let description = "Delete a file. ALWAYS requires user approval. Args: path (required)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Delete a file at the specified path. This operation ALWAYS requires user approval before execution.",
+            parameters: [
+                ToolParameter(name: "path", type: .string, description: "Path to the file to delete", required: true)
+            ]
+        )
+    }
+    
+    func prepareChange(args: [String: String], cwd: String?) async -> FileChange? {
+        guard let path = args["path"], !path.isEmpty else {
+            return nil
+        }
+        
+        let expandedPath = resolvePath(path, cwd: cwd)
+        
+        // Check if file exists
+        guard FileManager.default.fileExists(atPath: expandedPath) else {
+            return nil
+        }
+        
+        // Read current content for preview
+        let beforeContent = try? String(contentsOfFile: expandedPath, encoding: .utf8)
+        
+        return FileChange(
+            filePath: expandedPath,
+            operationType: .deleteFile,
+            beforeContent: beforeContent,
+            afterContent: nil  // File will be deleted, no after content
+        )
+    }
+    
+    func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
+        guard let path = args["path"], !path.isEmpty else {
+            return .failure("Missing required argument: path")
+        }
+        
+        let expandedPath = resolvePath(path, cwd: cwd)
+        
+        // Check file exists
+        guard FileManager.default.fileExists(atPath: expandedPath) else {
+            if path != expandedPath {
+                return .failure("File not found: '\(path)' (resolved to: '\(expandedPath)'). Use an absolute path if CWD is unknown.")
+            }
+            return .failure("File not found: '\(path)'. Use an absolute path if needed.")
+        }
+        
+        // Prepare file change for diff display
+        let fileChange = await prepareChange(args: args, cwd: cwd)
+        
+        // Delete the file
+        do {
+            try FileManager.default.removeItem(atPath: expandedPath)
+            return .success("Deleted file: \(expandedPath)", fileChange: fileChange)
+        } catch {
+            return .failure("Error deleting file: \(error.localizedDescription)")
+        }
+    }
+}
+
 // MARK: - List Directory Tool
 
 struct ListDirectoryTool: AgentTool {
     let name = "list_dir"
     let description = "List contents of a directory. Args: path (required), recursive (optional, 'true'/'false', default: false)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "List contents of a directory",
+            parameters: [
+                ToolParameter(name: "path", type: .string, description: "Path to the directory to list", required: true),
+                ToolParameter(name: "recursive", type: .boolean, description: "List recursively (default: false)", required: false)
+            ]
+        )
+    }
     
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let path = args["path"], !path.isEmpty else {
@@ -1256,6 +1494,17 @@ struct SearchOutputTool: AgentTool {
     let name = "search_output"
     let description = "Search through previous command outputs. Args: pattern (required), context_lines (optional, default: 3)"
     
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Search through previous command outputs for a pattern",
+            parameters: [
+                ToolParameter(name: "pattern", type: .string, description: "Search pattern to find in previous outputs", required: true),
+                ToolParameter(name: "context_lines", type: .integer, description: "Number of context lines around matches (default: 3)", required: false)
+            ]
+        )
+    }
+    
     private let buffer: OutputBuffer
     
     init(buffer: OutputBuffer) {
@@ -1294,6 +1543,18 @@ struct SearchOutputTool: AgentTool {
 struct MemoryTool: AgentTool {
     let name = "memory"
     let description = "Store and recall notes during task execution. Args: action ('save'/'recall'/'list'), key (for save/recall), value (for save)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Store and recall notes during task execution",
+            parameters: [
+                ToolParameter(name: "action", type: .string, description: "Action to perform", required: true, enumValues: ["save", "recall", "list"]),
+                ToolParameter(name: "key", type: .string, description: "Key for save/recall operations", required: false),
+                ToolParameter(name: "value", type: .string, description: "Value to save (required for save action)", required: false)
+            ]
+        )
+    }
     
     private let store: MemoryStore
     
@@ -1345,6 +1606,18 @@ struct MemoryTool: AgentTool {
 struct SearchFilesTool: AgentTool {
     let name = "search_files"
     let description = "Search for files by name pattern. Args: path (required), pattern (required, e.g. '*.swift'), recursive (optional, default: true)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Search for files by name pattern (glob)",
+            parameters: [
+                ToolParameter(name: "path", type: .string, description: "Directory path to search in", required: true),
+                ToolParameter(name: "pattern", type: .string, description: "Glob pattern to match (e.g., '*.swift', 'test_*.py')", required: true),
+                ToolParameter(name: "recursive", type: .boolean, description: "Search recursively (default: true)", required: false)
+            ]
+        )
+    }
     
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let path = args["path"], !path.isEmpty else {
@@ -1428,6 +1701,18 @@ struct RunBackgroundTool: AgentTool {
     let name = "run_background"
     let description = "Start a process in the background (e.g., a server). Args: command (required), wait_for (optional - text to wait for in output to confirm startup), timeout (optional - seconds to wait, default: 5)"
     
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Start a process in the background (useful for servers, watchers, etc.)",
+            parameters: [
+                ToolParameter(name: "command", type: .string, description: "Command to run in the background", required: true),
+                ToolParameter(name: "wait_for", type: .string, description: "Text to wait for in output to confirm startup", required: false),
+                ToolParameter(name: "timeout", type: .integer, description: "Seconds to wait for startup confirmation (default: 5)", required: false)
+            ]
+        )
+    }
+    
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let command = args["command"], !command.isEmpty else {
             return .failure("Missing required argument: command")
@@ -1461,6 +1746,18 @@ struct RunBackgroundTool: AgentTool {
 struct CheckProcessTool: AgentTool {
     let name = "check_process"
     let description = "Check if a background process is running. Args: pid (optional - process ID), port (optional - check by port number), list (optional - 'true' to list all managed processes)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Check if a background process is running by PID, port, or list all",
+            parameters: [
+                ToolParameter(name: "pid", type: .integer, description: "Process ID to check", required: false),
+                ToolParameter(name: "port", type: .integer, description: "Port number to check for listening process", required: false),
+                ToolParameter(name: "list", type: .boolean, description: "List all managed background processes", required: false)
+            ]
+        )
+    }
     
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         // List all processes
@@ -1519,6 +1816,17 @@ struct StopProcessTool: AgentTool {
     let name = "stop_process"
     let description = "Stop a background process. Args: pid (required - process ID to stop), all (optional - 'true' to stop all managed processes)"
     
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Stop a background process by PID or stop all managed processes",
+            parameters: [
+                ToolParameter(name: "pid", type: .integer, description: "Process ID to stop", required: false),
+                ToolParameter(name: "all", type: .boolean, description: "Stop all managed background processes", required: false)
+            ]
+        )
+    }
+    
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         // Stop all processes
         if args["all"]?.lowercased() == "true" {
@@ -1551,6 +1859,19 @@ struct StopProcessTool: AgentTool {
 struct HttpRequestTool: AgentTool {
     let name = "http_request"
     let description = "Make an HTTP request to test APIs. Args: url (required), method (optional: GET/POST/PUT/DELETE, default: GET), body (optional - JSON string for POST/PUT), headers (optional - comma-separated key:value pairs)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Make an HTTP request to test APIs and web endpoints",
+            parameters: [
+                ToolParameter(name: "url", type: .string, description: "URL to request", required: true),
+                ToolParameter(name: "method", type: .string, description: "HTTP method", required: false, enumValues: ["GET", "POST", "PUT", "DELETE", "PATCH"]),
+                ToolParameter(name: "body", type: .string, description: "Request body (JSON string for POST/PUT/PATCH)", required: false),
+                ToolParameter(name: "headers", type: .string, description: "Headers as comma-separated key:value pairs", required: false)
+            ]
+        )
+    }
     
     func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
         guard let urlString = args["url"], !urlString.isEmpty else {
@@ -1633,6 +1954,160 @@ struct HttpRequestTool: AgentTool {
         } catch {
             return .failure("Request failed: \(error.localizedDescription)")
         }
+    }
+}
+
+// MARK: - Shell Command Tool
+
+/// Executes shell commands in the user's terminal PTY
+/// This tool delegates to a ShellCommandExecutor (typically ChatSession) for actual execution
+final class ShellCommandTool: AgentTool {
+    let name = "shell"
+    let description = "Execute a shell command in the user's terminal. Environment changes (cd, source, export) persist. Args: command (required)"
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Execute a shell command in the user's terminal. Environment changes (cd, source, export) persist in the session.",
+            parameters: [
+                ToolParameter(name: "command", type: .string, description: "Shell command to execute", required: true)
+            ]
+        )
+    }
+    
+    /// Weak reference to the executor (set by ChatSession when starting agent mode)
+    weak var executor: ShellCommandExecutor?
+    
+    init(executor: ShellCommandExecutor? = nil) {
+        self.executor = executor
+    }
+    
+    func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
+        guard let command = args["command"], !command.isEmpty else {
+            return .failure("Missing required argument: command")
+        }
+        
+        guard let executor = executor else {
+            return .failure("Shell command executor not configured. This is an internal error.")
+        }
+        
+        // Execute through the session's terminal
+        let result = await executor.executeShellCommand(command, requireApproval: AgentSettings.shared.requireCommandApproval)
+        
+        if result.success {
+            var output = result.output
+            if output.isEmpty {
+                output = "(command completed with no output, exit code: \(result.exitCode))"
+            }
+            return .success(output)
+        } else {
+            let errorMsg = result.output.isEmpty 
+                ? "Command failed with exit code \(result.exitCode)" 
+                : "Command failed (exit \(result.exitCode)): \(result.output)"
+            return .failure(errorMsg)
+        }
+    }
+}
+
+// MARK: - Plan and Track Tool
+
+/// Tool for setting goals and managing task checklists during agent execution
+/// The agent calls this at the start of complex tasks to establish a plan
+final class PlanAndTrackTool: AgentTool {
+    let name = "plan_and_track"
+    let description = "CALL THIS FIRST to set a goal and create a task checklist. Essential for multi-step work. Also use to mark tasks complete."
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "IMPORTANT: Call this FIRST before starting any multi-step work. Sets your goal and creates a trackable task checklist. Also use to mark tasks as complete when done. Only skip for trivial single-command requests.",
+            parameters: [
+                ToolParameter(name: "goal", type: .string, description: "Clear, actionable goal statement (required when setting up a new plan)", required: false),
+                ToolParameter(name: "tasks", type: .string, description: "JSON array of task descriptions, e.g. [\"task 1\", \"task 2\"]. Break work into 3-7 concrete steps.", required: false),
+                ToolParameter(name: "start_task", type: .integer, description: "Task ID to mark as in-progress (1-based)", required: false),
+                ToolParameter(name: "complete_task", type: .integer, description: "Task ID to mark complete (1-based). Call this after finishing each task.", required: false),
+                ToolParameter(name: "task_note", type: .string, description: "Optional note for the completed task", required: false)
+            ]
+        )
+    }
+    
+    /// Weak reference to the delegate (set by ChatSession when starting agent mode)
+    weak var delegate: PlanTrackDelegate?
+    
+    init(delegate: PlanTrackDelegate? = nil) {
+        self.delegate = delegate
+    }
+    
+    func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
+        guard let delegate = delegate else {
+            return .failure("Plan tracking delegate not configured. This is an internal error.")
+        }
+        
+        // Check if this is a start_task operation (marking task as in-progress)
+        if let startTaskStr = args["start_task"], let taskId = Int(startTaskStr) {
+            await delegate.markTaskInProgress(id: taskId)
+            
+            // Return current status
+            if let status = await delegate.getChecklistStatus() {
+                return .success("Started task \(taskId).\n\nCurrent checklist:\n\(status)")
+            } else {
+                return .success("Started task \(taskId).")
+            }
+        }
+        
+        // Check if this is a complete_task operation
+        if let completeTaskStr = args["complete_task"], let taskId = Int(completeTaskStr) {
+            let note = args["task_note"]
+            
+            await delegate.markTaskComplete(id: taskId, note: note)
+            
+            // Return current status
+            if let status = await delegate.getChecklistStatus() {
+                return .success("Marked task \(taskId) complete.\n\nCurrent checklist:\n\(status)")
+            } else {
+                return .success("Marked task \(taskId) complete.")
+            }
+        }
+        
+        // This is a setup operation - need a goal
+        guard let goal = args["goal"], !goal.isEmpty else {
+            return .failure("Missing required argument: goal. Provide a clear, actionable goal statement.")
+        }
+        
+        // Parse tasks array if provided (comes as JSON string)
+        var taskList: [String]? = nil
+        if let tasksJson = args["tasks"], !tasksJson.isEmpty {
+            // Try to parse as JSON array
+            if let data = tasksJson.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String] {
+                taskList = parsed
+            } else {
+                // If not valid JSON array, try splitting by newlines or commas
+                let cleaned = tasksJson.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                if cleaned.contains("\n") {
+                    taskList = cleaned.components(separatedBy: "\n")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                } else if cleaned.contains(",") {
+                    taskList = cleaned.components(separatedBy: ",")
+                        .map { $0.trimmingCharacters(in: CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\""))) }
+                        .filter { !$0.isEmpty }
+                }
+            }
+        }
+        
+        await delegate.setGoalAndTasks(goal: goal, tasks: taskList)
+        
+        // Build response
+        var response = "Goal set: \(goal)"
+        if let tasks = taskList, !tasks.isEmpty {
+            response += "\n\nTask checklist created with \(tasks.count) items:"
+            for (idx, task) in tasks.enumerated() {
+                response += "\n  \(idx + 1). \(task)"
+            }
+        }
+        
+        return .success(response)
     }
 }
 

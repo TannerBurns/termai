@@ -1166,7 +1166,8 @@ final class TerminalSuggestionService: ObservableObject {
     private let maxResearchSteps = 20
     
     /// Available tools for research phase (subset of agent tools)
-    private let researchToolNames = ["read_file", "list_dir", "search_files"]
+    /// Includes shell for running safe exploratory commands (ls, pwd, git status, etc.)
+    private let researchToolNames = ["read_file", "list_dir", "search_files", "shell"]
     
     /// Determine if research phase should run based on context
     /// Research runs when context has changed significantly or periodically
@@ -1244,28 +1245,15 @@ final class TerminalSuggestionService: ObservableObject {
         var consecutiveParseFailures = 0
         let maxConsecutiveFailures = 3  // Exit early if AI keeps returning unparseable responses
         
-        let toolDescriptions = """
-        Available tools for gathering context:
-        - read_file: Read a file's contents. Args: {"path": "relative/or/absolute/path", "start_line": 1, "end_line": 50}
-        - list_dir: List directory contents. Args: {"path": "directory/path", "recursive": "false"}
-        - search_files: Search for files by pattern. Args: {"path": "directory", "pattern": "*.swift"}
-        """
-        
+        // System prompt for native tool calling (tools sent via API)
         let systemPrompt = """
         You are a research assistant gathering context to provide helpful terminal command suggestions.
-        Your job is to explore the user's environment to understand what they might need to do next.
+        Explore the user's environment to understand what they might need to do next.
         
-        \(toolDescriptions)
+        Use the available tools to gather context. After 3-5 tool calls, you should have enough - 
+        respond with a text summary of your findings (no tool calls) to indicate you're done.
         
-        Based on the current context, decide if you need more information. If yes, call ONE tool.
-        If you have enough context OR have already gathered sufficient info, respond with done.
-        
-        IMPORTANT: Reply with ONLY a JSON object, no other text. Examples:
-        {"tool": "list_dir", "args": {"path": "."}, "reason": "see project structure"}
-        {"tool": "read_file", "args": {"path": "package.json"}, "reason": "check dependencies"}
-        {"done": true, "summary": "Found Node.js project with npm scripts"}
-        
-        After 3-5 tool calls, you should have enough context - respond with done.
+        For shell commands, only use safe exploratory commands like: ls, pwd, git status, which, type, cat, head.
         """
         
         for step in 1...maxResearchSteps {
@@ -1297,108 +1285,106 @@ final class TerminalSuggestionService: ObservableObject {
             
             userPrompt += "\n\nWhat additional context would help you suggest useful commands? Call a tool or say done."
             
+            // Execute research step using native tool calling
             do {
-                let response = try await LLMClient.shared.complete(
-                    systemPrompt: systemPrompt,
-                    userPrompt: userPrompt,
-                    provider: provider,
-                    modelId: modelId,
-                    reasoningEffort: .none,
-                    maxTokens: 300,
-                    timeout: 15,
-                    requestType: .suggestionResearch
-                )
-                
-                // Parse the response
-                guard let parsed = parseResearchResponse(response) else {
-                    consecutiveParseFailures += 1
-                    suggestionLogger.warning("Research step \(step): Could not parse response (\(consecutiveParseFailures)/\(maxConsecutiveFailures)). Response: \(response.prefix(200))")
+                    // Get tool schemas for research tools only
+                    let researchToolSchemas = researchToolNames.compactMap { toolName -> [String: Any]? in
+                        guard let tool = AgentToolRegistry.shared.get(toolName) else { return nil }
+                        switch provider {
+                        case .cloud(.anthropic):
+                            return tool.schema.toAnthropic()
+                        case .cloud(.google):
+                            return tool.schema.toGoogle()
+                        default:
+                            return tool.schema.toOpenAI()
+                        }
+                    }
                     
-                    // Exit early if AI keeps returning unparseable responses
+                    // Build messages for conversation
+                    var messages: [[String: Any]] = [
+                        ["role": "user", "content": userPrompt]
+                    ]
+                    
+                    // Add previous context as prior conversation turns
+                    if !contextAccumulator.isEmpty {
+                        messages.insert(["role": "assistant", "content": "Previous findings: \(contextAccumulator.joined(separator: "; "))"], at: 0)
+                    }
+                    
+                    let result = try await LLMClient.shared.completeWithTools(
+                        systemPrompt: systemPrompt,
+                        messages: messages,
+                        tools: researchToolSchemas,
+                        provider: provider,
+                        modelId: modelId,
+                        maxTokens: 500,
+                        timeout: 20
+                    )
+                    
+                    // Check if model returned text without tool calls (done researching)
+                    if !result.hasToolCalls {
+                        if let content = result.content, !content.isEmpty {
+                            suggestionLogger.info("Research phase complete at step \(step) via native tools: \(content.prefix(100))")
+                            findings.discoveries.append(content)
+                        }
+                        findings.completed = true
+                        break
+                    }
+                    
+                    // Execute tool calls
+                    for toolCall in result.toolCalls {
+                        guard researchToolNames.contains(toolCall.name) else {
+                            suggestionLogger.warning("Research step \(step): Tool '\(toolCall.name)' not in allowed list")
+                            continue
+                        }
+                        
+                        guard let tool = AgentToolRegistry.shared.get(toolCall.name) else {
+                            suggestionLogger.error("Research step \(step): Tool '\(toolCall.name)' not in registry")
+                            continue
+                        }
+                        
+                        setPhase(.researching(detail: "\(toolCall.name): \(toolCall.stringArguments["path"] ?? toolCall.stringArguments["command"] ?? "...")", step: step))
+                        
+                        suggestionLogger.debug("Research step \(step) (native): \(toolCall.name) with args \(toolCall.stringArguments)")
+                        
+                        let toolResult = await tool.execute(args: toolCall.stringArguments, cwd: terminalContext.cwd)
+                        
+                        // Track tool call
+                        let providerName: String
+                        switch provider {
+                        case .cloud(let cloudProvider):
+                            providerName = cloudProvider == .openai ? "OpenAI" : (cloudProvider == .anthropic ? "Anthropic" : "Google")
+                        case .local(let localProvider):
+                            providerName = localProvider.rawValue
+                        }
+                        TokenUsageTracker.shared.recordToolCall(provider: providerName, model: modelId, command: "research:\(toolCall.name)")
+                        
+                        if toolResult.success {
+                            let truncatedOutput = String(toolResult.output.prefix(1000))
+                            contextAccumulator.append("[\(toolCall.name)] \(toolCall.stringArguments): \(truncatedOutput)")
+                            
+                            // Track findings
+                            if toolCall.name == "read_file", let path = toolCall.stringArguments["path"] {
+                                let lines = toolResult.output.components(separatedBy: .newlines).count
+                                findings.fileInsights.append((path: path, insight: "Read \(lines) lines"))
+                            }
+                        } else {
+                            contextAccumulator.append("[\(toolCall.name)] ERROR: \(toolResult.error ?? "unknown")")
+                        }
+                    }
+                    continue
+                } catch {
+                    suggestionLogger.error("Research step \(step) native tool error: \(error.localizedDescription)")
+                    consecutiveParseFailures += 1
                     if consecutiveParseFailures >= maxConsecutiveFailures {
-                        suggestionLogger.info("Research phase ending early: too many parse failures")
-                        findings.discoveries.append("Research ended: model response format issues")
+                        findings.discoveries.append("Research ended: \(error.localizedDescription)")
                         break
                     }
                     continue
                 }
-                
-                // Reset failure counter on successful parse
-                consecutiveParseFailures = 0
-                
-                // Check if done
-                if parsed.done {
-                    suggestionLogger.info("Research phase complete at step \(step): \(parsed.summary ?? "no summary")")
-                    if let summary = parsed.summary, !summary.isEmpty {
-                        findings.discoveries.append(summary)
-                    }
-                    findings.completed = true
-                    break
-                }
-                
-                // Execute the tool
-                guard let toolName = parsed.tool, researchToolNames.contains(toolName) else {
-                    suggestionLogger.warning("Research step \(step): Invalid tool '\(parsed.tool ?? "nil")'")
-                    contextAccumulator.append("Invalid tool requested. Available: \(researchToolNames.joined(separator: ", "))")
-                    continue
-                }
-                
-                guard let tool = AgentToolRegistry.shared.get(toolName) else {
-                    suggestionLogger.error("Research step \(step): Tool '\(toolName)' not in registry")
-                    continue
-                }
-                
-                let args = parsed.args ?? [:]
-                setPhase(.researching(detail: "\(toolName): \(args["path"] ?? args["pattern"] ?? "...")", step: step))
-                
-                suggestionLogger.debug("Research step \(step): \(toolName) with args \(args)")
-                
-                let result = await tool.execute(args: args, cwd: terminalContext.cwd)
-                
-                // Track tool call for usage metrics
-                let providerName: String
-                switch provider {
-                case .cloud(let cloudProvider):
-                    providerName = cloudProvider == .openai ? "OpenAI" : "Anthropic"
-                case .local(let localProvider):
-                    providerName = localProvider.rawValue
-                }
-                TokenUsageTracker.shared.recordToolCall(
-                    provider: providerName,
-                    model: modelId,
-                    command: "research:\(toolName)"
-                )
-                
-                if result.success {
-                    // Truncate long outputs
-                    let truncatedOutput = String(result.output.prefix(1000))
-                    contextAccumulator.append("[\(toolName)] \(args): \(truncatedOutput)")
-                    
-                    // Track findings
-                    if toolName == "read_file", let path = args["path"] {
-                        // Extract a brief insight from the file
-                        let insight = extractFileInsight(from: result.output, path: path)
-                        findings.fileInsights.append((path, insight))
-                    } else if toolName == "list_dir", let path = args["path"] {
-                        findings.exploredDirectories.append(path)
-                    }
-                    
-                    if let reason = parsed.reason {
-                        findings.discoveries.append("• \(reason)")
-                    }
-                } else {
-                    contextAccumulator.append("[\(toolName)] Error: \(result.error ?? "Unknown error")")
-                }
-                
-                findings.stepsTaken = step
-                
-            } catch {
-                suggestionLogger.error("Research step \(step) failed: \(error.localizedDescription)")
-                break
-            }
         }
         
-        if findings.stepsTaken >= self.maxResearchSteps {
+        // Check if we hit step limit without completing
+        if !findings.completed && findings.stepsTaken >= self.maxResearchSteps {
             suggestionLogger.info("Research phase hit step limit (\(self.maxResearchSteps))")
         }
         
@@ -3088,7 +3074,4 @@ final class TerminalSuggestionService: ObservableObject {
         // For now, return empty - could be enhanced with zsh HIST_STAMPS or similar
         return []
     }
-    
-    }
-
-
+}

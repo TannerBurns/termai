@@ -254,7 +254,7 @@ struct FileDiffDetailSheet: View {
         case .create: return .green
         case .edit: return .blue
         case .insert: return .cyan
-        case .delete: return .red
+        case .delete, .deleteFile: return .red
         case .overwrite: return .orange
         }
     }
@@ -312,9 +312,14 @@ struct FileDiffDetailSheet: View {
 
 // MARK: - View Changes Button
 
-/// Button to show diff details for a completed file change
+/// Button to show diff details for a file change
+/// Can optionally include approval buttons for pending approvals
 struct ViewChangesButton: View {
     let fileChange: FileChange
+    /// If set, shows approve/reject buttons in the sheet
+    var pendingApprovalId: UUID? = nil
+    var toolName: String? = nil
+    var onApprovalHandled: (() -> Void)? = nil
     
     @State private var showingSheet = false
     @State private var isHovered = false
@@ -329,7 +334,7 @@ struct ViewChangesButton: View {
             HStack(spacing: 6) {
                 Image(systemName: "doc.text.magnifyingglass")
                     .font(.system(size: 10))
-                Text("View Changes")
+                Text("View")
                     .font(.system(size: 11, weight: .medium))
             }
             .foregroundColor(isHovered ? .white : .accentColor)
@@ -344,8 +349,46 @@ struct ViewChangesButton: View {
         .onHover { isHovered = $0 }
         .animation(.easeInOut(duration: 0.15), value: isHovered)
         .sheet(isPresented: $showingSheet) {
-            FileDiffDetailSheet(fileChange: fileChange) {
-                showingSheet = false
+            if let approvalId = pendingApprovalId {
+                // Show approval sheet with approve/reject buttons
+                FileChangeApprovalSheet(
+                    approval: PendingFileChangeApproval(
+                        id: approvalId,
+                        sessionId: UUID(), // Not used for display
+                        fileChange: fileChange,
+                        toolName: toolName ?? "unknown",
+                        toolArgs: [:]
+                    ),
+                    onApprove: {
+                        NotificationCenter.default.post(
+                            name: .TermAIFileChangeApprovalResponse,
+                            object: nil,
+                            userInfo: [
+                                "approvalId": approvalId,
+                                "approved": true
+                            ]
+                        )
+                        showingSheet = false
+                        onApprovalHandled?()
+                    },
+                    onReject: {
+                        NotificationCenter.default.post(
+                            name: .TermAIFileChangeApprovalResponse,
+                            object: nil,
+                            userInfo: [
+                                "approvalId": approvalId,
+                                "approved": false
+                            ]
+                        )
+                        showingSheet = false
+                        onApprovalHandled?()
+                    }
+                )
+            } else {
+                // Show read-only diff sheet
+                FileDiffDetailSheet(fileChange: fileChange) {
+                    showingSheet = false
+                }
             }
         }
     }
@@ -469,7 +512,7 @@ struct InlineDiffPreview: View {
         case .create: return .green
         case .edit: return .blue
         case .insert: return .cyan
-        case .delete: return .red
+        case .delete, .deleteFile: return .red
         case .overwrite: return .orange
         }
     }
