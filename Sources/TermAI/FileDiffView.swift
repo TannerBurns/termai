@@ -124,7 +124,7 @@ struct FileDiffView: View {
         case .create: return .green
         case .edit: return .blue
         case .insert: return .cyan
-        case .delete: return .red
+        case .delete, .deleteFile: return .red
         case .overwrite: return .orange
         }
     }

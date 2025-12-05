@@ -9,6 +9,7 @@ enum FileOperationType: String, Codable, Equatable {
     case insert = "Insert"
     case delete = "Delete"
     case overwrite = "Overwrite"
+    case deleteFile = "DeleteFile"
     
     var icon: String {
         switch self {
@@ -16,6 +17,7 @@ enum FileOperationType: String, Codable, Equatable {
         case .edit: return "pencil"
         case .insert: return "text.insert"
         case .delete: return "trash"
+        case .deleteFile: return "trash.fill"
         case .overwrite: return "arrow.triangle.2.circlepath"
         }
     }
@@ -26,6 +28,7 @@ enum FileOperationType: String, Codable, Equatable {
         case .edit: return "blue"
         case .insert: return "cyan"
         case .delete: return "red"
+        case .deleteFile: return "red"
         case .overwrite: return "orange"
         }
     }
@@ -36,6 +39,7 @@ enum FileOperationType: String, Codable, Equatable {
         case .edit: return "Edit file"
         case .insert: return "Insert lines"
         case .delete: return "Delete lines"
+        case .deleteFile: return "Delete file"
         case .overwrite: return "Overwrite file"
         }
     }
