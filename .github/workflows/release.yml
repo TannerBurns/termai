@@ -103,3 +103,20 @@ jobs:
         run: |
           security delete-keychain $RUNNER_TEMP/signing.keychain-db || true
 
+      - name: Cleanup old releases
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Keep the latest 5 releases, delete older ones
+          KEEP_COUNT=5
+          
+          # Get all releases sorted by date (newest first), skip the first N
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq ".[${KEEP_COUNT}:] | .[].tagName" | while read -r tag; do
+            if [ -n "$tag" ]; then
+              echo "Deleting old release: $tag"
+              gh release delete "$tag" --yes --cleanup-tag || true
+            fi
+          done
+

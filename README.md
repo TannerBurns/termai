@@ -9,30 +9,37 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 ## Features
 
 ### Core Experience
+- **Native macOS App** — Built with SwiftUI for a fast, responsive experience
 - **Side-by-Side Layout** — Terminal and chat panels with a resizable divider
 - **Multiple Tabs** — Each tab contains its own terminal and chat sessions
 - **Multiple Chat Sessions** — Create independent chat sessions per tab with their own settings
 - **Persistent State** — Messages, settings, and sessions are saved automatically
+- **Menu Bar Integration** — Quick access to TermAI with provider and model status display
 
 ### AI Providers
-- **Cloud Providers** — OpenAI and Anthropic with API key support
+- **Cloud Providers** — OpenAI, Anthropic, and Google AI Studio with API key support
 - **Local Providers** — Ollama, LM Studio, and vLLM with auto-detection
 - **Model Selection** — Curated model lists with favorites for quick access
 - **Reasoning Models** — Full support for OpenAI o-series and Anthropic extended thinking
-
-### Agent Mode
-When enabled, the AI can autonomously execute commands and use tools to complete complex tasks:
-- **Planning Phase** — Generates a step-by-step plan before execution
-- **Periodic Reflection** — Pauses to assess progress and adjust strategy
-- **Built-in Tools** — File operations, directory browsing, HTTP requests, process management
-- **Verification** — Tests and verifies work before declaring completion
-- **Safety Controls** — Optional command approval with auto-approve for read-only commands
+- **Flexible API Keys** — Use environment variables or configure in-app overrides
 
 ### Terminal
 - **SwiftTerm Powered** — Full terminal emulation with ANSI color support
 - **Multiple Themes** — System, Xterm, VGA Dark, Terminal.app, Pale
 - **Context Actions** — Select text or capture last output to send to chat
 - **Code Execution** — Run shell commands directly from chat code blocks
+- **Favorite Commands** — Quick-access toolbar with AI-generated emoji icons
+
+### Agent Mode
+When enabled, the AI can autonomously execute commands and use tools to complete complex tasks:
+- **Planning Phase** — Generates a step-by-step plan before execution
+- **Periodic Reflection** — Pauses to assess progress and adjust strategy
+- **Goal Tracking** — Visual task checklists to monitor progress
+- **Built-in Tools** — File operations, shell commands, HTTP requests, process management, memory
+- **File Diff Preview** — IDE-style side-by-side diff viewer before applying file changes
+- **Verification** — Tests and verifies work before declaring completion
+- **Safety Controls** — Optional command and file edit approval with auto-approve for read-only commands
+- **Stuck Detection** — Automatically detects loops and adjusts strategy
 
 ### Terminal Suggestion Agent
 An AI-powered command suggestion system that proactively offers relevant commands based on context:
@@ -57,8 +64,18 @@ An AI-powered command suggestion system that proactively offers relevant command
 
 ### Analytics
 - **Token Usage Tracking** — Monitor usage by provider, model, and time range
+- **Request Type Breakdown** — Track chat, tool calls, planning, reflection, suggestions, and more
 - **Context Window Indicator** — Visual display of context usage percentage
-- **Request Type Breakdown** — Track chat, tool calls, planning, and more
+- **30-Day Retention** — Usage data stored in daily files with automatic cleanup
+
+### Settings
+- **Chat & Model** — Per-session provider, model, temperature, and system prompt
+- **Providers** — Configure API keys and local provider URLs
+- **Agent** — Execution limits, planning, reflection, safety controls
+- **Favorites** — Manage model and command favorites
+- **Appearance** — App theme (light/dark/system) and terminal color schemes
+- **Usage** — Token usage dashboard with charts and breakdowns
+- **Data** — Storage location, clear history, factory reset
 
 ## Requirements
 
@@ -69,46 +86,25 @@ An AI-powered command suggestion system that proactively offers relevant command
 
 ### Download (Recommended)
 
-1. Download the latest `TermAI.zip` from the [Releases](../../releases) page
-2. Unzip the archive
-3. Move `TermAI.app` to your Applications folder
-
-**Important:** Since TermAI is not notarized with Apple, macOS Gatekeeper will block it on first launch. To allow it to run:
-
-**Option A — Right-click method:**
-1. Right-click (or Control-click) on `TermAI.app`
-2. Select "Open" from the context menu
-3. Click "Open" in the dialog that appears
-
-**Option B — Terminal method:**
-```bash
-xattr -cr /Applications/TermAI.app
-```
-
-**Option C — System Settings:**
-1. Try to open the app (it will be blocked)
-2. Go to **System Settings → Privacy & Security**
-3. Scroll down and click "Open Anyway" next to the TermAI message
-
-After allowing it once, the app will open normally in the future.
+1. Download the latest `TermAI.dmg` from the [Releases](../../releases) page
+2. Open the DMG and drag `TermAI.app` to your Applications folder
+3. Launch TermAI from Applications
 
 ### Build from Source
 
-## Getting Started
-
-### Build & Run (CLI)
+#### Build & Run (CLI)
 ```bash
 swift build
 swift run TermAI
 ```
 
-### Build & Run (Xcode)
+#### Build & Run (Xcode)
 1. Open `Package.swift` in Xcode
 2. Select the `TermAI` scheme
 3. Run (Cmd+R)
 
-### Packaging a .app Bundle
-Use the provided script to create a signed (or ad-hoc) application bundle:
+#### Packaging a .app Bundle
+Use the provided script to create a signed application bundle:
 ```bash
 ./build_package.sh
 ```
@@ -119,27 +115,28 @@ Optional environment variables for signing and notarization:
 
 ## Configuration
 
-### Cloud Providers (OpenAI, Anthropic)
+### Cloud Providers (OpenAI, Anthropic, Google)
 
 Set API keys via environment variables:
 ```bash
 export OPENAI_API_KEY="sk-..."
 export ANTHROPIC_API_KEY="sk-ant-..."
+export GOOGLE_API_KEY="..."
 ```
 
-Or configure them in **Settings > Chat & Model > API Keys** to override environment variables.
+Or configure them in **Settings > Providers** to override environment variables.
 
 Available cloud models include:
 - **OpenAI** — GPT-5 series, GPT-4.1/4o series, o-series reasoning models
-- **Anthropic** — Claude 4.x, Claude 3.7/3.5 series
+- **Anthropic** — Claude 4.x (Opus, Sonnet, Haiku), Claude 3.7/3.5 series
+- **Google** — Gemini 3 Pro, Gemini 2.5 Pro/Flash
 
 ### Local Providers (Ollama, LM Studio, vLLM)
 
 1. Start your local LLM server
-2. Open **Settings > Chat & Model**
-3. Select your provider (auto-configures the default URL)
+2. Open **Settings > Providers**
+3. Configure the URL (defaults are pre-filled)
 4. Click **Test Connection** to verify
-5. Click **Fetch Models** to load available models
 
 Default endpoints:
 | Provider   | Default URL                    |
@@ -192,15 +189,18 @@ Toggle agent mode with the brain icon in the chat header. When enabled:
 
 | Tool | Description |
 |------|-------------|
+| `shell` | Execute commands in the terminal (environment changes persist) |
 | `read_file` | Read file contents with optional line range |
 | `write_file` | Write or append content to files |
 | `edit_file` | Search and replace text in files |
 | `insert_lines` | Insert lines at a specific position |
 | `delete_lines` | Delete a range of lines |
+| `delete_file` | Delete a file (always requires approval) |
 | `list_dir` | List directory contents |
 | `search_files` | Find files by name pattern |
 | `search_output` | Search through previous command outputs |
 | `memory` | Save and recall notes during execution |
+| `plan_and_track` | Set goals and manage task checklists |
 | `run_background` | Start background processes (e.g., servers) |
 | `check_process` | Check if a process is running |
 | `stop_process` | Stop a background process |
@@ -210,20 +210,21 @@ Toggle agent mode with the brain icon in the chat header. When enabled:
 
 Configure agent behavior in **Settings > Agent**:
 
+- **Default Behavior** — Enable agent mode by default for new sessions
 - **Execution Limits** — Max steps, fix attempts, command timeout
 - **Planning & Reflection** — Enable/disable planning phase, reflection interval
 - **Context & Memory** — Output capture limits, context window size
-- **Safety** — Require command approval, auto-approve read-only commands
+- **Long Output Handling** — Automatic summarization of verbose outputs
+- **Safety** — Require command approval, auto-approve read-only, require file edit approval
 - **Verbose Logging** — Debug output for troubleshooting
 
 ### Suggestion Agent Settings
 
-Configure the terminal suggestion agent in **Settings > Suggestions**:
+Configure the terminal suggestion agent in **Settings > Chat & Model** (per-session) or via global settings:
 
 - **Provider & Model** — Choose a separate LLM for suggestions (can differ from chat)
 - **Enable/Disable** — Toggle suggestion agent on or off
-- **Research Steps** — Max agentic research steps (1-10) for gathering context
-- **Shell History** — Number of shell history entries to consider
+- **Shell History** — Include entries from your shell history file
 
 ## Keyboard Shortcuts
 
@@ -253,6 +254,7 @@ Contents:
 - Session settings (provider, model, system prompt, title)
 - Agent settings (global)
 - Token usage records (daily files, 30-day retention)
+- Favorite commands
 
 Logs are stored in:
 ```
@@ -261,8 +263,14 @@ Logs are stored in:
 
 ## Theming
 
-Configure the terminal appearance in **Settings > Terminal Theme**:
+### App Appearance
+Configure in **Settings > Appearance**:
+- **System** — Follows macOS light/dark mode
+- **Light** — Always use light mode
+- **Dark** — Always use dark mode
 
+### Terminal Theme
+Choose a color scheme for your terminal:
 - **System** — Follows macOS appearance
 - **Xterm** — Classic xterm colors
 - **VGA Dark** — VGA palette on black
@@ -275,7 +283,7 @@ Each theme includes a live preview and color palette display.
 
 | Issue | Solution |
 |-------|----------|
-| 401/403 errors | Verify API key and base URL in Settings |
+| 401/403 errors | Verify API key and base URL in Settings > Providers |
 | No models found (local) | Ensure the server is running; click Test Connection |
 | Streaming doesn't start | Check network access and provider compatibility |
 | Agent stuck in loop | Increase stuck detection threshold or reduce max iterations |

@@ -190,22 +190,38 @@ fi
 step 9 "Creating DMG installer…"
 DMG_PATH="$ROOT/${APP_NAME}.dmg"
 rm -f "$ROOT"/${APP_NAME}*.dmg
+
+# Prepare temp folder with app and Applications symlink
+DMG_TEMP="$ROOT/${APP_NAME}_temp"
+rm -rf "$DMG_TEMP"
+mkdir -p "$DMG_TEMP"
+cp -R "$APP_DIR" "$DMG_TEMP/"
+ln -s /Applications "$DMG_TEMP/Applications"
+
 if command -v create-dmg &>/dev/null; then
-  # create-dmg (sindresorhus version) takes just the app and optional destination
-  # It auto-generates a versioned DMG name, so we move/rename after
-  create-dmg --overwrite "$APP_DIR" "$ROOT" || true
-  # Find the generated DMG (may include version in filename)
-  GENERATED_DMG=$(find "$ROOT" -maxdepth 1 -name "${APP_NAME}*.dmg" -type f 2>/dev/null | head -1)
-  if [[ -n "$GENERATED_DMG" && -f "$GENERATED_DMG" ]]; then
-    if [[ "$GENERATED_DMG" != "$DMG_PATH" ]]; then
-      mv "$GENERATED_DMG" "$DMG_PATH"
-    fi
-    echo "Created: $DMG_PATH"
-  else
-    echo "Warning: DMG creation failed, but zip is available."
-  fi
+  # create-dmg (Homebrew) - creates a polished DMG with nice layout
+  create-dmg \
+    --volname "$APP_NAME" \
+    --window-pos 200 120 \
+    --window-size 600 400 \
+    --icon-size 100 \
+    --icon "$APP_NAME.app" 150 185 \
+    --hide-extension "$APP_NAME.app" \
+    --app-drop-link 450 185 \
+    "$DMG_PATH" \
+    "$DMG_TEMP" || true
 else
-  echo "Skipping DMG (install create-dmg via 'npm install -g create-dmg')."
+  # Fallback: use built-in hdiutil (simpler DMG, but works everywhere)
+  echo "create-dmg not found, using hdiutil fallback (brew install create-dmg for nicer DMGs)"
+  hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_TEMP" -ov -format UDZO "$DMG_PATH" || true
+fi
+
+rm -rf "$DMG_TEMP"
+
+if [[ -f "$DMG_PATH" ]]; then
+  echo "Created: $DMG_PATH"
+else
+  echo "Warning: DMG creation failed, but zip is available."
 fi
 
 echo
