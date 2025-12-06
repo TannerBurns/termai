@@ -3000,20 +3000,10 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         // Always require approval for RequiresApprovalTool (like delete_file)
         let alwaysRequiresApproval = (tool as? RequiresApprovalTool)?.alwaysRequiresApproval ?? false
         
-        // Get the preview of changes (needed for both approval and checkpoint recording)
+        // Get the preview of changes (needed for approval flow)
         var fileChange: FileChange?
         if let fileOpTool = tool as? FileOperationTool {
             fileChange = await fileOpTool.prepareChange(args: args, cwd: cwd)
-            
-            // Record file change to checkpoint for rollback capability
-            if let change = fileChange {
-                let wasCreated = change.operationType == .create
-                recordFileChange(
-                    path: change.filePath,
-                    contentBefore: change.beforeContent,
-                    wasCreated: wasCreated
-                )
-            }
         }
         
         // Handle approval flow if required
@@ -3064,6 +3054,17 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             ))
             messages = messages
             persistMessages()
+        }
+        
+        // Record file change to checkpoint for rollback capability
+        // This must happen after approval is confirmed but before execution
+        if let change = fileChange {
+            let wasCreated = change.operationType == .create
+            recordFileChange(
+                path: change.filePath,
+                contentBefore: change.beforeContent,
+                wasCreated: wasCreated
+            )
         }
         
         // Execute the tool
