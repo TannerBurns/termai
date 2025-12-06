@@ -610,6 +610,29 @@ struct SwiftTermView: NSViewRepresentable {
         env["LSCOLORS"] = "GxFxCxDxBxegedabagaced"  // macOS ls colors
         env["LS_COLORS"] = "di=1;36:ln=1;35:so=1;32:pi=1;33:ex=1:bd=34;46:cd=34;43:su=30;41:sg=30;46:tw=30;42:ow=34;43"  // GNU ls colors
         
+        // Register OSC 7 handler to reliably capture CWD after every command
+        // This supplements the delegate-based handling which can be spotty
+        term.getTerminal().registerOscHandler(code: 7) { [weak model] data in
+            // Parse file://hostname/path format
+            if let urlStr = String(bytes: data, encoding: .utf8) {
+                var path = urlStr
+                if path.hasPrefix("file://") {
+                    path = String(path.dropFirst(7))
+                    // Skip hostname if present (find first / after hostname)
+                    if !path.hasPrefix("/"), let idx = path.firstIndex(of: "/") {
+                        path = String(path[idx...])
+                    }
+                }
+                // URL-decode the path (handles %20 for spaces, etc.)
+                path = path.removingPercentEncoding ?? path
+                if !path.isEmpty {
+                    DispatchQueue.main.async {
+                        model?.currentWorkingDirectory = path
+                    }
+                }
+            }
+        }
+        
         // Register OSC 7777 handler to capture exit codes from our precmd hook
         // This intercepts the OSC before SwiftTerm's fallback handler logs "Unknown OSC code"
         // OSC 7777 is emitted by our precmd hook AFTER a command completes, so we use it
@@ -621,6 +644,14 @@ struct SwiftTermView: NSViewRepresentable {
                 DispatchQueue.main.async {
                     guard let model = model else { return }
                     model.lastExitCode = exitCode
+                    
+                    // Always post CWD update notification so session stays in sync
+                    // This fires after EVERY command (user or agent) since precmd always runs
+                    NotificationCenter.default.post(
+                        name: .TermAICWDUpdated,
+                        object: nil,
+                        userInfo: ["cwd": model.currentWorkingDirectory]
+                    )
                     
                     // If we're capturing agent output, signal completion
                     // OSC 7777 means precmd ran, which means the command finished

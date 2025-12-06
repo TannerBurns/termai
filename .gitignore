@@ -58,6 +58,7 @@ fastlane/test_output
 *.app
 TermAI.app/
 TermAI.zip
+TermAI.dmg
 
 # Editor/IDE settings
 .vscode/

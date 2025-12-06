@@ -55,11 +55,14 @@ struct ChatTabContentView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 16) {
-                            ForEach(session.messages) { msg in
+                            ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, msg in
                                 ChatMessageBubble(
                                     message: msg,
+                                    messageIndex: index,
                                     isStreaming: msg.id == session.streamingMessageId,
-                                    ptyModel: ptyModel
+                                    checkpoint: session.checkpoint(forMessageIndex: index),
+                                    ptyModel: ptyModel,
+                                    session: session
                                 )
                                 .id(msg.id)
                             }
@@ -146,6 +149,13 @@ struct ChatTabContentView: View {
             // Index files for @ mention autocomplete
             if !newCwd.isEmpty {
                 FilePickerService.shared.indexDirectory(newCwd)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .TermAICWDUpdated)) { note in
+            // Always sync CWD after every command (user or agent)
+            // This ensures the session has accurate directory context
+            if let cwd = note.userInfo?["cwd"] as? String, !cwd.isEmpty {
+                session.lastKnownCwd = cwd
             }
         }
         .onAppear {
@@ -993,11 +1003,17 @@ private struct TerminalContextCard: View {
 // MARK: - Message Bubble
 private struct ChatMessageBubble: View {
     let message: ChatMessage
+    let messageIndex: Int
     let isStreaming: Bool
+    let checkpoint: Checkpoint?
     let ptyModel: PTYModel
+    @ObservedObject var session: ChatSession
     
     @State private var isHovering = false
     @State private var showCopied = false
+    @State private var isEditing = false
+    @State private var editedText = ""
+    @State private var showRollbackChoice = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1016,6 +1032,13 @@ private struct ChatMessageBubble: View {
                     .font(.caption)
                     .fontWeight(.semibold)
                     .foregroundColor(.primary.opacity(0.7))
+
+                // Checkpoint indicator for user messages with changes
+                if message.role == "user", let cp = checkpoint, cp.hasChanges {
+                    CheckpointBadge(checkpoint: cp)
+                }
+
+                Spacer()
             }
             
             // Terminal context badge for user messages
@@ -1057,10 +1080,90 @@ private struct ChatMessageBubble: View {
                 }
             }
             
-            // Message content
+            // Message content - either editing mode or display mode
             if let evt = message.agentEvent {
                 AgentEventView(event: evt, ptyModel: ptyModel)
+            } else if isEditing {
+                // Inline editing mode with orange/amber tint (distinct edit indicator)
+                VStack(alignment: .leading, spacing: 8) {
+                    TextEditor(text: $editedText)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 60, maxHeight: 200)
+                        .padding(8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color.orange.opacity(0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.orange.opacity(0.2), lineWidth: 0.5)
+                        )
+                    
+                    HStack(spacing: 10) {
+                        // Cancel button - red X
+                        Button {
+                            cancelEditing()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                                .frame(width: 26, height: 26)
+                                .background(
+                                    Circle()
+                                        .fill(Color.red.opacity(0.9))
+                                )
+                                .foregroundColor(.white)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Cancel editing")
+                        
+                        Spacer()
+                        
+                        if let cp = checkpoint, cp.hasChanges {
+                            Text("\(cp.modifiedFileCount) file(s) changed")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                        
+                        // Send button - blue arrow (matching main input)
+                        Button {
+                            submitEdit()
+                        } label: {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 12, weight: .bold))
+                                .frame(width: 26, height: 26)
+                                .background(
+                                    Circle()
+                                        .fill(
+                                            editedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                                ? Color.secondary.opacity(0.3)
+                                                : Color.accentColor
+                                        )
+                                )
+                                .foregroundColor(.white)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(editedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .help("Send edited message")
+                    }
+                }
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.orange.opacity(0.12), Color.orange.opacity(0.06)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                )
             } else {
+                // Normal display mode
                 MessageContentWithMentions(
                     content: message.content,
                     attachedContexts: message.attachedContexts,
@@ -1102,6 +1205,31 @@ private struct ChatMessageBubble: View {
                                 .padding(8)
                         }
                     }
+                    .overlay(alignment: .bottomTrailing) {
+                        // Edit button for user messages (inside bubble, bottom-right)
+                        if message.role == "user" && isHovering && !isStreaming && !session.isAgentRunning {
+                            Button {
+                                startEditing()
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                    .padding(6)
+                                    .background(
+                                        Circle()
+                                            .fill(.ultraThinMaterial)
+                                    )
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.primary.opacity(0.1), lineWidth: 0.5)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Edit this message")
+                            .padding(8)
+                            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                        }
+                    }
                     .overlay(alignment: .topTrailing) {
                         if message.role != "user" && (isHovering || showCopied) && !isStreaming {
                             Button(action: copyRawContent) {
@@ -1131,12 +1259,80 @@ private struct ChatMessageBubble: View {
                             .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         }
                     }
-                    .onHover { hovering in
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            isHovering = hovering
-                        }
-                    }
             }
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
+        .contextMenu {
+            // Standard copy option
+            if !message.content.isEmpty {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(message.content, forType: .string)
+                } label: {
+                    Label("Copy Message", systemImage: "doc.on.doc")
+                }
+            }
+            
+            // Edit option for user messages
+            if message.role == "user" && !session.isAgentRunning {
+                Button {
+                    startEditing()
+                } label: {
+                    Label("Edit Message", systemImage: "pencil")
+                }
+            }
+        }
+        .popover(isPresented: $showRollbackChoice) {
+            if let cp = checkpoint {
+                RollbackChoicePopover(
+                    checkpoint: cp,
+                    session: session,
+                    editedMessage: editedText,
+                    isPresented: $showRollbackChoice,
+                    onComplete: {
+                        isEditing = false
+                    }
+                )
+            }
+        }
+    }
+    
+    private func startEditing() {
+        editedText = message.content
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isEditing = true
+        }
+    }
+    
+    private func cancelEditing() {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isEditing = false
+            editedText = ""
+        }
+    }
+    
+    private func submitEdit() {
+        let trimmedMessage = editedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMessage.isEmpty else { return }
+        
+        // Check if there's a checkpoint with changes
+        if let cp = checkpoint, cp.hasChanges {
+            // Show rollback choice popover
+            showRollbackChoice = true
+        } else {
+            // No checkpoint or no changes - just branch and send
+            session.branchFromCheckpoint(
+                Checkpoint(messageIndex: messageIndex, messagePreview: ""),
+                newPrompt: ""
+            )
+            Task {
+                await session.sendUserMessage(trimmedMessage)
+            }
+            isEditing = false
         }
     }
     
@@ -2317,6 +2513,193 @@ private struct FlowLayout: Layout {
         var positions: [CGPoint]
         var sizes: [CGSize]
         var size: CGSize
+    }
+}
+
+// MARK: - Checkpoint Badge
+
+/// Small badge indicating a checkpoint with changes exists at this message
+private struct CheckpointBadge: View {
+    let checkpoint: Checkpoint
+    
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.counterclockwise.circle.fill")
+                .font(.system(size: 10))
+            
+            Text(checkpoint.shortDescription)
+                .font(.caption2)
+        }
+        .foregroundColor(.orange)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(
+            Capsule()
+                .fill(Color.orange.opacity(0.12))
+        )
+        .help("Checkpoint: \(checkpoint.shortDescription). Right-click to edit this message.")
+    }
+}
+
+// MARK: - Rollback Choice Popover
+
+/// Simple popover that appears when editing a message with a checkpoint
+/// Asks user if they want to rollback files or keep current state
+private struct RollbackChoicePopover: View {
+    let checkpoint: Checkpoint
+    @ObservedObject var session: ChatSession
+    let editedMessage: String
+    @Binding var isPresented: Bool
+    let onComplete: () -> Void
+    
+    @State private var isSubmitting = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.counterclockwise.circle.fill")
+                    .font(.title2)
+                    .foregroundColor(.orange)
+                
+                Text("File Changes Detected")
+                    .font(.headline)
+            }
+            
+            Text("\(checkpoint.modifiedFileCount) file(s) were modified after this message.")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            
+            if !checkpoint.shellCommandsRun.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                    Text("\(checkpoint.shellCommandsRun.count) shell command(s) cannot be undone")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+            }
+            
+            Divider()
+            
+            // Options
+            VStack(spacing: 8) {
+                Button {
+                    submitWithRollback()
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.counterclockwise")
+                        Text("Rollback files")
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.orange.opacity(0.1))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting)
+                
+                Button {
+                    submitKeepFiles()
+                } label: {
+                    HStack {
+                        Image(systemName: "checkmark.circle")
+                        Text("Keep current files")
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.blue.opacity(0.1))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(isSubmitting)
+            }
+            
+            // Cancel
+            Button("Cancel") {
+                isPresented = false
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .foregroundColor(.secondary)
+            .padding(.top, 4)
+        }
+        .padding()
+        .frame(width: 280)
+    }
+    
+    private func submitWithRollback() {
+        isSubmitting = true
+        let trimmed = editedMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Rollback files and remove the original user message (we're replacing it)
+        _ = session.rollbackToCheckpoint(checkpoint, removeUserMessage: true)
+
+        // Send the edited message
+        Task {
+            await session.sendUserMessage(trimmed)
+            await MainActor.run {
+                isPresented = false
+                onComplete()
+            }
+        }
+    }
+    
+    private func submitKeepFiles() {
+        isSubmitting = true
+        let trimmed = editedMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Branch without rollback
+        session.branchFromCheckpoint(checkpoint, newPrompt: "")
+        
+        // Send the edited message
+        Task {
+            await session.sendUserMessage(trimmed)
+            await MainActor.run {
+                isPresented = false
+                onComplete()
+            }
+        }
+    }
+}
+
+/// Row showing a file snapshot in the rollback preview
+private struct FileSnapshotRow: View {
+    let snapshot: FileSnapshot
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: snapshot.wasCreated ? "trash" : "arrow.counterclockwise")
+                .foregroundColor(snapshot.wasCreated ? .red : .blue)
+                .frame(width: 16)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(snapshot.fileName)
+                    .font(.system(.caption, design: .monospaced))
+                    .fontWeight(.medium)
+                
+                Text(snapshot.wasCreated ? "Will be deleted" : "Will be restored")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            if let content = snapshot.contentBefore {
+                Text("\(content.count) chars")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
