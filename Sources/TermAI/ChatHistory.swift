@@ -120,9 +120,11 @@ final class ChatHistoryManager: ObservableObject {
         
         let messagesFile = dir.appendingPathComponent("chat-session-\(sessionId.uuidString).json")
         let settingsFile = dir.appendingPathComponent("session-settings-\(sessionId.uuidString).json")
+        let checkpointsFile = dir.appendingPathComponent("chat-checkpoints-\(sessionId.uuidString).json")
         
         try? FileManager.default.removeItem(at: messagesFile)
         try? FileManager.default.removeItem(at: settingsFile)
+        try? FileManager.default.removeItem(at: checkpointsFile)
     }
 }
 

@@ -189,20 +189,28 @@ fi
 
 step 9 "Creating DMG installer…"
 DMG_PATH="$ROOT/${APP_NAME}.dmg"
-rm -f "$DMG_PATH"
-create-dmg \
-  --volname "$APP_NAME" \
-  --window-pos 200 120 \
-  --window-size 600 400 \
-  --icon-size 100 \
-  --icon "$APP_NAME.app" 150 185 \
-  --app-drop-link 450 185 \
-  "$DMG_PATH" \
-  "$APP_DIR"
-echo "Created: $DMG_PATH"
+rm -f "$ROOT"/${APP_NAME}*.dmg
+if command -v create-dmg &>/dev/null; then
+  # create-dmg (sindresorhus version) takes just the app and optional destination
+  # It auto-generates a versioned DMG name, so we move/rename after
+  create-dmg --overwrite "$APP_DIR" "$ROOT" || true
+  # Find the generated DMG (may include version in filename)
+  GENERATED_DMG=$(find "$ROOT" -maxdepth 1 -name "${APP_NAME}*.dmg" -type f 2>/dev/null | head -1)
+  if [[ -n "$GENERATED_DMG" && -f "$GENERATED_DMG" ]]; then
+    if [[ "$GENERATED_DMG" != "$DMG_PATH" ]]; then
+      mv "$GENERATED_DMG" "$DMG_PATH"
+    fi
+    echo "Created: $DMG_PATH"
+  else
+    echo "Warning: DMG creation failed, but zip is available."
+  fi
+else
+  echo "Skipping DMG (install create-dmg via 'npm install -g create-dmg')."
+fi
 
+echo
 echo "Done. App: $APP_DIR"
 echo "Zip:  $ZIP_PATH"
-echo "DMG:  $DMG_PATH"
+[[ -f "$DMG_PATH" ]] && echo "DMG:  $DMG_PATH" || true
 
 

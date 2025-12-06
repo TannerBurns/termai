@@ -3,6 +3,7 @@ import Foundation
 extension Notification.Name {
     static let TermAIExecuteCommand = Notification.Name("TermAIExecuteCommand")
     static let TermAICommandFinished = Notification.Name("TermAICommandFinished")
+    static let TermAICWDUpdated = Notification.Name("TermAICWDUpdated")
     
     // Command approval flow
     static let TermAICommandPendingApproval = Notification.Name("TermAICommandPendingApproval")
