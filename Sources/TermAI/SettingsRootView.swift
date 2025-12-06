@@ -148,6 +148,9 @@ struct AppearanceSettingsView: View {
                 // Terminal Theme Selection Grid
                 themeSelectionSection
                 
+                // Terminal Bell Settings
+                terminalBellSection
+                
                 // Live Preview
                 livePreviewSection
                 
@@ -158,6 +161,7 @@ struct AppearanceSettingsView: View {
         }
         .frame(minWidth: 500)
         .onChange(of: settings.appAppearance) { _ in settings.save() }
+        .onChange(of: settings.terminalBellMode) { _ in settings.save() }
     }
     
     // MARK: - App Appearance Section
@@ -177,6 +181,31 @@ struct AppearanceSettingsView: View {
                     }
                 }
             }
+        }
+    }
+    
+    // MARK: - Terminal Bell Section
+    private var terminalBellSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SettingsSectionHeader("Terminal Bell", subtitle: "Notification when programs signal an alert")
+            
+            HStack(spacing: 16) {
+                ForEach(TerminalBellMode.allCases, id: \.self) { mode in
+                    TerminalBellModeCard(
+                        mode: mode,
+                        isSelected: settings.terminalBellMode == mode
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            settings.terminalBellMode = mode
+                        }
+                    }
+                }
+            }
+            
+            Text("The terminal bell triggers when programs need your attention, such as when pressing backspace with nothing to delete, or tab completion with no matches.")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .padding(.top, 4)
         }
     }
     
@@ -731,6 +760,97 @@ struct AppearanceModeCard: View {
     }
 }
 
+// MARK: - Terminal Bell Mode Card
+struct TerminalBellModeCard: View {
+    let mode: TerminalBellMode
+    let isSelected: Bool
+    let action: () -> Void
+    
+    @State private var isHovered: Bool = false
+    
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 0) {
+                // Bell Icon Preview
+                bellPreview
+                    .frame(height: 60)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .padding(8)
+                
+                // Mode Name and Icon
+                HStack(spacing: 6) {
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 12))
+                        .foregroundColor(isSelected ? .accentColor : .secondary)
+                    
+                    Text(mode.rawValue)
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                        .foregroundColor(.primary)
+                    
+                    Spacer()
+                    
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 14))
+                            .foregroundColor(.accentColor)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.03))
+            }
+            .frame(maxWidth: .infinity)
+            .background(Color.primary.opacity(0.02))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? Color.accentColor : Color.primary.opacity(0.1), lineWidth: isSelected ? 2 : 1)
+            )
+            .scaleEffect(isHovered ? 1.02 : 1.0)
+            .shadow(color: isSelected ? Color.accentColor.opacity(0.2) : Color.clear, radius: isHovered ? 8 : 0)
+            .animation(.easeInOut(duration: 0.15), value: isHovered)
+            .animation(.easeInOut(duration: 0.15), value: isSelected)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
+    
+    @ViewBuilder
+    private var bellPreview: some View {
+        VStack(spacing: 4) {
+            // Large icon
+            Image(systemName: mode.icon)
+                .font(.system(size: 24, weight: .medium))
+                .foregroundColor(iconColor)
+            
+            // Description
+            Text(mode.description)
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(backgroundColor)
+    }
+    
+    private var iconColor: Color {
+        switch mode {
+        case .sound: return .orange
+        case .visual: return .yellow
+        case .off: return .secondary
+        }
+    }
+    
+    private var backgroundColor: Color {
+        switch mode {
+        case .sound: return Color.orange.opacity(0.1)
+        case .visual: return Color.yellow.opacity(0.1)
+        case .off: return Color.primary.opacity(0.03)
+        }
+    }
+}
+
 // MARK: - Providers Settings View
 struct ProvidersSettingsView: View {
     @ObservedObject private var apiKeyManager = CloudAPIKeyManager.shared
@@ -1102,6 +1222,8 @@ struct AgentSettingsView: View {
     @ObservedObject private var settings = AgentSettings.shared
     @Environment(\.colorScheme) var colorScheme
     @State private var showResetConfirmation = false
+    @State private var newBlockedPattern: String = ""
+    @State private var isBlockedCommandsExpanded: Bool = false
     
     var body: some View {
         ScrollView {
@@ -1136,10 +1258,20 @@ struct AgentSettingsView: View {
             .padding(24)
         }
         .frame(minWidth: 500)
-        .onChange(of: settings.agentModeEnabledByDefault) { _ in settings.save() }
+        .onChange(of: settings.defaultAgentMode) { _ in settings.save() }
+        .onChange(of: settings.defaultAgentProfile) { _ in settings.save() }
         .onChange(of: settings.maxIterations) { _ in settings.save() }
+        .onChange(of: settings.maxToolCallsPerStep) { _ in settings.save() }
         .onChange(of: settings.maxFixAttempts) { _ in settings.save() }
         .onChange(of: settings.commandTimeout) { _ in settings.save() }
+        // Dynamic context settings
+        .onChange(of: settings.outputCapturePercent) { _ in settings.save() }
+        .onChange(of: settings.agentMemoryPercent) { _ in settings.save() }
+        .onChange(of: settings.maxOutputCaptureCap) { _ in settings.save() }
+        .onChange(of: settings.maxAgentMemoryCap) { _ in settings.save() }
+        .onChange(of: settings.minOutputCapture) { _ in settings.save() }
+        .onChange(of: settings.minContextSize) { _ in settings.save() }
+        // Legacy (kept for compatibility)
         .onChange(of: settings.maxOutputCapture) { _ in settings.save() }
         .onChange(of: settings.maxContextSize) { _ in settings.save() }
         .onChange(of: settings.outputSummarizationThreshold) { _ in settings.save() }
@@ -1152,6 +1284,14 @@ struct AgentSettingsView: View {
         .onChange(of: settings.requireCommandApproval) { _ in settings.save() }
         .onChange(of: settings.autoApproveReadOnly) { _ in settings.save() }
         .onChange(of: settings.requireFileEditApproval) { _ in settings.save() }
+        .onChange(of: settings.enableApprovalNotifications) { newValue in
+            settings.save()
+            // Request notification permissions when enabling
+            if newValue {
+                SystemNotificationService.shared.requestAuthorization()
+            }
+        }
+        .onChange(of: settings.enableApprovalNotificationSound) { _ in settings.save() }
         .onChange(of: settings.verboseLogging) { _ in settings.save() }
         .onChange(of: settings.testRunnerEnabled) { _ in settings.save() }
         .alert("Reset Agent Settings", isPresented: $showResetConfirmation) {
@@ -1170,22 +1310,99 @@ struct AgentSettingsView: View {
             SettingsSectionHeader("Default Behavior", subtitle: "Control how new chat sessions behave")
             
             VStack(spacing: 16) {
-                // Agent Mode Enabled by Default
+                // Default Agent Mode
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Enable Agent Mode by Default")
+                        Text("Default Agent Mode")
                             .font(.system(size: 13, weight: .medium))
-                        Text("New chat sessions will start with agent mode enabled.")
+                        Text("The agent mode that new chat sessions will start with.")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                     }
                     
                     Spacer()
                     
-                    Toggle("", isOn: $settings.agentModeEnabledByDefault)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
+                    Picker("", selection: $settings.defaultAgentMode) {
+                        ForEach(AgentMode.allCases, id: \.self) { mode in
+                            HStack(spacing: 6) {
+                                Image(systemName: mode.icon)
+                                    .foregroundColor(mode.color)
+                                Text(mode.rawValue)
+                            }
+                            .tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 140)
                 }
+                
+                // Mode descriptions
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(AgentMode.allCases, id: \.self) { mode in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: mode.icon)
+                                .font(.system(size: 11))
+                                .foregroundColor(mode.color)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(mode.rawValue)
+                                    .font(.system(size: 11, weight: .medium))
+                                Text(mode.detailedDescription)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 8)
+                
+                Divider()
+                
+                // Default Agent Profile
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Default Agent Profile")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("The task profile that new chat sessions will start with.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Picker("", selection: $settings.defaultAgentProfile) {
+                        ForEach(AgentProfile.allCases, id: \.self) { profile in
+                            HStack(spacing: 6) {
+                                Image(systemName: profile.icon)
+                                    .foregroundColor(profile.color)
+                                Text(profile.rawValue)
+                            }
+                            .tag(profile)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 180)
+                }
+                
+                // Profile descriptions
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(AgentProfile.allCases, id: \.self) { profile in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: profile.icon)
+                                .font(.system(size: 11))
+                                .foregroundColor(profile.color)
+                                .frame(width: 16)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(profile.rawValue)
+                                    .font(.system(size: 11, weight: .medium))
+                                Text(profile.detailedDescription)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 8)
             }
             .settingsCard()
         }
@@ -1235,6 +1452,44 @@ struct AgentSettingsView: View {
                 
                 Divider()
                 
+                // Max Tool Calls Per Step
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Tool Calls Per Step")
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        TextField("", value: Binding(
+                            get: { settings.maxToolCallsPerStep },
+                            set: { settings.maxToolCallsPerStep = max(10, min(500, $0)) }
+                        ), format: .number)
+                        .textFieldStyle(.plain)
+                            .font(.system(size: 13, design: .monospaced))
+                        .frame(width: 60)
+                        .multilineTextAlignment(.trailing)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.primary.opacity(0.05))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                        )
+                    }
+                    
+                    Slider(value: Binding(
+                        get: { Double(settings.maxToolCallsPerStep) },
+                        set: { settings.maxToolCallsPerStep = Int($0) }
+                    ), in: 10...500, step: 10)
+                    
+                    Text("Maximum tool calls within a single step. Increase for complex multi-tool operations.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                
+                Divider()
+                
                 // Max Fix Attempts
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -1264,14 +1519,14 @@ struct AgentSettingsView: View {
                         Text("Command Timeout")
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
-                        Text("\(Int(settings.commandTimeout))s")
+                        Text(formatTimeout(settings.commandTimeout))
                             .font(.system(size: 13, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
                     
-                    Slider(value: $settings.commandTimeout, in: 5...120, step: 5)
+                    Slider(value: $settings.commandTimeout, in: 30...3600, step: 30)
                     
-                    Text("How long to wait for command output before timing out.")
+                    Text("Default wait time for command output. Agent can override per-command for long tasks. Recommended: 5-10 minutes.")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
@@ -1376,55 +1631,186 @@ struct AgentSettingsView: View {
     // MARK: - Context & Memory Section
     private var contextMemorySection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SettingsSectionHeader("Context & Memory", subtitle: "Control how much context the agent retains")
+            SettingsSectionHeader("Context Budget", subtitle: "Dynamic allocation based on model's context window")
             
             VStack(spacing: 16) {
-                // Max Output Capture
+                // Info about dynamic scaling
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle.fill")
+                        .foregroundColor(.blue)
+                    Text("Context limits scale automatically with your model's capabilities. A 128K model gets much more context than a 4K model.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .padding(10)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(8)
+                
+                Divider()
+                
+                // Per-Output Capture Percent
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Output Capture Limit")
+                        Text("Per-Output Capture")
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
-                        Text("\(settings.maxOutputCapture) chars")
+                        Text("\(Int(settings.outputCapturePercent * 100))% of context")
                             .font(.system(size: 13, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
                     
-                    Slider(value: Binding(
-                        get: { Double(settings.maxOutputCapture) },
-                        set: { settings.maxOutputCapture = Int($0) }
-                    ), in: 500...10000, step: 500)
+                    Slider(value: $settings.outputCapturePercent, in: 0.05...0.30, step: 0.01)
                     
-                    Text("Maximum characters to capture from each command's output.")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                    HStack {
+                        Text("How much of the model's context each file read or command output can use.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("Min: \(formatChars(settings.minOutputCapture))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.6))
+                    }
                 }
                 
                 Divider()
                 
-                // Max Context Size
+                // Agent Memory Percent
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Context Window Size")
+                        Text("Agent Working Memory")
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
-                        Text("\(settings.maxContextSize) chars")
+                        Text("\(Int(settings.agentMemoryPercent * 100))% of context")
                             .font(.system(size: 13, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
                     
-                    Slider(value: Binding(
-                        get: { Double(settings.maxContextSize) },
-                        set: { settings.maxContextSize = Int($0) }
-                    ), in: 2000...32000, step: 1000)
+                    Slider(value: $settings.agentMemoryPercent, in: 0.20...0.60, step: 0.05)
                     
-                    Text("Maximum size of the agent's working memory across iterations.")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                    HStack {
+                        Text("Total context budget for the agent's accumulated memory during long tasks.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("Min: \(formatChars(settings.minContextSize))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.6))
+                    }
                 }
+                
+                Divider()
+                
+                // Example allocation display
+                contextBudgetExample
+            }
+            .settingsCard()
+            
+            // Advanced limits (collapsed by default)
+            DisclosureGroup("Advanced Limits") {
+                VStack(spacing: 12) {
+                    // Hard caps
+                    HStack {
+                        Text("Output Capture Cap")
+                            .font(.system(size: 12))
+                        Spacer()
+                        Text("\(formatChars(settings.maxOutputCaptureCap))")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Slider(value: Binding(
+                        get: { Double(settings.maxOutputCaptureCap) },
+                        set: { settings.maxOutputCaptureCap = Int($0) }
+                    ), in: 20000...100000, step: 5000)
+                    
+                    Divider()
+                    
+                    HStack {
+                        Text("Agent Memory Cap")
+                            .font(.system(size: 12))
+                        Spacer()
+                        Text("\(formatChars(settings.maxAgentMemoryCap))")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Slider(value: Binding(
+                        get: { Double(settings.maxAgentMemoryCap) },
+                        set: { settings.maxAgentMemoryCap = Int($0) }
+                    ), in: 50000...200000, step: 10000)
+                    
+                    Text("Hard limits prevent excessive memory use even with very large context models.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.6))
+                }
+                .padding(.top, 8)
             }
             .settingsCard()
         }
+    }
+    
+    // MARK: - Context Budget Example
+    private var contextBudgetExample: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Example Allocations")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.secondary)
+            
+            HStack(spacing: 16) {
+                contextExampleColumn(modelName: "32K Model", tokens: 32_000)
+                Divider().frame(height: 50)
+                contextExampleColumn(modelName: "128K Model", tokens: 128_000)
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.05))
+            .cornerRadius(6)
+        }
+    }
+    
+    private func contextExampleColumn(modelName: String, tokens: Int) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(modelName)
+                .font(.system(size: 11, weight: .semibold))
+            
+            let outputLimit = settings.effectiveOutputCaptureLimit(forContextTokens: tokens)
+            let memoryLimit = settings.effectiveAgentMemoryLimit(forContextTokens: tokens)
+            
+            Text("Per-output: \(formatChars(outputLimit))")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary)
+            
+            Text("Memory: \(formatChars(memoryLimit))")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    
+    private func formatChars(_ chars: Int) -> String {
+        if chars >= 1000 {
+            return "\(chars / 1000)K"
+        }
+        return "\(chars)"
+    }
+    
+    private func formatTimeout(_ seconds: TimeInterval) -> String {
+        let secs = Int(seconds)
+        if secs >= 3600 {
+            let hours = secs / 3600
+            let mins = (secs % 3600) / 60
+            if mins > 0 {
+                return "\(hours)h \(mins)m"
+            }
+            return "\(hours)h"
+        } else if secs >= 60 {
+            let mins = secs / 60
+            let remainingSecs = secs % 60
+            if remainingSecs > 0 {
+                return "\(mins)m \(remainingSecs)s"
+            }
+            return "\(mins)m"
+        }
+        return "\(secs)s"
     }
     
     // MARK: - Output Handling Section
@@ -1565,10 +1951,259 @@ struct AgentSettingsView: View {
                         .toggleStyle(.switch)
                         .labelsHidden()
                 }
+                
+                Divider()
+                
+                // System Notifications
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("System Notifications")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Show macOS notifications when approvals are needed while you're away.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: $settings.enableApprovalNotifications)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+                
+                if settings.enableApprovalNotifications {
+                    // Notification Sound
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "speaker.wave.2.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                Text("Notification Sound")
+                                    .font(.system(size: 13, weight: .medium))
+                            }
+                            Text("Play a sound when approval notifications appear.")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Toggle("", isOn: $settings.enableApprovalNotificationSound)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                    .padding(.leading, 16)
+                }
             }
             .settingsCard()
             .animation(.easeInOut(duration: 0.2), value: settings.requireCommandApproval)
+            .animation(.easeInOut(duration: 0.2), value: settings.enableApprovalNotifications)
+            
+            // Command Blocklist Section
+            commandBlocklistSection
         }
+    }
+    
+    // MARK: - Command Blocklist Section
+    private var commandBlocklistSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SettingsSectionHeader("Blocked Commands", subtitle: "Commands that always require approval, regardless of other settings")
+            
+            VStack(spacing: 16) {
+                // Info callout
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "shield.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.orange)
+                    
+                    Text("These command patterns will always require your approval before execution. This helps prevent accidental data loss or system changes.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.primary.opacity(0.8))
+                        .fixedSize(horizontal: false, vertical: true)
+                    
+                    Spacer()
+                }
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.orange.opacity(0.1))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                )
+                
+                // Add new pattern
+                HStack(spacing: 8) {
+                    TextField("Add command pattern (e.g., npm publish)", text: $newBlockedPattern)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.primary.opacity(0.05))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                        )
+                        .onSubmit {
+                            addNewBlockedPattern()
+                        }
+                    
+                    Button(action: addNewBlockedPattern) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(newBlockedPattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                
+                Divider()
+                
+                // Collapsible blocked patterns list
+                VStack(spacing: 0) {
+                    // Header button to expand/collapse
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isBlockedCommandsExpanded.toggle()
+                        }
+                    }) {
+                        HStack(spacing: 10) {
+                            Image(systemName: isBlockedCommandsExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .frame(width: 12)
+                            
+                            Text("Blocked Patterns")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.primary)
+                            
+                            // Count badge
+                            Text("\(settings.blockedCommandPatterns.count)")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.orange)
+                                )
+                            
+                            Spacer()
+                            
+                            Text(isBlockedCommandsExpanded ? "Hide" : "Show")
+                                .font(.system(size: 11))
+                                .foregroundColor(.accentColor)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.primary.opacity(0.03))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    // Expandable list
+                    if isBlockedCommandsExpanded {
+                        if settings.blockedCommandPatterns.isEmpty {
+                            HStack {
+                                Spacer()
+                                VStack(spacing: 8) {
+                                    Image(systemName: "checkmark.shield")
+                                        .font(.system(size: 24))
+                                        .foregroundColor(.secondary.opacity(0.5))
+                                    Text("No blocked commands")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.vertical, 20)
+                                Spacer()
+                            }
+                        } else {
+                            VStack(spacing: 0) {
+                                ForEach(Array(settings.blockedCommandPatterns.enumerated()), id: \.offset) { index, pattern in
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "xmark.octagon.fill")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.red.opacity(0.7))
+                                        
+                                        Text(pattern)
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .foregroundColor(.primary)
+                                        
+                                        Spacer()
+                                        
+                                        Button(action: {
+                                            settings.removeBlockedPattern(pattern)
+                                        }) {
+                                            Image(systemName: "trash")
+                                                .font(.system(size: 11))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("Remove this pattern")
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        index % 2 == 0 
+                                            ? Color.clear 
+                                            : Color.primary.opacity(0.02)
+                                    )
+                                    
+                                    if index < settings.blockedCommandPatterns.count - 1 {
+                                        Divider()
+                                            .padding(.leading, 36)
+                                    }
+                                }
+                            }
+                            .padding(.top, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(Color.primary.opacity(0.02))
+                            )
+                        }
+                        
+                        // Reset to defaults button (inside expanded area)
+                        HStack {
+                            Spacer()
+                            
+                            Button(action: {
+                                settings.resetBlockedPatternsToDefaults()
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "arrow.counterclockwise")
+                                        .font(.system(size: 11))
+                                    Text("Reset to Defaults")
+                                        .font(.system(size: 12, weight: .medium))
+                                }
+                                .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Restore the default blocked command patterns")
+                        }
+                        .padding(.top, 12)
+                    }
+                }
+            }
+            .settingsCard()
+            .animation(.easeInOut(duration: 0.2), value: isBlockedCommandsExpanded)
+        }
+    }
+    
+    private func addNewBlockedPattern() {
+        let trimmed = newBlockedPattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        settings.addBlockedPattern(trimmed)
+        newBlockedPattern = ""
     }
     
     // MARK: - Test Runner Section

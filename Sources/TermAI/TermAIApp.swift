@@ -174,6 +174,11 @@ struct TermAIApp: App {
                     // Initialize agent logging if enabled
                     AgentDebugConfig.initializeLogging()
                     
+                    // Request notification permissions if approval notifications are enabled
+                    if AgentSettings.shared.enableApprovalNotifications {
+                        SystemNotificationService.shared.requestAuthorization()
+                    }
+                    
                     // Connect TabsStore to AppDelegate for cleanup
                     appDelegate.tabsStore = tabsStore
                     

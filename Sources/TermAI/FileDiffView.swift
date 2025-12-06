@@ -7,9 +7,15 @@ struct FileDiffView: View {
     let fileChange: FileChange
     let diff: FileDiff
     
+    /// Whether this view is in approval mode (showing accept/reject buttons per hunk)
+    var isApprovalMode: Bool = false
+    
+    /// Binding for tracking hunk decisions (only used in approval mode)
+    @Binding var hunkDecisions: [UUID: HunkDecision]
+    
     @Environment(\.colorScheme) var colorScheme
     @State private var scrollOffset: CGFloat = 0
-    @State private var viewMode: DiffViewMode = .sideBySide
+    @State private var viewMode: DiffViewMode = .unified
     
     enum DiffViewMode: String, CaseIterable {
         case sideBySide = "Side by Side"
@@ -20,6 +26,22 @@ struct FileDiffView: View {
         colorScheme == .dark ? .dark : .light
     }
     
+    /// Convenience initializer for non-approval mode (read-only diff viewing)
+    init(fileChange: FileChange, diff: FileDiff) {
+        self.fileChange = fileChange
+        self.diff = diff
+        self.isApprovalMode = false
+        self._hunkDecisions = .constant([:])
+    }
+    
+    /// Full initializer for approval mode with hunk decision tracking
+    init(fileChange: FileChange, diff: FileDiff, isApprovalMode: Bool, hunkDecisions: Binding<[UUID: HunkDecision]>) {
+        self.fileChange = fileChange
+        self.diff = diff
+        self.isApprovalMode = isApprovalMode
+        self._hunkDecisions = hunkDecisions
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             // File header
@@ -27,13 +49,15 @@ struct FileDiffView: View {
             
             Divider()
             
-            // View mode selector
+            // View mode selector (and bulk actions in approval mode)
             viewModeSelector
             
             Divider()
             
-            // Diff content
-            if viewMode == .sideBySide {
+            // Diff content - show hunk-based view in approval mode
+            if isApprovalMode {
+                hunkBasedView
+            } else if viewMode == .sideBySide {
                 sideBySideView
             } else {
                 unifiedView
@@ -54,18 +78,11 @@ struct FileDiffView: View {
             // Operation badge
             operationBadge
             
-            // File path
-            VStack(alignment: .leading, spacing: 2) {
-                Text(fileChange.fileName)
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                    .foregroundColor(theme.foreground)
-                
-                Text(fileChange.filePath)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(theme.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
+            // Filename only (full path shown in parent sheet header)
+            Text(fileChange.fileName)
+                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                .foregroundColor(theme.foreground)
+                .lineLimit(1)
             
             Spacer()
             
@@ -95,11 +112,11 @@ struct FileDiffView: View {
             .padding(.vertical, 6)
             .background(
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(theme.headerBackground)
+                    .fill(theme.background)
             )
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
         .background(theme.headerBackground)
     }
     
@@ -132,33 +149,89 @@ struct FileDiffView: View {
     // MARK: - View Mode Selector
     
     private var viewModeSelector: some View {
-        HStack {
-            Picker("View Mode", selection: $viewMode) {
-                ForEach(DiffViewMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
+        HStack(spacing: 12) {
+            if !isApprovalMode {
+                Picker("", selection: $viewMode) {
+                    ForEach(DiffViewMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            } else {
+                // Hunk count indicator in approval mode
+                HStack(spacing: 6) {
+                    Image(systemName: "square.stack.3d.up")
+                        .font(.system(size: 11))
+                    Text("\(diff.hunks.count) hunk\(diff.hunks.count == 1 ? "" : "s")")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .foregroundColor(theme.secondaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(theme.background)
+                )
             }
-            .pickerStyle(.segmented)
-            .frame(width: 200)
             
             Spacer()
             
-            // Language indicator
-            if let lang = fileChange.language {
-                Text(lang.uppercased())
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(theme.secondaryText)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule()
-                            .fill(theme.headerBackground)
-                    )
+            // Bulk actions in approval mode
+            if isApprovalMode && !diff.hunks.isEmpty {
+                HStack(spacing: 8) {
+                    Button(action: acceptAllHunks) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 11))
+                            Text("Accept All")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(theme.addedText)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(theme.addedBackground)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: rejectAllHunks) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                            Text("Reject All")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(theme.removedText)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(theme.removedBackground)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .background(theme.background)
+    }
+    
+    private func acceptAllHunks() {
+        for hunk in diff.hunks {
+            hunkDecisions[hunk.id] = .accepted
+        }
+    }
+    
+    private func rejectAllHunks() {
+        for hunk in diff.hunks {
+            hunkDecisions[hunk.id] = .rejected
+        }
     }
     
     // MARK: - Side by Side View
@@ -275,6 +348,168 @@ struct FileDiffView: View {
         }
     }
     
+    // MARK: - Hunk-Based View (Approval Mode)
+    
+    private var hunkBasedView: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                ForEach(diff.hunks) { hunk in
+                    hunkView(hunk: hunk)
+                }
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+        }
+    }
+    
+    private func hunkView(hunk: DiffHunk) -> some View {
+        let decision = hunkDecisions[hunk.id] ?? .pending
+        
+        return VStack(spacing: 0) {
+            // Hunk header with actions
+            hunkHeader(hunk: hunk, decision: decision)
+            
+            // Hunk lines
+            VStack(spacing: 0) {
+                ForEach(hunk.lines) { line in
+                    hunkLineRow(line: line, decision: decision)
+                }
+            }
+            .opacity(decision == .rejected ? 0.5 : 1.0)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(theme.background)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(hunkBorderColor(for: decision), lineWidth: decision == .pending ? 0.5 : 2)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+    
+    private func hunkHeader(hunk: DiffHunk, decision: HunkDecision) -> some View {
+        HStack(spacing: 8) {
+            // Hunk header text (git-style, already includes line counts)
+            Text(hunk.header)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundColor(theme.secondaryText)
+            
+            Spacer()
+            
+            // Decision indicator or action buttons
+            if decision == .accepted {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                    Text("Accepted")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(theme.addedText)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(theme.addedBackground)
+                )
+                .onTapGesture {
+                    hunkDecisions[hunk.id] = .pending
+                }
+            } else if decision == .rejected {
+                HStack(spacing: 4) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                    Text("Rejected")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(theme.removedText)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(theme.removedBackground)
+                )
+                .onTapGesture {
+                    hunkDecisions[hunk.id] = .pending
+                }
+            } else {
+                // Pending - show action buttons
+                HStack(spacing: 6) {
+                    Button(action: { hunkDecisions[hunk.id] = .accepted }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Accept")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.green)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: { hunkDecisions[hunk.id] = .rejected }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Reject")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.red)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(theme.panelHeader)
+    }
+    
+    private func hunkLineRow(line: DiffLine, decision: HunkDecision) -> some View {
+        HStack(spacing: 0) {
+            // Line number
+            Text(line.lineNumber.map { String($0) } ?? "")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(theme.lineNumber)
+                .frame(width: 36, alignment: .trailing)
+                .padding(.trailing, 6)
+                .background(theme.gutterBackground)
+            
+            // Change indicator
+            Text(changeIndicator(for: line.type))
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundColor(indicatorColor(for: line.type))
+                .frame(width: 16)
+            
+            // Line content with syntax highlighting
+            highlightedLine(line.content)
+                .padding(.leading, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .strikethrough(decision == .rejected && line.type == .added, color: theme.removedText)
+        }
+        .padding(.vertical, 1)
+        .background(backgroundColor(for: line.type))
+    }
+    
+    private func hunkBorderColor(for decision: HunkDecision) -> Color {
+        switch decision {
+        case .pending: return theme.divider
+        case .accepted: return theme.addedText
+        case .rejected: return theme.removedText
+        }
+    }
+    
     private func unifiedLineRow(line: DiffLine, index: Int) -> some View {
         HStack(spacing: 0) {
             // Line number gutter
@@ -377,28 +612,23 @@ struct FileDiffView: View {
     
     private var summaryFooter: some View {
         HStack(spacing: 16) {
-            // Stats
-            HStack(spacing: 12) {
-                Label("\(diff.addedCount) additions", systemImage: "plus.circle.fill")
-                    .foregroundColor(theme.addedText)
-                
-                Label("\(diff.removedCount) deletions", systemImage: "minus.circle.fill")
-                    .foregroundColor(theme.removedText)
-                
-                Label("\(diff.unchangedCount) unchanged", systemImage: "equal.circle.fill")
+            // Language indicator
+            if let lang = fileChange.language {
+                Text(lang.uppercased())
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundColor(theme.secondaryText)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(theme.background)
+                    )
             }
-            .font(.system(size: 11))
             
             Spacer()
-            
-            // Timestamp
-            Text(fileChange.timestamp, style: .relative)
-                .font(.system(size: 10))
-                .foregroundColor(theme.secondaryText)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .background(theme.headerBackground)
     }
 }
@@ -531,8 +761,33 @@ struct FileDiffView_Previews: PreviewProvider {
         
         let diff = FileDiff(fileChange: fileChange)
         
-        FileDiffView(fileChange: fileChange, diff: diff)
-            .frame(width: 800, height: 500)
+        Group {
+            // Read-only mode
+            FileDiffView(fileChange: fileChange, diff: diff)
+                .frame(width: 800, height: 500)
+                .previewDisplayName("Read-Only Mode")
+            
+            // Approval mode with hunk actions
+            FileDiffViewApprovalPreview(fileChange: fileChange, diff: diff)
+                .frame(width: 800, height: 500)
+                .previewDisplayName("Approval Mode")
+        }
+    }
+}
+
+/// Helper view for previewing approval mode
+private struct FileDiffViewApprovalPreview: View {
+    let fileChange: FileChange
+    let diff: FileDiff
+    @State private var hunkDecisions: [UUID: HunkDecision] = [:]
+    
+    var body: some View {
+        FileDiffView(
+            fileChange: fileChange,
+            diff: diff,
+            isApprovalMode: true,
+            hunkDecisions: $hunkDecisions
+        )
     }
 }
 #endif

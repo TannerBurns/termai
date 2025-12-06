@@ -1,6 +1,19 @@
 import SwiftUI
 import AppKit
 
+/// Represents a message or group of tool events for rendering
+private enum GroupedMessage: Identifiable {
+    case single(index: Int, message: ChatMessage)
+    case toolGroup(messages: [(Int, ChatMessage)])
+    
+    var id: String {
+        switch self {
+        case .single(_, let msg): return msg.id.uuidString
+        case .toolGroup(let msgs): return "group-\(msgs.first?.1.id.uuidString ?? "")"
+        }
+    }
+}
+
 /// Chat tab content view without the header (since header is in container)
 struct ChatTabContentView: View {
     @ObservedObject var session: ChatSession
@@ -11,6 +24,72 @@ struct ChatTabContentView: View {
     
     let tabIndex: Int
     @ObservedObject var ptyModel: PTYModel
+    
+    /// Groups consecutive groupable events (tools, profile changes, commands, etc.) into single grouped items for compact display
+    /// Also filters out internal events unless verbose mode is enabled
+    private var groupedMessages: [GroupedMessage] {
+        let showVerbose = AgentSettings.shared.showVerboseAgentEvents
+        var result: [GroupedMessage] = []
+        var currentGroup: [(Int, ChatMessage)] = []
+        
+        /// Check if an event is groupable (tools, profile changes, commands, and other categorized events)
+        /// Pending approvals are NOT groupable - they need to be visible for user interaction
+        func isGroupable(_ event: AgentEvent) -> Bool {
+            // Pending approvals must stay visible for user interaction
+            if event.pendingApprovalId != nil {
+                return false
+            }
+            // Events with a category are groupable (once resolved)
+            if event.eventCategory != nil {
+                return true
+            }
+            // Legacy: tool events without explicit category
+            if event.toolCallId != nil {
+                return true
+            }
+            return false
+        }
+        
+        for (index, msg) in session.messages.enumerated() {
+            // Skip internal events unless verbose mode is on
+            if let event = msg.agentEvent, event.isInternal == true, !showVerbose {
+                continue
+            }
+            
+            // Check if this event should be grouped
+            if let event = msg.agentEvent, isGroupable(event) {
+                currentGroup.append((index, msg))
+            } else {
+                // Flush any accumulated group
+                if !currentGroup.isEmpty {
+                    if currentGroup.count >= 2 {
+                        // Only group if we have 2+ consecutive events
+                        result.append(.toolGroup(messages: currentGroup))
+                    } else {
+                        // Single event - render normally
+                        for (idx, m) in currentGroup {
+                            result.append(.single(index: idx, message: m))
+                        }
+                    }
+                    currentGroup = []
+                }
+                result.append(.single(index: index, message: msg))
+            }
+        }
+        
+        // Don't forget the final group
+        if !currentGroup.isEmpty {
+            if currentGroup.count >= 2 {
+                result.append(.toolGroup(messages: currentGroup))
+            } else {
+                for (idx, m) in currentGroup {
+                    result.append(.single(index: idx, message: m))
+                }
+            }
+        }
+        
+        return result
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -55,16 +134,25 @@ struct ChatTabContentView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 16) {
-                            ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, msg in
-                                ChatMessageBubble(
-                                    message: msg,
-                                    messageIndex: index,
-                                    isStreaming: msg.id == session.streamingMessageId,
-                                    checkpoint: session.checkpoint(forMessageIndex: index),
-                                    ptyModel: ptyModel,
-                                    session: session
-                                )
-                                .id(msg.id)
+                            ForEach(Array(groupedMessages.enumerated()), id: \.element.id) { _, item in
+                                switch item {
+                                case .single(let index, let msg):
+                                    ChatMessageBubble(
+                                        message: msg,
+                                        messageIndex: index,
+                                        isStreaming: msg.id == session.streamingMessageId,
+                                        checkpoint: session.checkpoint(forMessageIndex: index),
+                                        ptyModel: ptyModel,
+                                        session: session
+                                    )
+                                    .id(msg.id)
+                                case .toolGroup(let messages):
+                                    AgentEventGroupView(
+                                        events: messages.compactMap { $0.1.agentEvent },
+                                        ptyModel: ptyModel
+                                    )
+                                    .id("tool-group-\(messages.first?.1.id.uuidString ?? UUID().uuidString)")
+                                }
                             }
                             
                             // Bottom anchor for scroll detection
@@ -1015,6 +1103,14 @@ private struct ChatMessageBubble: View {
     @State private var editedText = ""
     @State private var showRollbackChoice = false
     
+    /// Compact timestamp formatter showing date and time
+    static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d h:mm a"  // e.g., "Dec 6 3:35 PM"
+        formatter.timeZone = .current
+        return formatter
+    }()
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Role label with modern styling
@@ -1039,6 +1135,12 @@ private struct ChatMessageBubble: View {
                 }
 
                 Spacer()
+                
+                // Compact timezone-aware timestamp
+                Text(message.timestamp, formatter: ChatMessageBubble.timestampFormatter)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.6))
+                    .monospacedDigit()
             }
             
             // Terminal context badge for user messages
@@ -1407,22 +1509,80 @@ private struct AgentEventView: View {
         event.pendingApprovalId != nil && !approvalHandled
     }
     
+    /// Check if this is a tool event with status
+    private var isToolEvent: Bool {
+        event.toolCallId != nil
+    }
+    
+    /// Get the effective color based on tool status
+    private var effectiveColor: Color {
+        if let status = event.toolStatus {
+            switch status {
+            case "running": return .blue
+            case "succeeded": return .green
+            case "failed": return .red
+            default: return colorForKind
+            }
+        }
+        return colorForKind
+    }
+    
+    /// Get the icon for tool status
+    private var toolStatusIcon: String {
+        if let status = event.toolStatus {
+            switch status {
+            case "running": return "arrow.triangle.2.circlepath"
+            case "succeeded": return "checkmark"
+            case "failed": return "xmark"
+            default: return symbol(for: event.kind)
+            }
+        }
+        return symbol(for: event.kind)
+    }
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                // Icon
+                // Icon - shows spinner for running tools, checkmark/X for completed
                 ZStack {
                     Circle()
-                        .fill(colorForKind.opacity(0.15))
+                        .fill(effectiveColor.opacity(0.15))
                         .frame(width: 24, height: 24)
-                    Image(systemName: symbol(for: event.kind))
-                        .font(.system(size: 10))
-                        .foregroundColor(colorForKind)
+                    
+                    if isToolEvent && event.toolStatus == "running" {
+                        // Spinning indicator for running tools
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 10, height: 10)
+                    } else {
+                        Image(systemName: isToolEvent ? toolStatusIcon : symbol(for: event.kind))
+                            .font(.system(size: 10, weight: isToolEvent ? .bold : .regular))
+                            .foregroundColor(effectiveColor)
+                    }
                 }
                 
-                Text(event.title)
-                    .font(.caption)
-                    .fontWeight(.medium)
+                // Compact title for tool events
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(event.title)
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(isToolEvent && event.toolStatus == "failed" ? .red : .primary)
+                    
+                    // Compact inline summary when collapsed
+                    if !expanded {
+                        if let fileChange = event.fileChange {
+                            Text(fileChange.fileName)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        } else if let cmd = event.command, !cmd.isEmpty {
+                            Text(String(cmd.prefix(40)) + (cmd.count > 40 ? "..." : ""))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
                 
                 Spacer()
                 
@@ -1549,34 +1709,49 @@ private struct AgentEventView: View {
                     }
                     
                     if let details = event.details, !details.isEmpty, event.fileChange == nil {
-                        Text(details)
+                        // Truncate details to 150 chars for compactness
+                        let truncatedDetails = details.count > 150 ? String(details.prefix(150)) + "..." : details
+                        Text(truncatedDetails)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .textSelection(.enabled)
+                            .lineLimit(4)
                     }
                     
                     if let output = event.output, !output.isEmpty {
                         Divider()
-                        ScrollView {
-                            Text(output)
-                                .font(.system(.footnote, design: .monospaced))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 4) {
+                            // Truncate output to first 500 chars with "show more" link
+                            let truncatedOutput = output.count > 500 ? String(output.prefix(500)) + "..." : output
+                            let lineCount = output.components(separatedBy: "\n").count
+                            
+                            ScrollView {
+                                Text(truncatedOutput)
+                                    .font(.system(.footnote, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(minHeight: 40, maxHeight: 120)
+                            
+                            if output.count > 500 || lineCount > 8 {
+                                Text("\(output.count) chars, \(lineCount) lines")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.secondary)
+                            }
                         }
-                        .frame(minHeight: 40, maxHeight: 160)
                     }
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .padding(12)
+        .padding(isToolEvent ? 10 : 12) // Slightly more compact for tool events
         .background(
-            RoundedRectangle(cornerRadius: 14)
+            RoundedRectangle(cornerRadius: isToolEvent ? 10 : 14)
                 .fill(.ultraThinMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(colorForKind.opacity(0.2), lineWidth: 1)
+            RoundedRectangle(cornerRadius: isToolEvent ? 10 : 14)
+                .stroke(effectiveColor.opacity(0.2), lineWidth: 1)
         )
         .onAppear { expanded = !(event.collapsed ?? true) }
     }
@@ -1586,7 +1761,13 @@ private struct AgentEventView: View {
         case "status": return .blue
         case "step": return .green
         case "summary": return .purple
-        case "file_change": return .orange
+        case "file_change":
+            // Use red for destructive operations (delete file), orange for others
+            if event.fileChange?.operationType == .deleteFile {
+                return .red
+            }
+            return .orange
+        case "command_approval": return .orange
         default: return .gray
         }
     }
@@ -1596,9 +1777,20 @@ private struct AgentEventView: View {
         case "status": return "bolt.fill"
         case "step": return "play.fill"
         case "summary": return "checkmark"
-        case "file_change": return "doc.text.fill"
+        case "file_change":
+            // Use trash icon for delete, doc icon for others
+            if event.fileChange?.operationType == .deleteFile {
+                return "trash.fill"
+            }
+            return "doc.text.fill"
+        case "command_approval": return "exclamationmark.shield.fill"
         default: return "info.circle"
         }
+    }
+    
+    /// Check if this is a command approval (vs file change approval)
+    private var isCommandApproval: Bool {
+        event.kind.lowercased() == "command_approval"
     }
     
     private func copyCommand(_ cmd: String) {
@@ -1623,8 +1815,12 @@ private struct AgentEventView: View {
     
     private func approveApproval(_ approvalId: UUID) {
         approvalHandled = true
+        // Use different notification based on approval type
+        let notificationName: Notification.Name = isCommandApproval 
+            ? .TermAICommandApprovalResponse 
+            : .TermAIFileChangeApprovalResponse
         NotificationCenter.default.post(
-            name: .TermAIFileChangeApprovalResponse,
+            name: notificationName,
             object: nil,
             userInfo: [
                 "approvalId": approvalId,
@@ -1635,14 +1831,336 @@ private struct AgentEventView: View {
     
     private func rejectApproval(_ approvalId: UUID) {
         approvalHandled = true
+        // Use different notification based on approval type
+        let notificationName: Notification.Name = isCommandApproval 
+            ? .TermAICommandApprovalResponse 
+            : .TermAIFileChangeApprovalResponse
         NotificationCenter.default.post(
-            name: .TermAIFileChangeApprovalResponse,
+            name: notificationName,
             object: nil,
             userInfo: [
                 "approvalId": approvalId,
                 "approved": false
             ]
         )
+    }
+}
+
+// MARK: - Agent Event Group View (Compact grouped events: tools, profile changes, etc.)
+private struct AgentEventGroupView: View {
+    let events: [AgentEvent]
+    let ptyModel: PTYModel
+    
+    @State private var expanded: Bool = false
+    
+    // Tool counts
+    private var toolEvents: [AgentEvent] {
+        events.filter { $0.eventCategory == "tool" || ($0.toolCallId != nil && $0.eventCategory != "command") }
+    }
+    
+    private var succeededCount: Int {
+        toolEvents.filter { $0.toolStatus == "succeeded" }.count
+    }
+    
+    private var failedCount: Int {
+        toolEvents.filter { $0.toolStatus == "failed" }.count
+    }
+    
+    private var runningCount: Int {
+        toolEvents.filter { $0.toolStatus == "running" }.count
+    }
+    
+    // Command counts (shell commands that needed approval)
+    private var commandEvents: [AgentEvent] {
+        events.filter { $0.eventCategory == "command" }
+    }
+    
+    private var commandSucceededCount: Int {
+        commandEvents.filter { $0.toolStatus == "succeeded" }.count
+    }
+    
+    private var commandFailedCount: Int {
+        commandEvents.filter { $0.toolStatus == "failed" }.count
+    }
+    
+    // Profile change counts
+    private var profileChangeCount: Int {
+        events.filter { $0.eventCategory == "profile" }.count
+    }
+    
+    // Other status events
+    private var otherStatusCount: Int {
+        events.filter { 
+            $0.eventCategory != "tool" && $0.eventCategory != "profile" && $0.eventCategory != "command" && $0.toolCallId == nil
+        }.count
+    }
+    
+    private var summaryParts: [(text: String, color: Color)] {
+        var parts: [(text: String, color: Color)] = []
+        
+        // Tool summary
+        let toolCount = toolEvents.count
+        if toolCount > 0 {
+            parts.append(("\(toolCount) tool\(toolCount == 1 ? "" : "s")", .secondary))
+            if failedCount > 0 {
+                parts.append(("(\(failedCount) failed)", .red))
+            } else if runningCount > 0 {
+                parts.append(("(\(runningCount) running)", .blue))
+            }
+        }
+        
+        // Command summary (shell commands)
+        let cmdCount = commandEvents.count
+        if cmdCount > 0 {
+            parts.append(("\(cmdCount) cmd\(cmdCount == 1 ? "" : "s")", .cyan))
+            if commandFailedCount > 0 {
+                parts.append(("(\(commandFailedCount) failed)", .red))
+            }
+        }
+        
+        // Profile changes
+        if profileChangeCount > 0 {
+            parts.append(("\(profileChangeCount) profile Δ", .purple))
+        }
+        
+        // Other status
+        if otherStatusCount > 0 {
+            parts.append(("\(otherStatusCount) status", .secondary))
+        }
+        
+        return parts
+    }
+    
+    private var hasRunning: Bool {
+        runningCount > 0
+    }
+    
+    /// Header color is neutral/blue - we don't want to alarm users with red
+    /// Failures are shown in the summary text and individual rows
+    private var headerColor: Color {
+        if runningCount > 0 { return .blue }
+        return .secondary
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Compact header
+            Button(action: { withAnimation(.spring(response: 0.3)) { expanded.toggle() } }) {
+                HStack(spacing: 8) {
+                    // Icon
+                    ZStack {
+                        Circle()
+                            .fill(headerColor.opacity(0.15))
+                            .frame(width: 22, height: 22)
+                        
+                        if hasRunning {
+                            ProgressView()
+                                .scaleEffect(0.45)
+                                .frame(width: 10, height: 10)
+                        } else {
+                            Image(systemName: "gearshape.2")
+                                .font(.system(size: 9))
+                                .foregroundColor(headerColor)
+                        }
+                    }
+                    
+                    // Dynamic title based on content
+                    Text("Actions")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                    
+                    // Summary badges - show each category with appropriate colors
+                    HStack(spacing: 4) {
+                        ForEach(Array(summaryParts.enumerated()), id: \.offset) { _, part in
+                            Text(part.text)
+                                .font(.system(size: 10))
+                                .foregroundColor(part.color)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
+            
+            // Expanded list of tool events
+            if expanded {
+                Divider()
+                    .padding(.horizontal, 10)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(events.enumerated()), id: \.offset) { _, event in
+                        CompactToolRow(event: event, ptyModel: ptyModel)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(headerColor.opacity(0.2), lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Compact Event Row (for grouped view - handles tools, profile changes, etc.)
+private struct CompactToolRow: View {
+    let event: AgentEvent
+    let ptyModel: PTYModel
+    
+    @State private var showDetails: Bool = false
+    
+    /// Is this a tool event?
+    private var isToolEvent: Bool {
+        event.eventCategory == "tool" || (event.toolCallId != nil && event.eventCategory != "command")
+    }
+    
+    /// Is this a command (shell) event?
+    private var isCommandEvent: Bool {
+        event.eventCategory == "command"
+    }
+    
+    /// Is this a profile change event?
+    private var isProfileChange: Bool {
+        event.eventCategory == "profile"
+    }
+    
+    private var statusColor: Color {
+        if isProfileChange {
+            return .purple
+        }
+        if isCommandEvent {
+            switch event.toolStatus {
+            case "running": return .blue
+            case "succeeded": return .cyan
+            case "failed": return .red
+            default: return .orange
+            }
+        }
+        switch event.toolStatus {
+        case "running": return .blue
+        case "succeeded": return .green
+        case "failed": return .red
+        default: return .gray
+        }
+    }
+    
+    private var statusIcon: String {
+        if isProfileChange {
+            return "person.crop.circle.badge.checkmark"
+        }
+        if isCommandEvent {
+            switch event.toolStatus {
+            case "running": return "terminal"
+            case "succeeded": return "checkmark.circle"
+            case "failed": return "xmark.circle"
+            default: return "terminal"
+            }
+        }
+        switch event.toolStatus {
+        case "running": return "arrow.triangle.2.circlepath"
+        case "succeeded": return "checkmark"
+        case "failed": return "xmark"
+        default: return "info.circle"
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button(action: { withAnimation(.spring(response: 0.25)) { showDetails.toggle() } }) {
+                HStack(spacing: 6) {
+                    // Status indicator
+                    if isToolEvent && event.toolStatus == "running" {
+                        ProgressView()
+                            .scaleEffect(0.4)
+                            .frame(width: 12, height: 12)
+                    } else {
+                        Image(systemName: statusIcon)
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundColor(statusColor)
+                            .frame(width: 12, height: 12)
+                    }
+                    
+                    // Event title - different styling for different types
+                    if isProfileChange {
+                        Text("Profile: \(event.title)")
+                            .font(.system(size: 11))
+                            .foregroundColor(.purple)
+                    } else if isCommandEvent {
+                        // Show command with terminal styling
+                        let cmdPreview = event.command.map { String($0.prefix(35)) + ($0.count > 35 ? "…" : "") } ?? event.title
+                        Text("$ \(cmdPreview)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(event.toolStatus == "failed" ? .red : .cyan)
+                    } else {
+                        Text(event.title)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(event.toolStatus == "failed" ? .red : .primary)
+                    }
+                    
+                    // File change indicator
+                    if event.fileChange != nil {
+                        Image(systemName: "doc.badge.gearshape")
+                            .font(.system(size: 9))
+                            .foregroundColor(.orange)
+                    }
+                    
+                    Spacer()
+                    
+                    if event.output != nil || event.details != nil || event.fileChange != nil {
+                        Image(systemName: showDetails ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8))
+                            .foregroundColor(.secondary.opacity(0.6))
+                    }
+                }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(showDetails ? Color.primary.opacity(0.04) : Color.clear)
+                )
+            }
+            .buttonStyle(.plain)
+            
+            // Expanded details
+            if showDetails {
+                VStack(alignment: .leading, spacing: 6) {
+                    // File change preview
+                    if let fileChange = event.fileChange {
+                        InlineDiffPreview(fileChange: fileChange, maxLines: 4)
+                    }
+                    
+                    // Details/reason
+                    if let details = event.details, !details.isEmpty, event.fileChange == nil {
+                        Text(details)
+                            .font(.system(size: 10, design: isToolEvent ? .monospaced : .default))
+                            .foregroundColor(.secondary)
+                            .lineLimit(3)
+                    }
+                    
+                    // Output (truncated) - only for tool events
+                    if isToolEvent, let output = event.output, !output.isEmpty, event.fileChange == nil {
+                        Text(String(output.prefix(200)) + (output.count > 200 ? "..." : ""))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(4)
+                    }
+                }
+                .padding(.leading, 20)
+                .padding(.bottom, 4)
+            }
+        }
     }
 }
 
@@ -1691,84 +2209,296 @@ struct ProgressDonut: View {
     }
 }
 
-// MARK: - Agent Mode Toggle
+// MARK: - Agent Mode Selector
 
-struct AgentModeToggle: View {
-    @Binding var isEnabled: Bool
+struct AgentModeSelector: View {
+    @Binding var mode: AgentMode
     @State private var isHovering: Bool = false
     
-    private let activeColor = Color(red: 0.1, green: 0.85, blue: 0.65)  // Neon mint/cyan
-    private let inactiveColor = Color.secondary.opacity(0.5)
-    
     var body: some View {
-        Button(action: {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
-                isEnabled.toggle()
-            }
-        }) {
-            HStack(spacing: 4) {
-                // Animated icon
-                ZStack {
-                    // Glow effect when active
-                    if isEnabled {
-                        Circle()
-                            .fill(activeColor.opacity(0.35))
-                            .frame(width: 14, height: 14)
-                            .blur(radius: 3)
+        Menu {
+            ForEach(AgentMode.allCases, id: \.self) { agentMode in
+                Button(action: {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                        mode = agentMode
                     }
+                }) {
+                    HStack {
+                        Image(systemName: agentMode.icon)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(agentMode.rawValue)
+                            Text(agentMode.description)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if mode == agentMode {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(agentMode.color)
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                // Mode icon with glow
+                ZStack {
+                    // Subtle glow effect
+                    Circle()
+                        .fill(mode.color.opacity(0.25))
+                        .frame(width: 14, height: 14)
+                        .blur(radius: 2)
                     
                     // Icon background
                     Circle()
-                        .fill(isEnabled ? activeColor : inactiveColor.opacity(0.3))
+                        .fill(mode.color)
                         .frame(width: 12, height: 12)
                     
                     // Icon
-                    Image(systemName: isEnabled ? "bolt.fill" : "bolt")
+                    Image(systemName: mode.icon)
                         .font(.system(size: 6, weight: .bold))
-                        .foregroundColor(isEnabled ? .black.opacity(0.8) : .secondary)
-                        .scaleEffect(isEnabled ? 1.0 : 0.85)
+                        .foregroundColor(.white)
                 }
                 .frame(width: 14, height: 14)
                 
-                // Label - matches .caption used in ChatTabPill
-                Text("Agent")
+                // Mode label
+                Text(mode.rawValue)
                     .font(.caption)
-                    .foregroundColor(isEnabled ? activeColor : .secondary)
+                    .foregroundColor(mode.color)
                 
-                // Status indicator dot
-                Circle()
-                    .fill(isEnabled ? activeColor : inactiveColor)
-                    .frame(width: 5, height: 5)
-                    .opacity(isEnabled ? 1 : 0.5)
-                    .scaleEffect(isEnabled ? 1 : 0.8)
+                // Dropdown chevron
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundColor(mode.color.opacity(0.7))
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(
                 Capsule()
-                    .fill(isEnabled 
-                        ? activeColor.opacity(isHovering ? 0.2 : 0.15)
-                        : Color.primary.opacity(isHovering ? 0.05 : 0)
-                    )
+                    .fill(mode.color.opacity(isHovering ? 0.2 : 0.15))
             )
             .overlay(
                 Capsule()
-                    .stroke(
-                        isEnabled 
-                            ? activeColor.opacity(isHovering ? 0.5 : 0.3)
-                            : Color.clear,
-                        lineWidth: 1
-                    )
+                    .stroke(mode.color.opacity(isHovering ? 0.5 : 0.3), lineWidth: 1)
             )
             .shadow(
-                color: isEnabled ? activeColor.opacity(0.2) : .clear,
+                color: mode.color.opacity(0.2),
                 radius: isHovering ? 4 : 2,
                 x: 0, y: 0
             )
         }
-        .buttonStyle(.plain)
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
         .onHover { isHovering = $0 }
         .animation(.easeOut(duration: 0.15), value: isHovering)
+        .help(mode.detailedDescription)
+    }
+}
+
+// MARK: - Agent Profile Selector
+
+struct AgentProfileSelector: View {
+    @Binding var profile: AgentProfile
+    /// The active profile when in Auto mode (shows what profile is currently being used)
+    var activeProfile: AgentProfile? = nil
+    @State private var isHovering: Bool = false
+    
+    /// The display profile (active profile when in Auto mode, otherwise the selected profile)
+    private var displayProfile: AgentProfile {
+        if profile.isAuto, let active = activeProfile {
+            return active
+        }
+        return profile
+    }
+    
+    /// Whether we're in Auto mode with a different active profile
+    private var isAutoWithActiveProfile: Bool {
+        profile.isAuto && activeProfile != nil && activeProfile != .auto
+    }
+    
+    var body: some View {
+        Menu {
+            ForEach(AgentProfile.allCases, id: \.self) { agentProfile in
+                Button(action: {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
+                        profile = agentProfile
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: agentProfile.icon)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(agentProfile.rawValue)
+                            Text(agentProfile.description)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if profile == agentProfile {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(agentProfile.color)
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                // Profile icon with subtle background
+                ZStack {
+                    // Subtle glow effect
+                    Circle()
+                        .fill(displayProfile.color.opacity(0.25))
+                        .frame(width: 14, height: 14)
+                        .blur(radius: 2)
+                    
+                    // Icon background
+                    Circle()
+                        .fill(displayProfile.color)
+                        .frame(width: 12, height: 12)
+                    
+                    // Icon
+                    Image(systemName: displayProfile.icon)
+                        .font(.system(size: 6, weight: .bold))
+                        .foregroundColor(.white)
+                    
+                    // Small "auto" indicator when in Auto mode
+                    if isAutoWithActiveProfile {
+                        Circle()
+                            .fill(AgentProfile.auto.color)
+                            .frame(width: 5, height: 5)
+                            .offset(x: 5, y: -5)
+                    }
+                }
+                .frame(width: 14, height: 14)
+                
+                // Profile label - show "Auto (Coding)" style when in Auto mode
+                if isAutoWithActiveProfile, let active = activeProfile {
+                    Text("Auto")
+                        .font(.caption)
+                        .foregroundColor(profile.color)
+                    Text("(\(active.rawValue))")
+                        .font(.caption2)
+                        .foregroundColor(active.color)
+                } else {
+                    Text(profile.rawValue)
+                        .font(.caption)
+                        .foregroundColor(profile.color)
+                }
+                
+                // Dropdown chevron
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundColor(displayProfile.color.opacity(0.7))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(displayProfile.color.opacity(isHovering ? 0.2 : 0.15))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(displayProfile.color.opacity(isHovering ? 0.5 : 0.3), lineWidth: 1)
+            )
+            .shadow(
+                color: displayProfile.color.opacity(0.2),
+                radius: isHovering ? 4 : 2,
+                x: 0, y: 0
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: isHovering)
+        .help(isAutoWithActiveProfile ? "Auto mode - currently using \(activeProfile?.rawValue ?? "General") profile" : profile.detailedDescription)
+    }
+}
+
+// MARK: - Agent Summary Badge (Compact action summary during run)
+
+private struct AgentSummaryBadge: View {
+    @ObservedObject var session: ChatSession
+    
+    /// Count of tool events (excluding internal events and commands)
+    private var toolEventCount: Int {
+        session.messages.filter { msg in
+            guard let event = msg.agentEvent else { return false }
+            return (event.eventCategory == "tool" || (event.toolCallId != nil && event.eventCategory != "command")) && event.isInternal != true
+        }.count
+    }
+    
+    /// Count of command events (shell commands)
+    private var commandEventCount: Int {
+        session.messages.filter { msg in
+            msg.agentEvent?.eventCategory == "command"
+        }.count
+    }
+    
+    /// Count of file changes
+    private var fileChangeCount: Int {
+        session.messages.filter { msg in
+            msg.agentEvent?.fileChange != nil
+        }.count
+    }
+    
+    /// Count of profile changes
+    private var profileChangeCount: Int {
+        session.messages.filter { msg in
+            msg.agentEvent?.eventCategory == "profile"
+        }.count
+    }
+    
+    var body: some View {
+        if toolEventCount > 0 || fileChangeCount > 0 || profileChangeCount > 0 || commandEventCount > 0 {
+            HStack(spacing: 4) {
+                if toolEventCount > 0 {
+                    HStack(spacing: 2) {
+                        Image(systemName: "wrench")
+                            .font(.system(size: 8))
+                        Text("\(toolEventCount)")
+                            .font(.system(size: 9, design: .monospaced))
+                    }
+                    .foregroundColor(.secondary)
+                }
+                
+                if commandEventCount > 0 {
+                    HStack(spacing: 2) {
+                        Image(systemName: "terminal")
+                            .font(.system(size: 8))
+                        Text("\(commandEventCount)")
+                            .font(.system(size: 9, design: .monospaced))
+                    }
+                    .foregroundColor(.cyan)
+                }
+                
+                if fileChangeCount > 0 {
+                    HStack(spacing: 2) {
+                        Image(systemName: "doc.badge.gearshape")
+                            .font(.system(size: 8))
+                        Text("\(fileChangeCount)")
+                            .font(.system(size: 9, design: .monospaced))
+                    }
+                    .foregroundColor(.orange)
+                }
+                
+                if profileChangeCount > 0 {
+                    HStack(spacing: 2) {
+                        Image(systemName: "person.crop.circle")
+                            .font(.system(size: 8))
+                        Text("\(profileChangeCount)")
+                            .font(.system(size: 9, design: .monospaced))
+                    }
+                    .foregroundColor(.purple)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill(Color.primary.opacity(0.05))
+            )
+        }
     }
 }
 
@@ -1853,6 +2583,9 @@ struct AgentControlsBar: View {
                         )
                     }
                     
+                    // Compact summary badge
+                    AgentSummaryBadge(session: session)
+                    
                     // Stop button
                     Button(action: { session.cancelAgent() }) {
                         HStack(spacing: 4) {
@@ -1877,14 +2610,22 @@ struct AgentControlsBar: View {
                     .help("Stop agent execution")
                 }
             } else {
-                // Show agent toggle when not running
-                AgentModeToggle(
-                    isEnabled: Binding(
-                        get: { session.agentModeEnabled },
-                        set: { session.agentModeEnabled = $0; session.persistSettings() }
+                // Show agent mode selector when not running
+                AgentModeSelector(
+                    mode: Binding(
+                        get: { session.agentMode },
+                        set: { session.agentMode = $0; session.persistSettings() }
                     )
                 )
-                .help("When enabled, the assistant can run terminal commands automatically.")
+                
+                // Show agent profile selector
+                AgentProfileSelector(
+                    profile: Binding(
+                        get: { session.agentProfile },
+                        set: { session.agentProfile = $0; session.persistSettings() }
+                    ),
+                    activeProfile: session.agentProfile.isAuto ? session.activeProfile : nil
+                )
             }
             
             Spacer()

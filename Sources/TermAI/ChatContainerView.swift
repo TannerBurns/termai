@@ -8,7 +8,7 @@ struct ChatContainerView: View {
     @ObservedObject var ptyModel: PTYModel
     
     // Command approval state
-    @State private var pendingApproval: PendingCommandApproval? = nil
+    // Command approval is now inline (no longer using sheet)
     @State private var showingHistoryPopover: Bool = false
     @State private var showingProcessMonitor: Bool = false
     
@@ -187,47 +187,11 @@ struct ChatContainerView: View {
             }
         }
         .background(.regularMaterial)
-        .onReceive(NotificationCenter.default.publisher(for: .TermAICommandPendingApproval)) { note in
-            guard let sessionId = note.userInfo?["sessionId"] as? UUID,
-                  let approvalId = note.userInfo?["approvalId"] as? UUID,
-                  let command = note.userInfo?["command"] as? String else { return }
-            
-            // Only show if this is for the selected session
-            if sessionId == tabsManager.selectedSessionId {
-                pendingApproval = PendingCommandApproval(
-                    approvalId: approvalId,
-                    sessionId: sessionId,
-                    command: command
-                )
-            }
-        }
-        .sheet(item: $pendingApproval) { approval in
-            CommandApprovalSheet(
-                approval: approval,
-                onApprove: { editedCommand in
-                    NotificationCenter.default.post(
-                        name: .TermAICommandApprovalResponse,
-                        object: nil,
-                        userInfo: [
-                            "approvalId": approval.approvalId,
-                            "approved": true,
-                            "command": editedCommand
-                        ]
-                    )
-                    pendingApproval = nil
-                },
-                onReject: {
-                    NotificationCenter.default.post(
-                        name: .TermAICommandApprovalResponse,
-                        object: nil,
-                        userInfo: [
-                            "approvalId": approval.approvalId,
-                            "approved": false
-                        ]
-                    )
-                    pendingApproval = nil
-                }
-            )
+        // Command approval is now handled inline in chat via AgentEventView
+        // The notification is still posted but we don't show a sheet anymore
+        .onReceive(NotificationCenter.default.publisher(for: .TermAICommandPendingApproval)) { _ in
+            // Inline approval buttons are shown in the chat message
+            // No need to show the sheet anymore
         }
         // File change approval is now handled inline in chat via AgentEventView
         // The sheet is kept for viewing changes via ViewChangesButton but auto-show is disabled
@@ -256,6 +220,20 @@ struct ChatContainerView: View {
                         userInfo: [
                             "approvalId": approval.id,
                             "approved": false
+                        ]
+                    )
+                    pendingFileChangeApproval = nil
+                },
+                onPartialApprove: { decisions, modifiedContent in
+                    NotificationCenter.default.post(
+                        name: .TermAIFileChangeApprovalResponse,
+                        object: nil,
+                        userInfo: [
+                            "approvalId": approval.id,
+                            "approved": true,
+                            "partialApproval": true,
+                            "hunkDecisions": decisions,
+                            "modifiedContent": modifiedContent
                         ]
                     )
                     pendingFileChangeApproval = nil
@@ -324,159 +302,6 @@ struct ChatContainerView: View {
         Task {
             await agent.runTests()
         }
-    }
-}
-
-// MARK: - Pending Command Approval Model
-struct PendingCommandApproval: Identifiable {
-    let id = UUID()
-    let approvalId: UUID
-    let sessionId: UUID
-    let command: String
-}
-
-// MARK: - Command Approval Sheet
-struct CommandApprovalSheet: View {
-    let approval: PendingCommandApproval
-    let onApprove: (String) -> Void
-    let onReject: () -> Void
-    
-    @State private var editedCommand: String = ""
-    @State private var isEditing: Bool = false
-    @Environment(\.colorScheme) var colorScheme
-    
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: "exclamationmark.shield.fill")
-                    .font(.system(size: 24))
-                    .foregroundColor(.orange)
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Command Approval Required")
-                        .font(.headline)
-                    Text("The agent wants to execute the following command")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
-            }
-            .padding(20)
-            .background(Color.orange.opacity(0.1))
-            
-            Divider()
-            
-            // Command display/edit area
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Command")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.secondary)
-                    
-                    Spacer()
-                    
-                    Button(action: { isEditing.toggle() }) {
-                        Label(isEditing ? "Done" : "Edit", systemImage: isEditing ? "checkmark" : "pencil")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.accentColor)
-                }
-                
-                if isEditing {
-                    TextEditor(text: $editedCommand)
-                        .font(.system(size: 13, design: .monospaced))
-                        .scrollContentBackground(.hidden)
-                        .padding(12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.accentColor.opacity(0.5), lineWidth: 2)
-                        )
-                        .frame(minHeight: 80, maxHeight: 200)
-                } else {
-                    ScrollView {
-                        Text(editedCommand)
-                            .font(.system(size: 13, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
-                    )
-                    .frame(minHeight: 60, maxHeight: 200)
-                }
-                
-                // Warning message for potentially dangerous commands
-                if isPotentiallyDangerous(editedCommand) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.red)
-                        Text("This command may modify or delete files. Please review carefully.")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.red.opacity(0.1))
-                    )
-                }
-            }
-            .padding(20)
-            
-            Divider()
-            
-            // Action buttons
-            HStack(spacing: 12) {
-                Button(action: onReject) {
-                    Text("Reject")
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.red.opacity(0.5), lineWidth: 1)
-                )
-                .foregroundColor(.red)
-                
-                Button(action: { onApprove(editedCommand) }) {
-                    Text("Approve & Run")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.green)
-                        )
-                        .foregroundColor(.white)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(20)
-        }
-        .frame(width: 500)
-        .background(colorScheme == .dark ? Color(white: 0.1) : Color.white)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .onAppear {
-            editedCommand = approval.command
-        }
-    }
-    
-    private func isPotentiallyDangerous(_ command: String) -> Bool {
-        let dangerous = ["rm ", "rm\t", "rmdir", "mv ", "mv\t", "> ", ">> ", 
-                         "sudo ", "chmod ", "chown ", "dd ", "mkfs", "format"]
-        let lower = command.lowercased()
-        return dangerous.contains { lower.contains($0) }
     }
 }
 
@@ -1383,7 +1208,7 @@ struct ContextUsageIndicator: View {
             return session.currentContextTokens
         }
         // Also show if we have agent context accumulated (even if not actively running)
-        if session.agentModeEnabled && !session.agentContextLog.isEmpty {
+        if !session.agentContextLog.isEmpty {
             return session.currentContextTokens
         }
         // For normal chat, show after first assistant response

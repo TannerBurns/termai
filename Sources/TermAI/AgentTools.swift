@@ -58,8 +58,9 @@ protocol ShellCommandExecutor: AnyObject {
     /// - Parameters:
     ///   - command: The shell command to execute
     ///   - requireApproval: Whether to require user approval before execution
+    ///   - timeout: Optional custom timeout (nil uses default from settings)
     /// - Returns: Tuple of (success, output, exitCode)
-    func executeShellCommand(_ command: String, requireApproval: Bool) async -> (success: Bool, output: String, exitCode: Int)
+    func executeShellCommand(_ command: String, requireApproval: Bool, timeout: TimeInterval?) async -> (success: Bool, output: String, exitCode: Int)
 }
 
 // MARK: - Plan and Track Delegate Protocol
@@ -542,6 +543,91 @@ final class AgentToolRegistry {
         Array(tools.values)
     }
     
+    // MARK: - Tool Categories by Agent Mode
+    
+    /// Tools available in Scout mode (read-only exploration)
+    private static let scoutToolNames: Set<String> = [
+        "read_file",
+        "list_dir",
+        "search_files",
+        "search_output",
+        "check_process",
+        "http_request",
+        "memory"
+    ]
+    
+    /// Tools added in Copilot mode (file operations, no shell)
+    private static let copilotToolNames: Set<String> = [
+        "write_file",
+        "edit_file",
+        "insert_lines",
+        "delete_lines",
+        "delete_file",
+        "plan_and_track"
+    ]
+    
+    /// Tools added in Pilot mode (shell execution)
+    private static let pilotToolNames: Set<String> = [
+        "shell",
+        "run_background",
+        "stop_process"
+    ]
+    
+    /// Get tools available for a specific agent mode
+    func tools(for mode: AgentMode) -> [AgentTool] {
+        let allowedNames: Set<String>
+        switch mode {
+        case .scout:
+            allowedNames = Self.scoutToolNames
+        case .copilot:
+            allowedNames = Self.scoutToolNames.union(Self.copilotToolNames)
+        case .pilot:
+            allowedNames = Self.scoutToolNames.union(Self.copilotToolNames).union(Self.pilotToolNames)
+        }
+        
+        return tools.values.filter { allowedNames.contains($0.name) }
+    }
+    
+    /// Get tool schemas for a specific agent mode and provider
+    func schemas(for mode: AgentMode, provider: ProviderType) -> [[String: Any]] {
+        tools(for: mode).map { tool in
+            switch provider {
+            case .cloud(.openai):
+                return tool.schema.toOpenAI()
+            case .cloud(.anthropic):
+                return tool.schema.toAnthropic()
+            case .cloud(.google):
+                return tool.schema.toGoogle()
+            case .local:
+                return tool.schema.toOpenAI()
+            }
+        }
+    }
+    
+    /// Get tool schemas wrapped for Google API format for a specific mode
+    func googleToolsPayload(for mode: AgentMode) -> [[String: Any]] {
+        [["functionDeclarations": tools(for: mode).map { $0.schema.toGoogle() }]]
+    }
+    
+    /// Get tool descriptions for a specific agent mode
+    func toolDescriptions(for mode: AgentMode) -> String {
+        tools(for: mode).map { "- \($0.name): \($0.description)" }.sorted().joined(separator: "\n")
+    }
+    
+    /// Check if a tool is available in the given mode
+    func isToolAvailable(_ toolName: String, in mode: AgentMode) -> Bool {
+        let allowedNames: Set<String>
+        switch mode {
+        case .scout:
+            allowedNames = Self.scoutToolNames
+        case .copilot:
+            allowedNames = Self.scoutToolNames.union(Self.copilotToolNames)
+        case .pilot:
+            allowedNames = Self.scoutToolNames.union(Self.copilotToolNames).union(Self.pilotToolNames)
+        }
+        return allowedNames.contains(toolName)
+    }
+    
     /// Set the shell command executor (called by ChatSession when starting agent mode)
     func setShellExecutor(_ executor: ShellCommandExecutor?) {
         shellCommandTool?.executor = executor
@@ -742,11 +828,16 @@ struct ReadFileTool: AgentTool {
                 return .success(numberedLines)
             }
             
-            // Limit output size for very large files
-            let maxSize = AgentSettings.shared.maxOutputCapture
+            // Get dynamic output limit from settings
+            // Use _contextTokens arg if provided by session, otherwise use minimum
+            let contextTokens = args["_contextTokens"].flatMap { Int($0) } ?? 32_000
+            let maxSize = AgentSettings.shared.effectiveOutputCaptureLimit(forContextTokens: contextTokens)
+            
             if content.count > maxSize {
                 let lines = content.components(separatedBy: .newlines)
-                return .success("File has \(lines.count) lines, \(content.count) chars. Use start_line/end_line to read specific sections.\nFirst \(maxSize) chars:\n\(String(content.prefix(maxSize)))")
+                // Use head+tail truncation to show file structure (imports at top, exports/main at bottom)
+                let truncated = SmartTruncator.headTail(content, maxChars: maxSize, headRatio: 0.6)
+                return .success("File has \(lines.count) lines, \(content.count) chars. Use start_line/end_line for specific sections.\n\n\(truncated)")
             }
             
             return .success(content)
@@ -760,12 +851,12 @@ struct ReadFileTool: AgentTool {
 
 struct WriteFileTool: AgentTool, FileOperationTool {
     let name = "write_file"
-    let description = "Write content to a file. Args: path (required), content (required), mode ('overwrite' or 'append', default: overwrite)"
+    let description = "Create a NEW file or COMPLETELY REWRITE an existing file. For small edits to existing files, prefer edit_file, insert_lines, or delete_lines instead. Args: path (required), content (required), mode ('overwrite' or 'append', default: overwrite)"
     
     var schema: ToolSchema {
         ToolSchema(
             name: name,
-            description: "Write content to a file, creating it if it doesn't exist",
+            description: "Create a NEW file or COMPLETELY REWRITE an existing file. For small changes to existing files, prefer edit_file (search/replace), insert_lines, or delete_lines instead - they are safer and more precise.",
             parameters: [
                 ToolParameter(name: "path", type: .string, description: "Path to the file to write", required: true),
                 ToolParameter(name: "content", type: .string, description: "Content to write to the file", required: true),
@@ -889,12 +980,12 @@ struct WriteFileTool: AgentTool, FileOperationTool {
 
 struct EditFileTool: AgentTool, FileOperationTool {
     let name = "edit_file"
-    let description = "Edit a file by replacing specific text. Args: path (required), old_text (required - exact text to find), new_text (required - replacement text), replace_all (optional, 'true'/'false', default: false)"
+    let description = "PREFERRED for modifying existing files. Search and replace specific text. Args: path (required), old_text (required - exact text to find, include enough context to be unique), new_text (required - replacement text), replace_all (optional, 'true'/'false', default: false)"
     
     var schema: ToolSchema {
         ToolSchema(
             name: name,
-            description: "Edit a file by finding and replacing specific text",
+            description: "PREFERRED tool for modifying existing files. Finds and replaces specific text. Include enough surrounding context in old_text to ensure a unique match.",
             parameters: [
                 ToolParameter(name: "path", type: .string, description: "Path to the file to edit", required: true),
                 ToolParameter(name: "old_text", type: .string, description: "Exact text to find and replace (must match exactly including whitespace)", required: true),
@@ -1963,14 +2054,15 @@ struct HttpRequestTool: AgentTool {
 /// This tool delegates to a ShellCommandExecutor (typically ChatSession) for actual execution
 final class ShellCommandTool: AgentTool {
     let name = "shell"
-    let description = "Execute a shell command in the user's terminal. Environment changes (cd, source, export) persist. Args: command (required)"
+    let description = "Execute a shell command in the user's terminal. Environment changes (cd, source, export) persist. Args: command (required), timeout (optional - seconds to wait for output)"
     
     var schema: ToolSchema {
         ToolSchema(
             name: name,
             description: "Execute a shell command in the user's terminal. Environment changes (cd, source, export) persist in the session.",
             parameters: [
-                ToolParameter(name: "command", type: .string, description: "Shell command to execute", required: true)
+                ToolParameter(name: "command", type: .string, description: "Shell command to execute", required: true),
+                ToolParameter(name: "timeout", type: .integer, description: "Seconds to wait for command output (default: 300, use higher for long builds/tests)", required: false)
             ]
         )
     }
@@ -1991,8 +2083,11 @@ final class ShellCommandTool: AgentTool {
             return .failure("Shell command executor not configured. This is an internal error.")
         }
         
+        // Parse optional timeout (nil uses default from settings)
+        let timeout: TimeInterval? = args["timeout"].flatMap { Double($0) }
+        
         // Execute through the session's terminal
-        let result = await executor.executeShellCommand(command, requireApproval: AgentSettings.shared.requireCommandApproval)
+        let result = await executor.executeShellCommand(command, requireApproval: AgentSettings.shared.requireCommandApproval, timeout: timeout)
         
         if result.success {
             var output = result.output

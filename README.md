@@ -26,20 +26,61 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 ### Terminal
 - **SwiftTerm Powered** — Full terminal emulation with ANSI color support
 - **Multiple Themes** — System, Xterm, VGA Dark, Terminal.app, Pale
+- **Terminal Bell** — Choose between sound, visual flash, or disabled
 - **Context Actions** — Select text or capture last output to send to chat
 - **Code Execution** — Run shell commands directly from chat code blocks
 - **Favorite Commands** — Quick-access toolbar with AI-generated emoji icons
 
 ### Agent Mode
-When enabled, the AI can autonomously execute commands and use tools to complete complex tasks:
+When enabled, the AI can autonomously execute commands and use tools to complete complex tasks.
+
+#### Agent Modes
+Three levels of agent autonomy to match your workflow:
+
+| Mode | Icon | Description | Capabilities |
+|------|------|-------------|--------------|
+| **Scout** | 🔭 | Read-only exploration | Read files, search, browse directories, HTTP requests |
+| **Copilot** | ✈️ | File operations, no shell | All Scout tools + write/edit files, plan & track |
+| **Pilot** | 🛫 | Full autonomous agent | All tools including shell execution |
+
+#### Agent Profiles
+Task-specific behavior profiles that adapt planning, reflection, and execution style:
+
+| Profile | Description |
+|---------|-------------|
+| **Auto** | Dynamically switches between profiles based on the current task |
+| **General** | Balanced general-purpose assistant |
+| **Coding** | SOLID principles, clean architecture, testable code |
+| **Testing** | TDD, test coverage, edge cases, quality assurance |
+| **DevOps** | Rollback-first planning, infrastructure safety |
+| **Documentation** | Outline-first, audience awareness, consistency |
+| **Product Management** | User stories, acceptance criteria, scope tracking |
+
+#### Agent Features
 - **Planning Phase** — Generates a step-by-step plan before execution
 - **Periodic Reflection** — Pauses to assess progress and adjust strategy
 - **Goal Tracking** — Visual task checklists to monitor progress
 - **Built-in Tools** — File operations, shell commands, HTTP requests, process management, memory
 - **File Diff Preview** — IDE-style side-by-side diff viewer before applying file changes
+- **Per-Hunk Approvals** — Accept or reject individual changes within a file
 - **Verification** — Tests and verifies work before declaring completion
 - **Safety Controls** — Optional command and file edit approval with auto-approve for read-only commands
 - **Stuck Detection** — Automatically detects loops and adjusts strategy
+- **Dynamic Context Scaling** — Context limits scale with model size for optimal performance
+- **Smart Output Truncation** — Intelligent truncation that preserves errors and important content
+
+#### Inline Approvals
+Command and file change approvals now appear inline within the chat conversation, allowing you to:
+- Approve or reject directly in context
+- View file diffs before accepting changes
+- Accept partial changes (individual hunks)
+- Continue chatting while awaiting approval
+
+#### System Notifications
+When agent approval is needed and the app isn't in focus:
+- **macOS Notifications** — Get alerted when the agent needs approval
+- **Sound Control** — Enable or disable notification sounds
+- **Click to Focus** — Clicking a notification brings TermAI to the foreground
 
 ### Terminal Suggestion Agent
 An AI-powered command suggestion system that proactively offers relevant commands based on context:
@@ -71,7 +112,7 @@ An AI-powered command suggestion system that proactively offers relevant command
 ### Settings
 - **Chat & Model** — Per-session provider, model, temperature, and system prompt
 - **Providers** — Configure API keys and local provider URLs
-- **Agent** — Execution limits, planning, reflection, safety controls
+- **Agent** — Mode, profile, execution limits, planning, reflection, safety controls
 - **Favorites** — Manage model and command favorites
 - **Appearance** — App theme (light/dark/system) and terminal color schemes
 - **Usage** — Token usage dashboard with charts and breakdowns
@@ -162,6 +203,11 @@ ollama pull llama3.1
 
 For local models, you can set a custom context size if auto-detection is incorrect. Common sizes: 4K, 8K, 32K, 128K tokens.
 
+**Dynamic Context Scaling:** Agent context limits now scale automatically with model size:
+- Output capture scales with model context (default 15% per output)
+- Agent working memory scales proportionally (default 40% of context)
+- Configurable floor and ceiling limits prevent extremes
+
 ## Using the App
 
 ### Terminal to Chat
@@ -178,44 +224,52 @@ Code blocks labeled as shell (`bash`, `sh`, `zsh`) show quick actions:
 
 ### Agent Mode
 
-Toggle agent mode with the brain icon in the chat header. When enabled:
+Toggle agent mode with the mode selector in the chat header. Choose your mode:
+
+1. **Scout** — Explore and understand the codebase without making changes
+2. **Copilot** — Read and write files, but no shell command execution
+3. **Pilot** — Full autonomous agent with shell access
+
+When enabled:
 
 1. Describe your goal in natural language
-2. The agent plans the approach
+2. The agent plans the approach (profile-specific planning)
 3. Commands execute automatically with output captured
 4. The agent iterates until the goal is complete
 
 **Available Tools:**
 
-| Tool | Description |
-|------|-------------|
-| `shell` | Execute commands in the terminal (environment changes persist) |
-| `read_file` | Read file contents with optional line range |
-| `write_file` | Write or append content to files |
-| `edit_file` | Search and replace text in files |
-| `insert_lines` | Insert lines at a specific position |
-| `delete_lines` | Delete a range of lines |
-| `delete_file` | Delete a file (always requires approval) |
-| `list_dir` | List directory contents |
-| `search_files` | Find files by name pattern |
-| `search_output` | Search through previous command outputs |
-| `memory` | Save and recall notes during execution |
-| `plan_and_track` | Set goals and manage task checklists |
-| `run_background` | Start background processes (e.g., servers) |
-| `check_process` | Check if a process is running |
-| `stop_process` | Stop a background process |
-| `http_request` | Make HTTP requests to test APIs |
+| Tool | Description | Modes |
+|------|-------------|-------|
+| `read_file` | Read file contents with optional line range | Scout+ |
+| `list_dir` | List directory contents | Scout+ |
+| `search_files` | Find files by name pattern | Scout+ |
+| `search_output` | Search through previous command outputs | Scout+ |
+| `check_process` | Check if a process is running | Scout+ |
+| `http_request` | Make HTTP requests to test APIs | Scout+ |
+| `memory` | Save and recall notes during execution | Scout+ |
+| `write_file` | Write or append content to files | Copilot+ |
+| `edit_file` | Search and replace text in files | Copilot+ |
+| `insert_lines` | Insert lines at a specific position | Copilot+ |
+| `delete_lines` | Delete a range of lines | Copilot+ |
+| `delete_file` | Delete a file (always requires approval) | Copilot+ |
+| `plan_and_track` | Set goals and manage task checklists | Copilot+ |
+| `shell` | Execute commands in the terminal | Pilot |
+| `run_background` | Start background processes (e.g., servers) | Pilot |
+| `stop_process` | Stop a background process | Pilot |
 
 ### Agent Settings
 
 Configure agent behavior in **Settings > Agent**:
 
-- **Default Behavior** — Enable agent mode by default for new sessions
+- **Default Mode** — Scout, Copilot, or Pilot for new sessions
+- **Default Profile** — Auto, General, Coding, Testing, DevOps, Documentation, or PM
 - **Execution Limits** — Max steps, fix attempts, command timeout
 - **Planning & Reflection** — Enable/disable planning phase, reflection interval
-- **Context & Memory** — Output capture limits, context window size
-- **Long Output Handling** — Automatic summarization of verbose outputs
+- **Context & Memory** — Dynamic scaling percentages, floor/ceiling limits
+- **Long Output Handling** — Automatic smart truncation of verbose outputs
 - **Safety** — Require command approval, auto-approve read-only, require file edit approval
+- **Notifications** — System notifications when approval is needed
 - **Verbose Logging** — Debug output for troubleshooting
 
 ### Suggestion Agent Settings
@@ -279,6 +333,12 @@ Choose a color scheme for your terminal:
 
 Each theme includes a live preview and color palette display.
 
+### Terminal Bell
+Choose how the terminal bell behaves:
+- **Sound** — Play system alert sound
+- **Visual** — Flash the terminal window
+- **Off** — Disable terminal bell
+
 ## Troubleshooting
 
 | Issue | Solution |
@@ -288,6 +348,7 @@ Each theme includes a live preview and color palette display.
 | Streaming doesn't start | Check network access and provider compatibility |
 | Agent stuck in loop | Increase stuck detection threshold or reduce max iterations |
 | Context limit warnings | Switch to a model with larger context or clear chat history |
+| Approval notifications not showing | Grant notification permission in System Preferences |
 
 ## Dependencies
 
