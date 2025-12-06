@@ -24,6 +24,8 @@ final class PTYModel: ObservableObject {
             }
         }
     }
+    /// Timestamp of last OSC 7 CWD update - used to prevent buffer extraction from overwriting
+    var lastOsc7UpdateTime: Date? = nil
     @Published var lastExitCode: Int32 = 0
     // Controls whether to perform heavy buffer processing on terminal updates
     @Published var captureActive: Bool = false
@@ -212,6 +214,57 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             }
         }
     }
+    
+    // MARK: - Terminal Bell
+    
+    /// Override bell to implement user-configurable behavior (sound, visual, or off)
+    override func bell(source: Terminal) {
+        // Bell may be called from background thread, dispatch UI operations to main
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            let mode = AgentSettings.shared.terminalBellMode
+            ptyLogger.info("Terminal bell triggered, mode: \(mode.rawValue)")
+            
+            switch mode {
+            case .sound:
+                // Play the system alert sound
+                ptyLogger.debug("Playing system beep")
+                NSSound.beep()
+            case .visual:
+                // Flash the terminal view briefly (visual bell)
+                ptyLogger.debug("Performing visual bell")
+                self.performVisualBell()
+            case .off:
+                // Do nothing - bell is disabled
+                ptyLogger.debug("Bell disabled")
+                break
+            }
+        }
+    }
+    
+    /// Perform a visual bell - brief flash effect on the terminal
+    private func performVisualBell() {
+        // Create a flash overlay
+        let flash = NSView(frame: self.bounds)
+        flash.wantsLayer = true
+        flash.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.3).cgColor
+        flash.alphaValue = 0
+        self.addSubview(flash)
+        
+        // Animate flash in and out
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.05
+            flash.animator().alphaValue = 1
+        }, completionHandler: {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.1
+                flash.animator().alphaValue = 0
+            }, completionHandler: {
+                flash.removeFromSuperview()
+            })
+        })
+    }
 
     override func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
         super.rangeChanged(source: source, startY: startY, endY: endY)
@@ -247,9 +300,13 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             model.hasSelection = !selection.isEmpty
             model.visibleRows = self.terminal.rows
             
-            // Always extract CWD from buffer for real-time directory tracking
-            // OSC 7 sequences emitted by precmd will be captured here
-            if let extractedCwd = Self.extractCwdFromBuffer(text) {
+            // Extract CWD from buffer as fallback, but skip if OSC 7 recently updated
+            // This prevents buffer extraction from overwriting correct OSC 7 values
+            // (buffer may contain old prompts/command lines with stale paths)
+            let osc7GracePeriod: TimeInterval = 0.5  // 500ms grace period
+            let recentOsc7Update = model.lastOsc7UpdateTime.map { Date().timeIntervalSince($0) < osc7GracePeriod } ?? false
+            
+            if !recentOsc7Update, let extractedCwd = Self.extractCwdFromBuffer(text) {
                 model.currentWorkingDirectory = extractedCwd
             }
             // Note: Exit code is captured via OSC 7777 handler registered with SwiftTerm
@@ -627,6 +684,8 @@ struct SwiftTermView: NSViewRepresentable {
                 path = path.removingPercentEncoding ?? path
                 if !path.isEmpty {
                     DispatchQueue.main.async {
+                        // Set timestamp BEFORE updating CWD to prevent buffer extraction race
+                        model?.lastOsc7UpdateTime = Date()
                         model?.currentWorkingDirectory = path
                     }
                 }
@@ -740,6 +799,7 @@ struct SwiftTermView: NSViewRepresentable {
         func send(source: TerminalView, data: ArraySlice<UInt8>) {}
         func scrolled(source: TerminalView, position: Double) {}
         func requestOpenLink(source: TerminalView, link: String, params: [String : String]) {}
+        // Bell is handled by BridgedLocalProcessTerminalView.bell(source:) override
         func bell(source: TerminalView) {}
         func clipboardCopy(source: TerminalView, content: Data) {}
         func iTermContent(source: TerminalView, content: ArraySlice<UInt8>) {}

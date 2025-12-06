@@ -468,16 +468,21 @@ extension SystemInfo {
     AVAILABLE TOOLS:
     
     FILE OPERATIONS:
-    - write_file: Create/overwrite a file (args: path, content, mode)
-    - edit_file: Search and replace in file (args: path, old_text, new_text, replace_all)
+    For EXISTING files, prefer surgical edits:
+    - edit_file: PREFERRED - Search and replace text (args: path, old_text, new_text, replace_all)
     - insert_lines: Insert at line number (args: path, line_number, content)
     - delete_lines: Delete line range (args: path, start_line, end_line)
+    
+    For NEW files or complete rewrites:
+    - write_file: Create new file or fully rewrite existing (args: path, content, mode)
+    
+    Reading & navigation:
     - read_file: Read file contents (args: path, start_line, end_line)
     - list_dir: List directory (args: path, recursive)
     - search_files: Find files by pattern (args: path, pattern, recursive)
     
     SHELL & PROCESS:
-    - command: Execute a shell command
+    - shell: Execute a shell command (args: command, timeout - seconds to wait, e.g. 600 for long builds/tests)
     - run_background: Start server/process in background (args: command, wait_for, timeout)
     - check_process: Check if process is running (args: pid, port, or list=true)
     - stop_process: Stop a background process (args: pid, or all=true)
@@ -496,6 +501,12 @@ extension SystemInfo {
     - Include the checklist item number: {"step":"description", "tool":"tool_name", "tool_args":{...}, "checklist_item": 1}
     - For shell commands: {"step":"description", "command":"shell command", "tool":"command", "checklist_item": 1}
     
+    DIRECTORY HYGIENE:
+    - The user's starting directory is provided in the context as STARTING_CWD
+    - You may cd to other directories as needed during execution
+    - Before declaring completion, cd back to the starting directory so the user's terminal state is preserved
+    - This prevents user confusion about where they are after the agent finishes
+    
     EXAMPLE WORKFLOW FOR API CREATION:
     1. Create project structure (mkdir, npm init)
     2. Install dependencies (npm install)
@@ -504,6 +515,7 @@ extension SystemInfo {
     5. Start server in background (run_background with wait_for="listening")
     6. Test endpoints (http_request to verify responses)
     7. Stop server when done (stop_process)
+    8. Return to starting directory (cd back to STARTING_CWD)
     """
     
     // Hard-coded system prompt template
@@ -634,6 +646,13 @@ extension SystemInfo {
     COMPLETION:
     - When the goal is fully achieved, provide a summary response (no tool calls)
     - The summary should describe what was done and confirm the goal is met
+    - IMPORTANT: If you changed directories during execution, return to the starting directory before finishing
+    
+    DIRECTORY HYGIENE:
+    - The user's starting directory is provided in the context as STARTING_CWD
+    - You may cd to other directories as needed during execution
+    - Before declaring completion, cd back to the starting directory so the user's terminal state is preserved
+    - This prevents user confusion about where they are after the agent finishes
     
     SAFETY:
     - Always consider safety before destructive operations

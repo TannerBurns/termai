@@ -4,16 +4,50 @@ import AppKit
 // MARK: - File Diff Approval Sheet
 
 /// Modal sheet for approving file changes with diff preview
+/// Supports per-hunk accept/reject for granular control over changes
 struct FileChangeApprovalSheet: View {
     let approval: PendingFileChangeApproval
     let onApprove: () -> Void
     let onReject: () -> Void
     
+    /// Optional callback for partial approval with hunk decisions
+    var onPartialApprove: (([UUID: HunkDecision], String) -> Void)? = nil
+    
     @Environment(\.colorScheme) var colorScheme
     @State private var diff: FileDiff?
+    @State private var hunkDecisions: [UUID: HunkDecision] = [:]
     
     private var theme: DiffTheme {
         colorScheme == .dark ? .dark : .light
+    }
+    
+    /// Whether any hunks have been decided (not pending)
+    private var hasHunkDecisions: Bool {
+        !hunkDecisions.isEmpty && hunkDecisions.values.contains(where: { $0 != .pending })
+    }
+    
+    /// Whether all hunks are rejected
+    private var allHunksRejected: Bool {
+        guard let diff = diff, !diff.hunks.isEmpty else { return false }
+        return diff.hunks.allSatisfy { hunkDecisions[$0.id] == .rejected }
+    }
+    
+    /// Whether all hunks are accepted (or pending - default to accept)
+    private var allHunksAccepted: Bool {
+        guard let diff = diff, !diff.hunks.isEmpty else { return true }
+        return diff.hunks.allSatisfy { hunkDecisions[$0.id] != .rejected }
+    }
+    
+    /// Count of accepted hunks
+    private var acceptedHunkCount: Int {
+        guard let diff = diff else { return 0 }
+        return diff.hunks.filter { hunkDecisions[$0.id] == .accepted || hunkDecisions[$0.id] == nil }.count
+    }
+    
+    /// Count of rejected hunks
+    private var rejectedHunkCount: Int {
+        guard let diff = diff else { return 0 }
+        return diff.hunks.filter { hunkDecisions[$0.id] == .rejected }.count
     }
     
     var body: some View {
@@ -23,9 +57,14 @@ struct FileChangeApprovalSheet: View {
             
             Divider()
             
-            // Diff view
+            // Diff view with hunk-level actions
             if let diff = diff {
-                FileDiffView(fileChange: approval.fileChange, diff: diff)
+                FileDiffView(
+                    fileChange: approval.fileChange,
+                    diff: diff,
+                    isApprovalMode: true,
+                    hunkDecisions: $hunkDecisions
+                )
             } else {
                 loadingView
             }
@@ -64,9 +103,37 @@ struct FileChangeApprovalSheet: View {
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(theme.foreground)
                 
-                Text("The agent wants to \(approval.fileChange.operationType.description.lowercased()) this file")
-                    .font(.system(size: 12))
-                    .foregroundColor(theme.secondaryText)
+                HStack(spacing: 8) {
+                    Text("The agent wants to \(approval.fileChange.operationType.description.lowercased()) this file")
+                        .font(.system(size: 12))
+                        .foregroundColor(theme.secondaryText)
+                    
+                    // Hunk decision summary
+                    if hasHunkDecisions, let diff = diff {
+                        Text("•")
+                            .foregroundColor(theme.secondaryText)
+                        
+                        if acceptedHunkCount > 0 {
+                            HStack(spacing: 2) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 9))
+                                Text("\(acceptedHunkCount)")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundColor(theme.addedText)
+                        }
+                        
+                        if rejectedHunkCount > 0 {
+                            HStack(spacing: 2) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 9))
+                                Text("\(rejectedHunkCount)")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundColor(theme.removedText)
+                        }
+                    }
+                }
             }
             
             Spacer()
@@ -111,19 +178,25 @@ struct FileChangeApprovalSheet: View {
                     .font(.system(size: 11))
                     .foregroundColor(theme.secondaryText)
                 
-                Text("Review the changes above before approving")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.secondaryText)
+                if hasHunkDecisions && !allHunksAccepted && !allHunksRejected {
+                    Text("Partial approval: \(acceptedHunkCount) hunks will be applied")
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
+                } else {
+                    Text("Review the changes above before approving")
+                        .font(.system(size: 11))
+                        .foregroundColor(theme.secondaryText)
+                }
             }
             
             Spacer()
             
-            // Reject button
+            // Reject button (rejects all)
             Button(action: onReject) {
                 HStack(spacing: 6) {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .semibold))
-                    Text("Reject")
+                    Text("Reject All")
                         .font(.system(size: 13, weight: .medium))
                 }
                 .foregroundColor(.red)
@@ -136,69 +209,153 @@ struct FileChangeApprovalSheet: View {
             }
             .buttonStyle(.plain)
             
-            // Approve button
-            Button(action: onApprove) {
+            // Approve button - handles both full and partial approval
+            Button(action: handleApprove) {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .semibold))
-                    Text("Approve & Apply")
-                        .font(.system(size: 13, weight: .semibold))
+                    
+                    if hasHunkDecisions && rejectedHunkCount > 0 && !allHunksRejected {
+                        Text("Apply \(acceptedHunkCount) Hunks")
+                            .font(.system(size: 13, weight: .semibold))
+                    } else {
+                        Text("Approve & Apply")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
                 .background(
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.green)
+                        .fill(allHunksRejected ? Color.gray : Color.green)
                 )
             }
             .buttonStyle(.plain)
+            .disabled(allHunksRejected)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
         .background(theme.headerBackground)
+    }
+    
+    private func handleApprove() {
+        guard let diff = diff else {
+            onApprove()
+            return
+        }
+        
+        // Check if we have partial approval (some hunks rejected)
+        let hasRejections = diff.hunks.contains { hunkDecisions[$0.id] == .rejected }
+        
+        if hasRejections, let partialCallback = onPartialApprove {
+            // Generate content with only accepted hunks
+            // For hunks without explicit decisions, default to accepted
+            var finalDecisions = hunkDecisions
+            for hunk in diff.hunks {
+                if finalDecisions[hunk.id] == nil {
+                    finalDecisions[hunk.id] = .accepted
+                }
+            }
+            
+            let modifiedContent = diff.applyPartialHunks(decisions: finalDecisions)
+            partialCallback(finalDecisions, modifiedContent)
+        } else {
+            // Full approval - all hunks accepted
+            onApprove()
+        }
     }
 }
 
 // MARK: - File Diff Detail Sheet
 
 /// Sheet for viewing file changes after they've been applied (non-approval mode)
+/// Supports navigation through file change history when provided
 struct FileDiffDetailSheet: View {
-    let fileChange: FileChange
+    @State private var currentFileChange: FileChange
     let onDismiss: () -> Void
+    
+    /// Optional history for navigation - when provided, shows prev/next buttons
+    var history: [DiffHistoryEntry]?
+    
+    /// Callback when navigating to a different file change
+    var onNavigate: ((FileChange) -> Void)?
     
     @Environment(\.colorScheme) var colorScheme
     @State private var diff: FileDiff?
+    @State private var showHistoryPanel = false
     
     private var theme: DiffTheme {
         colorScheme == .dark ? .dark : .light
     }
     
+    /// Initialize with just a file change (no history navigation)
+    init(fileChange: FileChange, onDismiss: @escaping () -> Void) {
+        self._currentFileChange = State(initialValue: fileChange)
+        self.onDismiss = onDismiss
+        self.history = nil
+        self.onNavigate = nil
+    }
+    
+    /// Initialize with history for navigation
+    init(fileChange: FileChange, history: [DiffHistoryEntry], onDismiss: @escaping () -> Void, onNavigate: ((FileChange) -> Void)? = nil) {
+        self._currentFileChange = State(initialValue: fileChange)
+        self.onDismiss = onDismiss
+        self.history = history
+        self.onNavigate = onNavigate
+    }
+    
+    private var currentIndex: Int? {
+        history?.firstIndex { $0.fileChange.id == currentFileChange.id }
+    }
+    
+    private var canNavigatePrevious: Bool {
+        guard let index = currentIndex else { return false }
+        return index > 0
+    }
+    
+    private var canNavigateNext: Bool {
+        guard let index = currentIndex, let history = history else { return false }
+        return index < history.count - 1
+    }
+    
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            header
-            
-            Divider()
-            
-            // Diff view
-            if let diff = diff {
-                FileDiffView(fileChange: fileChange, diff: diff)
-            } else {
-                loadingView
+        HStack(spacing: 0) {
+            // Main content
+            VStack(spacing: 0) {
+                // Header with navigation
+                header
+                
+                Divider()
+                
+                // Diff view
+                if let diff = diff {
+                    FileDiffView(fileChange: currentFileChange, diff: diff)
+                } else {
+                    loadingView
+                }
+                
+                Divider()
+                
+                // Footer
+                footer
             }
             
-            Divider()
-            
-            // Footer
-            footer
+            // History sidebar (when toggled)
+            if showHistoryPanel, let history = history, !history.isEmpty {
+                Divider()
+                historyPanel(history: history)
+            }
         }
         .frame(minWidth: 700, minHeight: 500)
-        .frame(maxWidth: 1000, maxHeight: 700)
+        .frame(maxWidth: showHistoryPanel ? 1200 : 1000, maxHeight: 700)
         .background(theme.background)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .onAppear {
-            diff = FileDiff(fileChange: fileChange)
+            diff = FileDiff(fileChange: currentFileChange)
+        }
+        .onChange(of: currentFileChange.id) { _ in
+            diff = FileDiff(fileChange: currentFileChange)
         }
     }
     
@@ -206,23 +363,69 @@ struct FileDiffDetailSheet: View {
     
     private var header: some View {
         HStack(spacing: 12) {
+            // Navigation buttons (when history available)
+            if history != nil {
+                HStack(spacing: 4) {
+                    Button(action: navigatePrevious) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(canNavigatePrevious ? .accentColor : theme.secondaryText.opacity(0.3))
+                            .frame(width: 28, height: 28)
+                            .background(
+                                Circle()
+                                    .fill(theme.headerBackground)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canNavigatePrevious)
+                    
+                    Button(action: navigateNext) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(canNavigateNext ? .accentColor : theme.secondaryText.opacity(0.3))
+                            .frame(width: 28, height: 28)
+                            .background(
+                                Circle()
+                                    .fill(theme.headerBackground)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canNavigateNext)
+                }
+            }
+            
             // Icon
             ZStack {
                 Circle()
                     .fill(operationColor.opacity(0.15))
                     .frame(width: 40, height: 40)
                 
-                Image(systemName: fileChange.operationType.icon)
+                Image(systemName: currentFileChange.operationType.icon)
                     .font(.system(size: 18))
                     .foregroundColor(operationColor)
             }
             
             VStack(alignment: .leading, spacing: 4) {
-                Text("File Changes")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(theme.foreground)
+                HStack(spacing: 8) {
+                    Text("File Changes")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(theme.foreground)
+                    
+                    // Position indicator when history available
+                    if let index = currentIndex, let history = history {
+                        Text("\(index + 1) of \(history.count)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(theme.secondaryText)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule()
+                                    .fill(theme.headerBackground)
+                            )
+                    }
+                }
                 
-                Text(fileChange.filePath)
+                Text(currentFileChange.filePath)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundColor(theme.secondaryText)
                     .lineLimit(1)
@@ -230,6 +433,26 @@ struct FileDiffDetailSheet: View {
             }
             
             Spacer()
+            
+            // History toggle button (when history available)
+            if let history = history, !history.isEmpty {
+                Button(action: { withAnimation { showHistoryPanel.toggle() } }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 11))
+                        Text("History")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(showHistoryPanel ? .white : .accentColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(showHistoryPanel ? Color.accentColor : Color.accentColor.opacity(0.1))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
             
             // Close button
             Button(action: onDismiss) {
@@ -250,13 +473,130 @@ struct FileDiffDetailSheet: View {
     }
     
     private var operationColor: Color {
-        switch fileChange.operationType {
+        switch currentFileChange.operationType {
         case .create: return .green
         case .edit: return .blue
         case .insert: return .cyan
         case .delete, .deleteFile: return .red
         case .overwrite: return .orange
         }
+    }
+    
+    // MARK: - History Panel
+    
+    private func historyPanel(history: [DiffHistoryEntry]) -> some View {
+        VStack(spacing: 0) {
+            // Panel header
+            HStack {
+                Text("Change History")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(theme.foreground)
+                
+                Spacer()
+                
+                Text("\(history.count) changes")
+                    .font(.system(size: 10))
+                    .foregroundColor(theme.secondaryText)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(theme.panelHeader)
+            
+            Divider()
+            
+            // History list
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(history.enumerated()), id: \.element.id) { index, entry in
+                        historyRow(entry: entry, index: index, isSelected: entry.fileChange.id == currentFileChange.id)
+                    }
+                }
+            }
+        }
+        .frame(width: 260)
+        .background(theme.background)
+    }
+    
+    private func historyRow(entry: DiffHistoryEntry, index: Int, isSelected: Bool) -> some View {
+        Button(action: { navigateTo(entry: entry) }) {
+            HStack(spacing: 10) {
+                // Sequence number
+                Text("\(index + 1)")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(theme.secondaryText)
+                    .frame(width: 20)
+                
+                // Timeline indicator
+                VStack(spacing: 0) {
+                    Rectangle()
+                        .fill(index == 0 ? Color.clear : theme.divider)
+                        .frame(width: 2, height: 8)
+                    
+                    Circle()
+                        .fill(isSelected ? Color.accentColor : operationColor(for: entry.fileChange.operationType))
+                        .frame(width: 8, height: 8)
+                    
+                    Rectangle()
+                        .fill(index == (history?.count ?? 0) - 1 ? Color.clear : theme.divider)
+                        .frame(width: 2, height: 8)
+                }
+                
+                // File info
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Image(systemName: entry.fileChange.operationType.icon)
+                            .font(.system(size: 9))
+                            .foregroundColor(operationColor(for: entry.fileChange.operationType))
+                        
+                        Text(entry.fileChange.fileName)
+                            .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                            .foregroundColor(isSelected ? .accentColor : theme.foreground)
+                            .lineLimit(1)
+                    }
+                    
+                    Text(entry.formattedTime)
+                        .font(.system(size: 9))
+                        .foregroundColor(theme.secondaryText)
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private func operationColor(for operationType: FileOperationType) -> Color {
+        switch operationType {
+        case .create: return .green
+        case .edit: return .blue
+        case .insert: return .cyan
+        case .delete, .deleteFile: return .red
+        case .overwrite: return .orange
+        }
+    }
+    
+    // MARK: - Navigation
+    
+    private func navigatePrevious() {
+        guard let index = currentIndex, index > 0, let history = history else { return }
+        let newEntry = history[index - 1]
+        currentFileChange = newEntry.fileChange
+        onNavigate?(newEntry.fileChange)
+    }
+    
+    private func navigateNext() {
+        guard let index = currentIndex, let history = history, index < history.count - 1 else { return }
+        let newEntry = history[index + 1]
+        currentFileChange = newEntry.fileChange
+        onNavigate?(newEntry.fileChange)
+    }
+    
+    private func navigateTo(entry: DiffHistoryEntry) {
+        currentFileChange = entry.fileChange
+        onNavigate?(entry.fileChange)
     }
     
     // MARK: - Loading View
@@ -277,15 +617,15 @@ struct FileDiffDetailSheet: View {
     
     private var footer: some View {
         HStack {
-            // Timestamp
-            HStack(spacing: 6) {
-                Image(systemName: "clock")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.secondaryText)
-                
-                Text("Applied \(fileChange.timestamp, style: .relative)")
-                    .font(.system(size: 11))
-                    .foregroundColor(theme.secondaryText)
+            // Keyboard hint for navigation
+            if history != nil && (canNavigatePrevious || canNavigateNext) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.system(size: 9))
+                    Text("Navigate with arrows")
+                        .font(.system(size: 10))
+                }
+                .foregroundColor(theme.secondaryText.opacity(0.7))
             }
             
             Spacer()
@@ -305,7 +645,7 @@ struct FileDiffDetailSheet: View {
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 14)
+        .padding(.vertical, 12)
         .background(theme.headerBackground)
     }
 }
@@ -350,7 +690,7 @@ struct ViewChangesButton: View {
         .animation(.easeInOut(duration: 0.15), value: isHovered)
         .sheet(isPresented: $showingSheet) {
             if let approvalId = pendingApprovalId {
-                // Show approval sheet with approve/reject buttons
+                // Show approval sheet with approve/reject buttons and hunk-level control
                 FileChangeApprovalSheet(
                     approval: PendingFileChangeApproval(
                         id: approvalId,
@@ -378,6 +718,21 @@ struct ViewChangesButton: View {
                             userInfo: [
                                 "approvalId": approvalId,
                                 "approved": false
+                            ]
+                        )
+                        showingSheet = false
+                        onApprovalHandled?()
+                    },
+                    onPartialApprove: { decisions, modifiedContent in
+                        NotificationCenter.default.post(
+                            name: .TermAIFileChangeApprovalResponse,
+                            object: nil,
+                            userInfo: [
+                                "approvalId": approvalId,
+                                "approved": true,
+                                "partialApproval": true,
+                                "hunkDecisions": decisions,
+                                "modifiedContent": modifiedContent
                             ]
                         )
                         showingSheet = false

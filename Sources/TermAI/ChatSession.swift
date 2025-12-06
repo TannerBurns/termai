@@ -91,6 +91,14 @@ struct AgentEvent: Codable, Equatable {
     var pendingApprovalId: UUID? = nil
     /// Tool name for the pending approval
     var pendingToolName: String? = nil
+    /// For tool calls - track the tool call ID to update this event later
+    var toolCallId: String? = nil
+    /// Tool execution status: "running", "succeeded", "failed"
+    var toolStatus: String? = nil
+    /// Whether this is an internal/low-value event (hidden unless verbose mode)
+    var isInternal: Bool? = nil
+    /// Category for grouping: "tool", "profile", "progress", etc. Events with a category can be grouped together.
+    var eventCategory: String? = nil
 }
 
 // MARK: - Task Checklist
@@ -368,6 +376,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var id: UUID = UUID()
     var role: String
     var content: String
+    var timestamp: Date = Date()  // Timezone-aware timestamp for when message was created
     var terminalContext: String? = nil
     var terminalContextMeta: TerminalContextMeta? = nil
     var agentEvent: AgentEvent? = nil
@@ -394,7 +403,25 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     @Published var pendingTerminalContext: String? = nil
     @Published var pendingTerminalMeta: TerminalContextMeta? = nil
     @Published var pendingAttachedContexts: [PinnedContext] = []  // Files/contexts to attach to next message
-    @Published var agentModeEnabled: Bool = false
+    @Published var agentMode: AgentMode = .scout
+    @Published var agentProfile: AgentProfile = .general
+    
+    /// The currently active profile (for Auto mode, this tracks the dynamically selected profile)
+    /// When agentProfile is not .auto, this always equals agentProfile
+    @Published var activeProfile: AgentProfile = .general {
+        didSet {
+            // Only log transitions when actually changing in auto mode
+            if agentProfile.isAuto && oldValue != activeProfile {
+                AgentDebugConfig.log("[Agent] Auto mode switched profile: \(oldValue.rawValue) → \(activeProfile.rawValue)")
+            }
+        }
+    }
+    
+    /// The profile to use for prompts (activeProfile in Auto mode, agentProfile otherwise)
+    var effectiveProfile: AgentProfile {
+        agentProfile.isAuto ? activeProfile : agentProfile
+    }
+    
     @Published var agentContextLog: [String] = [] {
         didSet {
             // Reactively update context token count when agent context changes
@@ -523,6 +550,18 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         return contextLimitTokens
     }
     
+    /// Effective output capture limit based on model's context window
+    /// Dynamically scales with model capability while respecting min/max bounds
+    var effectiveOutputCaptureLimit: Int {
+        AgentSettings.shared.effectiveOutputCaptureLimit(forContextTokens: effectiveContextLimit)
+    }
+    
+    /// Effective agent memory limit based on model's context window
+    /// Dynamically scales with model capability while respecting min/max bounds
+    var effectiveAgentMemoryLimit: Int {
+        AgentSettings.shared.effectiveAgentMemoryLimit(forContextTokens: effectiveContextLimit)
+    }
+    
     /// Context usage as a percentage (0.0 to 1.0)
     var contextUsagePercent: Double {
         guard effectiveContextLimit > 0 else { return 0 }
@@ -566,9 +605,12 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     
     /// Async version with agent mode - use this for LLM calls
     /// Uses simplified prompt for native tool calling (tools sent via API)
+    /// Includes profile-specific guidance based on the current agentProfile
     private func getAgentSystemPromptAsync() async -> String {
         let info = await SystemInfo.cachedAsync
-        return info.injectIntoPromptWithNativeToolCalling()
+        let basePrompt = info.injectIntoPromptWithNativeToolCalling()
+        let profileAddition = effectiveProfile.systemPromptAddition(for: agentMode)
+        return basePrompt + profileAddition
     }
     
     // Private streaming state
@@ -614,9 +656,12 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         self.model = model
         self.providerName = providerName
         
-        // Apply default agent mode setting for new sessions (not restored ones)
+        // Apply default agent mode and profile settings for new sessions (not restored ones)
         if restoredId == nil {
-            self.agentModeEnabled = AgentSettings.shared.agentModeEnabledByDefault
+            self.agentMode = AgentSettings.shared.defaultAgentMode
+            self.agentProfile = AgentSettings.shared.defaultAgentProfile
+            // Initialize activeProfile to match (will be updated dynamically in Auto mode)
+            self.activeProfile = AgentSettings.shared.defaultAgentProfile.isAuto ? .general : AgentSettings.shared.defaultAgentProfile
         }
         
         // Don't auto-fetch models here - wait until after settings are loaded
@@ -1018,6 +1063,66 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         }
     }
     
+    // MARK: - File Change History
+    
+    /// Get all file changes from the current session as a navigable history
+    /// Extracts FileChange objects from messages with agentEvent.fileChange
+    var fileChangeHistory: [DiffHistoryEntry] {
+        var entries: [DiffHistoryEntry] = []
+        var sequenceNumber = 0
+        
+        for message in messages {
+            guard let event = message.agentEvent,
+                  let fileChange = event.fileChange else {
+                continue
+            }
+            
+            // Only include actual file changes (not pending approvals without resolution)
+            // Check if this is a completed file change event
+            let isCompletedChange = event.kind == "status" || 
+                                    (event.kind == "file_change" && event.pendingApprovalId == nil)
+            
+            if isCompletedChange {
+                // Find the associated checkpoint if any
+                let checkpointId = checkpoints.first { cp in
+                    cp.fileSnapshots.keys.contains(fileChange.filePath)
+                }?.id
+                
+                entries.append(DiffHistoryEntry(
+                    fileChange: fileChange,
+                    checkpointId: checkpointId,
+                    sequenceNumber: sequenceNumber
+                ))
+                sequenceNumber += 1
+            }
+        }
+        
+        return entries
+    }
+    
+    /// Get the index of a file change in the history
+    func historyIndex(for fileChange: FileChange) -> Int? {
+        fileChangeHistory.firstIndex { $0.fileChange.id == fileChange.id }
+    }
+    
+    /// Get the previous file change in history (for navigation)
+    func previousFileChange(from current: FileChange) -> FileChange? {
+        guard let currentIndex = historyIndex(for: current),
+              currentIndex > 0 else {
+            return nil
+        }
+        return fileChangeHistory[currentIndex - 1].fileChange
+    }
+    
+    /// Get the next file change in history (for navigation)
+    func nextFileChange(from current: FileChange) -> FileChange? {
+        guard let currentIndex = historyIndex(for: current),
+              currentIndex < fileChangeHistory.count - 1 else {
+            return nil
+        }
+        return fileChangeHistory[currentIndex + 1].fileChange
+    }
+    
     /// Rollback to a specific checkpoint, restoring files and truncating messages
     /// - Parameters:
     ///   - checkpoint: The checkpoint to rollback to
@@ -1257,61 +1362,9 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         if isFirstUserMessage && sessionTitle.isEmpty {
             await generateTitle(from: text)
         }
-        if agentModeEnabled {
-            // In agent mode we run the agent orchestration instead of directly streaming
-            await runAgentOrchestration(for: text)
-            return
-        }
-        
-        let ctx = pendingTerminalContext
-        let meta = pendingTerminalMeta
-        pendingTerminalContext = nil
-        pendingTerminalMeta = nil
-        
-        // Summarize large attached contexts before consuming
-        await summarizeLargeContexts()
-        
-        // Consume any attached contexts (files, etc.)
-        let attachedContexts = consumeAttachedContexts()
-        
-        messages.append(ChatMessage(
-            role: "user",
-            content: text,
-            terminalContext: ctx,
-            terminalContextMeta: meta,
-            attachedContexts: attachedContexts.isEmpty ? nil : attachedContexts
-        ))
-        let assistantIndex = messages.count
-        messages.append(ChatMessage(role: "assistant", content: ""))
-        streamingMessageId = messages[assistantIndex].id
-        
-        // Update context usage tracking
-        updateContextUsage()
-        
-        // Force UI update
-        messages = messages
-        
-        // Title already generated before sending when needed
-        
-        // Cancel any previous stream
-        streamingTask?.cancel()
-        streamingTask = Task { [weak self] in
-            guard let self = self else { return }
-            do {
-                _ = try await self.requestChatCompletionStream(assistantIndex: assistantIndex)
-            } catch is CancellationError {
-                // ignore
-            } catch {
-                await MainActor.run { 
-                    self.messages.append(ChatMessage(role: "assistant", content: "Error: \(error.localizedDescription)")) 
-                }
-            }
-            await MainActor.run {
-                self.streamingMessageId = nil
-                self.updateContextUsage()  // Update context after response
-                self.persistMessages()
-            }
-        }
+        // All agent modes (Scout, Copilot, Pilot) use tool-enabled orchestration
+        // Tools are filtered based on the mode by the orchestration
+        await runAgentOrchestration(for: text)
     }
 
     // MARK: - Agent Orchestration
@@ -1379,7 +1432,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         for check in checksJSON.checks.prefix(3) {  // Limit to 3 checks
             if agentCancelled { return false }
             
-            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Verifying: \(check.description)", details: "Tool: \(check.tool)", command: nil, output: nil, collapsed: true)))
+            messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Verifying: \(check.description)", details: "Tool: \(check.tool)", command: nil, output: nil, collapsed: true, isInternal: true)))
             messages = messages
             persistMessages()
             
@@ -1395,9 +1448,9 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                 
                 if !result.success {
                     allPassed = false
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "❌ Check failed: \(check.description)", details: result.error ?? result.output, command: nil, output: nil, collapsed: true)))
+                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "❌ Check failed: \(check.description)", details: result.error ?? result.output, command: nil, output: nil, collapsed: true, isInternal: true)))
                 } else {
-                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "✓ Check passed: \(check.description)", details: String(result.output.prefix(300)), command: nil, output: nil, collapsed: true)))
+                    messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "✓ Check passed: \(check.description)", details: String(result.output.prefix(300)), command: nil, output: nil, collapsed: true, isInternal: true)))
                 }
                 messages = messages
                 persistMessages()
@@ -1510,6 +1563,11 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         // Agent context maintained as a growing log of tool/command outputs
         agentContextLog = []
         
+        // Capture starting directory for directory hygiene
+        // The agent should return here when done to preserve user's terminal state
+        let startingCwd = lastKnownCwd.isEmpty ? FileManager.default.currentDirectoryPath : lastKnownCwd
+        agentContextLog.append("STARTING_CWD: \(startingCwd)")
+        
         // Reset token tracking for this new agent run
         agentSessionTokensUsed = 0
         accumulatedContextTokens = 0
@@ -1517,6 +1575,11 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         
         // Reset checklist - agent will create one via plan_and_track tool if needed
         agentChecklist = nil
+        
+        // Reset activeProfile for Auto mode (starts with general, will analyze and switch)
+        if agentProfile.isAuto {
+            activeProfile = .general
+        }
         
         // Store user prompt for use in reflection/stuck detection
         let userRequest = userPrompt
@@ -1535,7 +1598,13 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                     self.agentContextLog.append("CWD: \(cwd)")
                     if let rc { self.agentContextLog.append("EXIT_CODE: \(rc)") }
                     if !out.isEmpty {
-                        self.agentContextLog.append("OUTPUT(\(cmd.prefix(64))): \(out.prefix(AgentSettings.shared.maxOutputCapture))")
+                        // Use smart truncation with dynamic limits based on model context
+                        let truncatedOutput = SmartTruncator.smartTruncate(
+                            out,
+                            maxChars: self.effectiveOutputCaptureLimit,
+                            context: .commandOutput
+                        )
+                        self.agentContextLog.append("OUTPUT(\(cmd.prefix(64))): \(truncatedOutput)")
                         // Update last status event bubble with output
                         if let idx = self.messages.lastIndex(where: { $0.agentEvent?.command == cmd }) {
                             var msg = self.messages[idx]
@@ -1580,7 +1649,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                         details: "The agent will consider your feedback in its next action.",
                         command: nil,
                         output: nil,
-                        collapsed: true
+                        collapsed: true,
+                        isInternal: true
                     )
                 ))
                 messages = messages
@@ -1604,14 +1674,13 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                 let checklistStatus = agentChecklist?.displayString ?? "No checklist set"
                 let goalForReflection = agentChecklist?.goalDescription ?? userRequest
                 
+                // Get profile-specific reflection questions (use effectiveProfile for Auto mode)
+                let profileReflectionQuestions = effectiveProfile.reflectionPrompt(for: agentMode)
+                
                 let reflectionPrompt = """
                 Reflect on progress toward the goal. Assess what has been accomplished and what remains.
                 
-                REFLECTION QUESTIONS:
-                1. What files/artifacts have been created or modified?
-                2. Have you verified each completed item works correctly?
-                3. What is the most likely failure mode at this point?
-                4. What verification steps should be done before completion?
+                \(profileReflectionQuestions)
                 
                 Reply JSON: {
                     "progress_percent": 0-100,
@@ -1634,13 +1703,33 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                 
                 let progressStr = reflection.progressPercent.map { "\($0)%" } ?? "?"
                 let onTrackStr = reflection.onTrack == true ? "On track" : (reflection.onTrack == false ? "May need adjustment" : "Unknown")
-                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Progress Check (\(progressStr))", details: "\(onTrackStr)\n\(reflection.raw)", command: nil, output: nil, collapsed: true)))
+                messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Progress Check (\(progressStr))", details: "\(onTrackStr)\n\(reflection.raw)", command: nil, output: nil, collapsed: true, isInternal: true)))
                 messages = messages
                 persistMessages()
                 
                 // If reflection suggests adjustment, note it in context
                 if reflection.shouldAdjust == true, let newApproach = reflection.newApproach, !newApproach.isEmpty {
                     agentContextLog.append("STRATEGY ADJUSTMENT: \(newApproach)")
+                }
+                
+                // Auto profile: Analyze if we should switch profiles during reflection
+                if agentProfile.isAuto {
+                    // Get remaining items from checklist for context
+                    let remainingItems = agentChecklist?.items
+                        .filter { $0.status == .pending || $0.status == .inProgress }
+                        .map { $0.description } ?? []
+                    
+                    // Analyze what profile fits the current work
+                    if let analysis = await analyzeProfileForTask(
+                        currentTask: remainingItems.first ?? goalForReflection,
+                        nextItems: Array(remainingItems.dropFirst()),
+                        recentContext: agentContextLog.suffix(10).joined(separator: "\n")
+                    ) {
+                        // Only switch on medium or high confidence
+                        if analysis.confidence != "low" {
+                            switchProfileIfNeeded(to: analysis.profile, reason: analysis.reason)
+                        }
+                    }
                 }
             }
             
@@ -1668,14 +1757,14 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                     AgentDebugConfig.log("[Agent] Stuck result: \(stuckResult.raw)")
                     
                     if stuckResult.shouldStop == true {
-                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent stopped - unable to make progress", details: stuckResult.raw, command: nil, output: nil, collapsed: true)))
+                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Agent stopped - unable to make progress", details: stuckResult.raw, command: nil, output: nil, collapsed: true, isInternal: true)))
                         messages = messages
                         persistMessages()
                         break stepLoop
                     }
                     
                     if stuckResult.isStuck == true, let newApproach = stuckResult.newApproach, !newApproach.isEmpty {
-                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Trying different approach", details: newApproach, command: nil, output: nil, collapsed: true)))
+                        messages.append(ChatMessage(role: "assistant", content: "", agentEvent: AgentEvent(kind: "status", title: "Trying different approach", details: newApproach, command: nil, output: nil, collapsed: true, isInternal: true)))
                         agentContextLog.append("STUCK RECOVERY - NEW APPROACH: \(newApproach)")
                         recentCommands.removeAll()  // Reset to give new approach a chance
                         messages = messages
@@ -1690,7 +1779,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             let summarizationThreshold = Int(Double(effectiveContextLimit) * 0.95)
             if contextTokens > summarizationThreshold {
                 // Summarize older context when approaching context limit
-                contextBlob = await summarizeContext(agentContextLog, maxSize: AgentSettings.shared.maxContextSize)
+                // Use dynamic agent memory limit based on model context size
+                contextBlob = await summarizeContext(agentContextLog, maxSize: effectiveAgentMemoryLimit)
             }
             
             // Build checklist context for the step prompt (checklist is set via plan_and_track tool)
@@ -1698,12 +1788,16 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             let checklistContext: String
             if var checklist = agentChecklist {
                 // Auto-mark first pending task as in-progress
+                let startedNewTask: TaskChecklistItem?
                 if checklist.items.first(where: { $0.status == .inProgress }) == nil,
                    let firstPending = checklist.items.first(where: { $0.status == .pending }) {
                     checklist.markInProgress(firstPending.id)
                     agentChecklist = checklist
                     updateChecklistMessage()
                     agentContextLog.append("TASK STARTED: #\(firstPending.id) - \(firstPending.description)")
+                    startedNewTask = firstPending
+                } else {
+                    startedNewTask = nil
                 }
                 
                 // Build context with current task highlighted
@@ -1712,6 +1806,24 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                     context += "\n\nCURRENT TASK: #\(current.id) - \(current.description)"
                 }
                 checklistContext = context
+                
+                // Auto profile: Analyze if we should switch profiles when starting a new task
+                if agentProfile.isAuto, let newTask = startedNewTask {
+                    let remainingItems = checklist.items
+                        .filter { $0.status == .pending && $0.id != newTask.id }
+                        .map { $0.description }
+                    
+                    if let analysis = await analyzeProfileForTask(
+                        currentTask: newTask.description,
+                        nextItems: remainingItems,
+                        recentContext: agentContextLog.suffix(5).joined(separator: "\n")
+                    ) {
+                        // Switch on medium or high confidence
+                        if analysis.confidence != "low" {
+                            switchProfileIfNeeded(to: analysis.profile, reason: analysis.reason)
+                        }
+                    }
+                }
             } else {
                 checklistContext = ""
             }
@@ -1842,6 +1954,10 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         // Stuck recovery fields
         let is_stuck: Bool?
         let should_stop: Bool?
+        
+        // Auto profile fields (for profile analysis/suggestion)
+        let suggested_profile: String?
+        let confidence: String?
     }
     
     /// Parsed JSON response from the agent (for decision prompts only)
@@ -1862,6 +1978,10 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         var newApproach: String? = nil
         var isStuck: Bool? = nil
         var shouldStop: Bool? = nil
+        
+        // Auto profile fields
+        var suggestedProfile: String? = nil
+        var confidence: String? = nil
     }
     
     private func callOneShotJSON(prompt: String) async -> AgentJSONResponse {
@@ -1903,6 +2023,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             response.newApproach = unified.new_approach
             response.isStuck = unified.is_stuck
             response.shouldStop = unified.should_stop
+            response.suggestedProfile = unified.suggested_profile
+            response.confidence = unified.confidence
         }
         
         return response
@@ -1952,6 +2074,84 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         // If all retries failed, return the last response (even if empty)
         AgentDebugConfig.log("[Agent] All \(maxRetries) retries failed, using last response")
         return lastResponse
+    }
+    
+    // MARK: - Auto Profile Analysis
+    
+    /// Analyzes the current task and suggests the most appropriate profile
+    /// Returns the suggested profile or nil if no change is needed
+    private func analyzeProfileForTask(
+        currentTask: String,
+        nextItems: [String] = [],
+        recentContext: String
+    ) async -> (profile: AgentProfile, reason: String, confidence: String)? {
+        let analysisPrompt = AgentProfilePrompts.profileAnalysisPrompt(
+            currentTask: currentTask,
+            nextItems: nextItems,
+            recentContext: recentContext,
+            currentProfile: activeProfile
+        )
+        
+        AgentDebugConfig.log("[Agent] Profile analysis prompt =>\n\(analysisPrompt)")
+        let result = await callOneShotJSON(prompt: analysisPrompt)
+        AgentDebugConfig.log("[Agent] Profile analysis result: \(result.raw)")
+        
+        // Parse the suggested profile
+        guard let suggestedProfileStr = result.suggestedProfile,
+              let suggestedProfile = AgentProfile.fromString(suggestedProfileStr) else {
+            AgentDebugConfig.log("[Agent] Could not parse suggested profile from response")
+            return nil
+        }
+        
+        let reason = result.reason ?? "Task analysis"
+        let confidence = result.confidence ?? "medium"
+        
+        // Only suggest if it's different from current active profile
+        if suggestedProfile != activeProfile {
+            return (suggestedProfile, reason, confidence)
+        }
+        
+        return nil
+    }
+    
+    /// Switches the active profile in Auto mode and notifies the user
+    /// Returns true if a switch occurred
+    @discardableResult
+    private func switchProfileIfNeeded(
+        to newProfile: AgentProfile,
+        reason: String,
+        showNotification: Bool = true
+    ) -> Bool {
+        guard agentProfile.isAuto else { return false }
+        guard newProfile != activeProfile else { return false }
+        
+        let previousProfile = activeProfile
+        activeProfile = newProfile
+        
+        // Log the transition
+        agentContextLog.append("PROFILE SWITCH: \(previousProfile.rawValue) → \(newProfile.rawValue) (\(reason))")
+        
+        if showNotification {
+            // Add a collapsed status message for the UI (groupable with other events)
+            let statusMessage = ChatMessage(
+                role: "assistant",
+                content: "",
+                agentEvent: AgentEvent(
+                    kind: "status",
+                    title: "\(previousProfile.rawValue) → \(newProfile.rawValue)",
+                    details: reason,
+                    command: nil,
+                    output: nil,
+                    collapsed: true,
+                    eventCategory: "profile"
+                )
+            )
+            messages.append(statusMessage)
+            messages = messages
+            persistMessages()
+        }
+        
+        return true
     }
     
     private func callOneShotText(prompt: String) async -> String {
@@ -2015,9 +2215,10 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     ) async -> NativeToolStepResult {
         // Build the system prompt with workflow guidance
         // On first iteration with no checklist, guide the agent to consider using plan_and_track
-        let planningGuidance: String
+        // Include profile-specific planning guidance when enabled
+        let basePlanningGuidance: String
         if iterations == 1 && checklistContext.isEmpty {
-            planningGuidance = """
+            basePlanningGuidance = """
             
             IMPORTANT - START BY PLANNING:
             Before doing any work, call plan_and_track to set your goal and create a task checklist.
@@ -2028,7 +2229,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             Only skip planning for truly trivial single-command requests (e.g., "run pwd", "list files").
             """
         } else if !checklistContext.isEmpty {
-            planningGuidance = """
+            basePlanningGuidance = """
             
             TASK TRACKING:
             - Focus on completing the CURRENT TASK shown above
@@ -2036,8 +2237,12 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             - The next pending task will automatically become current
             """
         } else {
-            planningGuidance = ""
+            basePlanningGuidance = ""
         }
+        
+        // Add profile-specific planning guidance when planning is enabled (use effectiveProfile for Auto mode)
+        let profilePlanningGuidance = AgentSettings.shared.enablePlanning ? effectiveProfile.planningGuidance(for: agentMode) : ""
+        let planningGuidance = basePlanningGuidance + (profilePlanningGuidance.isEmpty ? "" : "\n\n" + profilePlanningGuidance)
         
         let systemPrompt = """
         You are a terminal agent executing commands in the user's real shell (PTY).
@@ -2057,6 +2262,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         RULES:
         - Use the provided tools to accomplish the request
         - For file operations, prefer file tools (read_file, edit_file, etc.) over shell commands
+        - For EXISTING files: use edit_file (search/replace), insert_lines, or delete_lines for surgical changes
+        - Only use write_file to CREATE new files or when you need to COMPLETELY rewrite a file
         - Verify your changes by reading files after editing
         - When the task is complete, respond with a summary (no tool calls)
         """
@@ -2069,22 +2276,22 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             ["role": "user", "content": contextMessage]
         ]
         
-        // Get tool schemas based on provider
+        // Get tool schemas based on provider and agent mode
         let toolSchemas: [[String: Any]]
         switch providerType {
         case .cloud(.anthropic):
-            toolSchemas = AgentToolRegistry.shared.allSchemas(for: providerType)
+            toolSchemas = AgentToolRegistry.shared.schemas(for: agentMode, provider: providerType)
         case .cloud(.google):
-            toolSchemas = AgentToolRegistry.shared.allTools().map { $0.schema.toGoogle() }
+            toolSchemas = AgentToolRegistry.shared.tools(for: agentMode).map { $0.schema.toGoogle() }
         default:
             // OpenAI and local providers use OpenAI format
-            toolSchemas = AgentToolRegistry.shared.allSchemas(for: providerType)
+            toolSchemas = AgentToolRegistry.shared.schemas(for: agentMode, provider: providerType)
         }
         
         var allToolsExecuted: [(name: String, result: AgentToolResult)] = []
         var lastTextResponse: String? = nil
         var loopCount = 0
-        let maxToolLoops = 20 // Prevent infinite tool calling loops
+        let maxToolLoops = AgentSettings.shared.maxToolCallsPerStep // Prevent infinite tool calling loops (within a single step)
         
         // Tool calling loop - continue until model stops calling tools or we hit limit
         while loopCount < maxToolLoops {
@@ -2131,27 +2338,41 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                         (toolCall.stringArguments["complete_task"] != nil || toolCall.stringArguments["start_task"] != nil)
                     
                     // Add status message for UI (skip for task status updates to reduce clutter)
+                    // Use toolCallId to track this event for later update
                     if !isTaskStatusUpdate {
                         messages.append(ChatMessage(
                             role: "assistant",
                             content: "",
                             agentEvent: AgentEvent(
                                 kind: "step",
-                                title: "Using tool: \(toolCall.name)",
-                                details: "Args: \(toolCall.stringArguments)",
+                                title: toolCall.name,
+                                details: nil, // Hide args in collapsed view for compactness
                                 command: nil,
                                 output: nil,
-                                collapsed: true
+                                collapsed: true,
+                                toolCallId: toolCall.id,
+                                toolStatus: "running",
+                                eventCategory: "tool"
                             )
                         ))
                         messages = messages
                         persistMessages()
                     }
                     
-                    // Execute the tool
+                    // Execute the tool (with mode validation)
                     if let tool = AgentToolRegistry.shared.get(toolCall.name) {
+                        // Validate tool is available in current agent mode
+                        guard AgentToolRegistry.shared.isToolAvailable(toolCall.name, in: agentMode) else {
+                            let errorMsg = "Tool '\(toolCall.name)' is not available in \(agentMode.rawValue) mode"
+                            toolResults.append((id: toolCall.id, name: toolCall.name, result: errorMsg, isError: true))
+                            agentContextLog.append("TOOL ERROR: \(errorMsg)")
+                            continue
+                        }
+                        
                         var args = toolCall.stringArguments
                         args["_sessionId"] = self.id.uuidString
+                        // Pass context size for dynamic output limits
+                        args["_contextTokens"] = String(effectiveContextLimit)
                         
                         // Check if this is a file operation that needs approval flow
                         let isFileOp = ["write_file", "edit_file", "insert_lines", "delete_lines", "delete_file"].contains(toolCall.name)
@@ -2161,7 +2382,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                                 tool: tool,
                                 toolName: toolCall.name,
                                 args: args,
-                                cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd
+                                cwd: self.lastKnownCwd.isEmpty ? nil : self.lastKnownCwd,
+                                toolCallId: toolCall.id
                             )
                         } else {
                             toolResult = await tool.execute(
@@ -2183,24 +2405,37 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                         // Update context log (but keep it brief for task status updates)
                         if !isTaskStatusUpdate {
                             agentContextLog.append("TOOL: \(toolCall.name) \(toolCall.stringArguments)")
-                            agentContextLog.append("RESULT: \(resultString.prefix(AgentSettings.shared.maxOutputCapture))")
+                            // Use smart truncation with dynamic limits
+                            let contextType: SmartTruncator.ContentContext = {
+                                switch toolCall.name {
+                                case "read_file": return .fileContent
+                                case "shell": return .commandOutput
+                                case "http_request": return .apiResponse
+                                default: return .unknown
+                                }
+                            }()
+                            let truncatedResult = SmartTruncator.smartTruncate(
+                                resultString,
+                                maxChars: effectiveOutputCaptureLimit,
+                                context: contextType
+                            )
+                            agentContextLog.append("RESULT: \(truncatedResult)")
                         }
                         
-                        // Add result status message (skip for task status updates - checklist UI shows the update)
+                        // Update the existing tool event instead of creating a new one (skip for task status updates)
                         if !isTaskStatusUpdate {
-                            messages.append(ChatMessage(
-                                role: "assistant",
-                                content: "",
-                                agentEvent: AgentEvent(
-                                    kind: "status",
-                                    title: toolResult.success ? "Tool succeeded" : "Tool failed",
-                                    details: String(resultString.prefix(500)),
-                                    command: nil,
-                                    output: resultString,
-                                    collapsed: true,
-                                    fileChange: toolResult.fileChange
-                                )
-                            ))
+                            // Find and update the existing tool event by toolCallId
+                            if let idx = messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCall.id }) {
+                                var msg = messages[idx]
+                                var evt = msg.agentEvent!
+                                evt.toolStatus = toolResult.success ? "succeeded" : "failed"
+                                evt.output = resultString
+                                evt.fileChange = toolResult.fileChange
+                                // Add args to details for expansion (only visible when expanded)
+                                evt.details = "Args: \(toolCall.stringArguments)"
+                                msg.agentEvent = evt
+                                messages[idx] = msg
+                            }
                             messages = messages
                             persistMessages()
                         }
@@ -2282,9 +2517,9 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             }
         }
         
-        // Hit max tool loops
+        // Hit max tool loops within this single step
         return NativeToolStepResult(
-            textResponse: "Reached maximum tool execution limit. Please try a more specific request.",
+            textResponse: "Reached maximum tool calls per step (\(maxToolLoops)). The agent made too many consecutive tool calls without completing. Consider breaking down the task or being more specific.",
             toolsExecuted: allToolsExecuted,
             isDone: true,
             error: nil
@@ -2475,16 +2710,20 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     /// Summarize long command output
     private func summarizeOutput(_ output: String, command: String) async -> String {
         let settings = AgentSettings.shared
+        let dynamicLimit = effectiveOutputCaptureLimit
         
         // If output is short enough, return as-is
-        if output.count <= settings.maxOutputCapture {
+        if output.count <= dynamicLimit {
             return output
         }
         
-        // If summarization is disabled, just truncate
+        // If summarization is disabled, use smart truncation instead
         if !settings.enableOutputSummarization || output.count <= settings.outputSummarizationThreshold {
-            return String(output.prefix(settings.maxOutputCapture)) + "\n... [truncated, \(output.count) total chars]"
+            return SmartTruncator.smartTruncate(output, maxChars: dynamicLimit, context: .commandOutput)
         }
+        
+        // Use smart truncation to get the most relevant portion for summarization
+        let truncatedForSummary = SmartTruncator.prioritizeErrors(output, maxChars: dynamicLimit)
         
         // Summarize the output
         let summarizePrompt = """
@@ -2496,8 +2735,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         - Any actionable information
         
         COMMAND: \(command)
-        OUTPUT (first \(settings.maxOutputCapture) chars of \(output.count) total):
-        \(output.prefix(settings.maxOutputCapture))
+        OUTPUT (smart truncated from \(output.count) total chars):
+        \(truncatedForSummary)
         """
         
         let summary = await callOneShotText(prompt: summarizePrompt)
@@ -2580,7 +2819,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             return command
         }
         
-        // Post notification requesting approval
+        // Post notification requesting approval (for any listeners, but UI is now inline)
         let approvalId = UUID()
         NotificationCenter.default.post(
             name: .TermAICommandPendingApproval,
@@ -2592,21 +2831,31 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             ]
         )
         
-        // Add a pending approval message
+        // Add a pending approval message with inline approval buttons
+        // Use eventCategory: "command" so it groups with tool calls after approval
         messages.append(ChatMessage(
             role: "assistant",
             content: "",
             agentEvent: AgentEvent(
-                kind: "status",
+                kind: "command_approval",
                 title: "Awaiting command approval",
                 details: command,
                 command: command,
                 output: nil,
-                collapsed: false
+                collapsed: false,
+                pendingApprovalId: approvalId,
+                pendingToolName: "shell",
+                eventCategory: "command"
             )
         ))
         messages = messages
         persistMessages()
+        
+        // Post macOS system notification if user is away
+        SystemNotificationService.shared.postCommandApprovalNotification(
+            command: command,
+            sessionId: self.id
+        )
         
         // Wait for approval response
         return await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
@@ -2661,61 +2910,45 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     }
     
     /// Execute a command with optional approval flow
-    private func executeCommandWithApproval(_ command: String) async -> String? {
+    /// - Parameters:
+    ///   - command: The shell command to execute
+    ///   - timeout: Custom timeout for command execution (defaults to settings value)
+    private func executeCommandWithApproval(_ command: String, timeout: TimeInterval? = nil) async -> String? {
+        let effectiveTimeout = timeout ?? AgentSettings.shared.commandTimeout
         // Request approval if needed
         guard let approvedCommand = await requestCommandApproval(command) else {
-            // Command was rejected
-            messages.append(ChatMessage(
-                role: "assistant",
-                content: "",
-                agentEvent: AgentEvent(
-                    kind: "status",
-                    title: "Command rejected",
-                    details: "User declined to execute: \(command)",
-                    command: nil,
-                    output: nil,
-                    collapsed: true
-                )
-            ))
+            // Command was rejected - update the existing approval message
+            if let idx = messages.lastIndex(where: { $0.agentEvent?.kind == "command_approval" && $0.agentEvent?.command == command }) {
+                var msg = messages[idx]
+                var evt = msg.agentEvent!
+                evt.kind = "status"
+                evt.title = "Command rejected"
+                evt.details = "User declined to execute"
+                evt.toolStatus = "failed"
+                evt.pendingApprovalId = nil
+                msg.agentEvent = evt
+                messages[idx] = msg
+            }
             messages = messages
             persistMessages()
             return nil
         }
         
-        // Update status if command was edited
-        if approvedCommand != command {
-            messages.append(ChatMessage(
-                role: "assistant",
-                content: "",
-                agentEvent: AgentEvent(
-                    kind: "status",
-                    title: "Command edited by user",
-                    details: approvedCommand,
-                    command: approvedCommand,
-                    output: nil,
-                    collapsed: true
-                )
-            ))
+        // Find the approval message and update it to show running state
+        if let idx = messages.lastIndex(where: { $0.agentEvent?.kind == "command_approval" && $0.agentEvent?.command == command }) {
+            var msg = messages[idx]
+            var evt = msg.agentEvent!
+            evt.kind = "status"
+            evt.title = approvedCommand != command ? "Running (edited)" : "Running"
+            evt.command = approvedCommand
+            evt.details = approvedCommand
+            evt.toolStatus = "running"
+            evt.pendingApprovalId = nil
+            msg.agentEvent = evt
+            messages[idx] = msg
             messages = messages
             persistMessages()
         }
-        
-        // Execute the command
-        let runningTitle = "Executing command in terminal"
-        messages.append(ChatMessage(
-            role: "assistant",
-            content: "",
-            agentEvent: AgentEvent(
-                kind: "status",
-                title: runningTitle,
-                details: approvedCommand,
-                command: approvedCommand,
-                output: nil,
-                collapsed: false
-            )
-        ))
-        messages = messages
-        persistMessages()
         
         AgentDebugConfig.log("[Agent] Executing command: \(approvedCommand)")
         NotificationCenter.default.post(
@@ -2728,7 +2961,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         )
         
         // Wait for output
-        let output = await waitForCommandOutput(matching: approvedCommand, timeout: AgentSettings.shared.commandTimeout)
+        let output = await waitForCommandOutput(matching: approvedCommand, timeout: effectiveTimeout)
         
         // Record in context log - note: recentCommands tracking done in caller
         agentContextLog.append("RAN: \(approvedCommand)")
@@ -2736,6 +2969,19 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             // Summarize if output is long
             let processedOutput = await summarizeOutput(out, command: approvedCommand)
             agentContextLog.append("OUTPUT: \(processedOutput)")
+        }
+        
+        // Update the command message with completed status and output
+        if let idx = messages.lastIndex(where: { $0.agentEvent?.command == approvedCommand && $0.agentEvent?.toolStatus == "running" }) {
+            var msg = messages[idx]
+            var evt = msg.agentEvent!
+            evt.title = "Completed"
+            evt.toolStatus = "succeeded"
+            evt.output = output
+            msg.agentEvent = evt
+            messages[idx] = msg
+            messages = messages
+            persistMessages()
         }
         
         // Track tool call execution
@@ -2752,7 +2998,10 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     
     /// Execute a shell command via the terminal PTY (ShellCommandExecutor protocol)
     /// This is used by the ShellCommandTool in the native tool calling flow
-    nonisolated func executeShellCommand(_ command: String, requireApproval: Bool) async -> (success: Bool, output: String, exitCode: Int) {
+    nonisolated func executeShellCommand(_ command: String, requireApproval: Bool, timeout: TimeInterval? = nil) async -> (success: Bool, output: String, exitCode: Int) {
+        // Use provided timeout or fall back to default from settings
+        let effectiveTimeout = timeout ?? AgentSettings.shared.commandTimeout
+        
         // Record shell command to checkpoint for rollback warnings
         await MainActor.run {
             recordShellCommand(command)
@@ -2763,11 +3012,11 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         let output: String?
         if AgentSettings.shared.isDestructiveCommand(command) ||
            (requireApproval && !AgentSettings.shared.shouldAutoApprove(command)) {
-            output = await executeCommandWithApproval(command)
+            output = await executeCommandWithApproval(command, timeout: effectiveTimeout)
         } else {
             // Direct execution
             await MainActor.run {
-                AgentDebugConfig.log("[ShellTool] Executing command: \(command)")
+                AgentDebugConfig.log("[ShellTool] Executing command: \(command) (timeout: \(Int(effectiveTimeout))s)")
                 NotificationCenter.default.post(
                     name: .TermAIExecuteCommand,
                     object: nil,
@@ -2777,7 +3026,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                     ]
                 )
             }
-            output = await waitForCommandOutput(matching: command, timeout: AgentSettings.shared.commandTimeout)
+            output = await waitForCommandOutput(matching: command, timeout: effectiveTimeout)
             
             await MainActor.run {
                 agentContextLog.append("RAN: \(command)")
@@ -2867,6 +3116,27 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         
         // Log start
         agentContextLog.append("TASK STARTED: #\(taskId)")
+        
+        // Auto profile: Analyze if we should switch profiles for this task
+        if agentProfile.isAuto, let item = checklist.items.first(where: { $0.id == taskId }) {
+            Task { @MainActor in
+                // Get remaining items for context
+                let remainingItems = checklist.items
+                    .filter { $0.status == .pending && $0.id != taskId }
+                    .map { $0.description }
+                
+                if let analysis = await analyzeProfileForTask(
+                    currentTask: item.description,
+                    nextItems: remainingItems,
+                    recentContext: agentContextLog.suffix(5).joined(separator: "\n")
+                ) {
+                    // Switch on medium or high confidence
+                    if analysis.confidence != "low" {
+                        switchProfileIfNeeded(to: analysis.profile, reason: analysis.reason)
+                    }
+                }
+            }
+        }
     }
     
     /// Mark a task as complete
@@ -2891,17 +3161,36 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     
     // MARK: - File Change Approval
     
+    /// Result of a file change approval request
+    enum FileChangeApprovalResult {
+        /// User rejected all changes
+        case rejected
+        /// User approved all changes
+        case approved
+        /// User approved some hunks but rejected others, with the resulting modified content
+        case partiallyApproved(modifiedContent: String)
+        
+        var isApproved: Bool {
+            switch self {
+            case .rejected: return false
+            case .approved, .partiallyApproved: return true
+            }
+        }
+    }
+    
     /// Request user approval for a file change before applying it
     /// - Parameters:
     ///   - fileChange: The file change to approve
     ///   - toolName: Name of the tool requesting the change
     ///   - toolArgs: Arguments passed to the tool
     ///   - forceApproval: If true, always require approval regardless of settings (for destructive operations)
-    private func requestFileChangeApproval(fileChange: FileChange, toolName: String, toolArgs: [String: String], forceApproval: Bool = false) async -> Bool {
+    ///   - toolCallId: The tool call ID to update the existing tool event message
+    /// - Returns: Approval result including partial approval with modified content
+    private func requestFileChangeApproval(fileChange: FileChange, toolName: String, toolArgs: [String: String], forceApproval: Bool = false, toolCallId: String) async -> FileChangeApprovalResult {
         // Check if approval is required
         // Always require approval if forceApproval is true (for destructive operations like delete_file)
         guard AgentSettings.shared.requireFileEditApproval || forceApproval else {
-            return true
+            return .approved
         }
         
         // Post notification requesting approval
@@ -2924,39 +3213,55 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             ]
         )
         
-        // Add a pending approval message with inline approval buttons
-        messages.append(ChatMessage(
-            role: "assistant",
-            content: "",
-            agentEvent: AgentEvent(
-                kind: "file_change",
-                title: "Awaiting file change approval",
-                details: "Wants to \(fileChange.operationType.description.lowercased()): \(fileChange.fileName)",
-                command: nil,
-                output: nil,
-                collapsed: false,
-                fileChange: fileChange,
-                pendingApprovalId: approvalId,
-                pendingToolName: toolName
-            )
-        ))
+        // Update the existing tool event message to show pending approval
+        // (instead of creating a new message)
+        // Make operation type prominent - especially for destructive operations
+        let isDestructive = fileChange.operationType == .deleteFile
+        let approvalTitle: String
+        if isDestructive {
+            approvalTitle = "⚠️ Delete file?"
+        } else {
+            approvalTitle = "Approve \(fileChange.operationType.description.lowercased())?"
+        }
+        
+        if let idx = messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCallId }) {
+            var msg = messages[idx]
+            var evt = msg.agentEvent!
+            evt.kind = "file_change"
+            evt.title = approvalTitle
+            evt.details = fileChange.fileName
+            evt.fileChange = fileChange
+            evt.pendingApprovalId = approvalId
+            evt.pendingToolName = toolName
+            evt.toolStatus = nil // Clear running status while awaiting
+            evt.collapsed = false // Expand to show approval buttons
+            msg.agentEvent = evt
+            messages[idx] = msg
+        }
         messages = messages
         persistMessages()
         
+        // Post macOS system notification if user is away
+        SystemNotificationService.shared.postFileChangeApprovalNotification(
+            fileName: fileChange.fileName,
+            operation: fileChange.operationType.description,
+            sessionId: self.id
+        )
+        
         // Wait for approval response
-        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        return await withCheckedContinuation { (continuation: CheckedContinuation<FileChangeApprovalResult, Never>) in
             var token: NSObjectProtocol?
             var cancelCheckTimer: DispatchSourceTimer?
             var resolved = false
             
-            func finish(_ approved: Bool) {
+            func finish(_ result: FileChangeApprovalResult) {
                 guard !resolved else { return }
                 resolved = true
                 cancelCheckTimer?.cancel()
                 cancelCheckTimer = nil
                 if let t = token { NotificationCenter.default.removeObserver(t) }
                 token = nil
-                continuation.resume(returning: approved)
+                continuation.resume(returning: result)
             }
             
             // Check for cancellation periodically
@@ -2965,7 +3270,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             cancelCheckTimer?.setEventHandler { [weak self] in
                 if self?.agentCancelled == true {
                     AgentDebugConfig.log("[Agent] File change approval wait cancelled by user")
-                    finish(false)
+                    finish(.rejected)
                 }
             }
             cancelCheckTimer?.resume()
@@ -2979,12 +3284,25 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                       noteApprovalId == approvalId else { return }
                 
                 let approved = note.userInfo?["approved"] as? Bool ?? false
-                finish(approved)
+                
+                if !approved {
+                    finish(.rejected)
+                    return
+                }
+                
+                // Check for partial approval with modified content
+                if let isPartial = note.userInfo?["partialApproval"] as? Bool,
+                   isPartial,
+                   let modifiedContent = note.userInfo?["modifiedContent"] as? String {
+                    finish(.partiallyApproved(modifiedContent: modifiedContent))
+                } else {
+                    finish(.approved)
+                }
             }
             
             // Timeout after 5 minutes (user might be away)
             DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
-                finish(false)
+                finish(.rejected)
             }
         }
     }
@@ -2994,7 +3312,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         tool: AgentTool,
         toolName: String,
         args: [String: String],
-        cwd: String?
+        cwd: String?,
+        toolCallId: String
     ) async -> AgentToolResult {
         // Check if this is a FileOperationTool that can provide previews
         // Always require approval for RequiresApprovalTool (like delete_file)
@@ -3006,54 +3325,102 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             fileChange = await fileOpTool.prepareChange(args: args, cwd: cwd)
         }
         
+        // Track if we have modified content from partial approval
+        var modifiedArgs = args
+        var partialApprovalApplied = false
+        
         // Handle approval flow if required
         if tool is FileOperationTool,
            (AgentSettings.shared.requireFileEditApproval || alwaysRequiresApproval),
            let change = fileChange {
             // Request approval (force approval for destructive operations)
-            let approved = await requestFileChangeApproval(
+            let approvalResult = await requestFileChangeApproval(
                 fileChange: change,
                 toolName: toolName,
                 toolArgs: args,
-                forceApproval: alwaysRequiresApproval
+                forceApproval: alwaysRequiresApproval,
+                toolCallId: toolCallId
             )
             
-            if !approved {
-                // File change was rejected
-                messages.append(ChatMessage(
-                    role: "assistant",
-                    content: "",
-                    agentEvent: AgentEvent(
-                        kind: "status",
-                        title: "File change rejected",
-                        details: "User declined to apply changes to: \(change.fileName)",
-                        command: nil,
-                        output: nil,
-                        collapsed: true,
-                        fileChange: change
-                    )
-                ))
+            // Find the tool event message to update in place (by toolCallId)
+            let toolMsgIndex = messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCallId })
+            
+            switch approvalResult {
+            case .rejected:
+                // File change was rejected - update existing message
+                if let idx = toolMsgIndex {
+                    var msg = messages[idx]
+                    var evt = msg.agentEvent!
+                    evt.kind = "step"
+                    evt.title = "\(toolName) rejected"
+                    evt.details = "User declined: \(change.fileName)"
+                    evt.toolStatus = "failed"
+                    evt.pendingApprovalId = nil
+                    evt.collapsed = true
+                    msg.agentEvent = evt
+                    messages[idx] = msg
+                }
                 messages = messages
                 persistMessages()
                 return .failure("File change rejected by user")
+                
+            case .partiallyApproved(let modifiedContent):
+                // Partial approval - use the modified content
+                partialApprovalApplied = true
+                
+                // Update args to use the partially approved content
+                // For write_file and edit_file tools, update the content/new_string arg
+                if modifiedArgs["content"] != nil {
+                    modifiedArgs["content"] = modifiedContent
+                } else if modifiedArgs["new_string"] != nil {
+                    // For search_replace style edits, we need to use the full file content
+                    // This effectively becomes a file overwrite with the partial changes
+                    modifiedArgs["content"] = modifiedContent
+                    modifiedArgs.removeValue(forKey: "old_string")
+                    modifiedArgs.removeValue(forKey: "new_string")
+                }
+                
+                // Update existing message to show partial approval (running state)
+                if let idx = toolMsgIndex {
+                    var msg = messages[idx]
+                    var evt = msg.agentEvent!
+                    evt.kind = "step"
+                    evt.title = toolName
+                    evt.details = "Applying partial changes to: \(change.fileName)"
+                    evt.toolStatus = "running"
+                    evt.pendingApprovalId = nil
+                    evt.collapsed = true
+                    evt.fileChange = FileChange(
+                        id: change.id,
+                        filePath: change.filePath,
+                        operationType: change.operationType,
+                        beforeContent: change.beforeContent,
+                        afterContent: modifiedContent,
+                        timestamp: change.timestamp
+                    )
+                    msg.agentEvent = evt
+                    messages[idx] = msg
+                }
+                messages = messages
+                persistMessages()
+                
+            case .approved:
+                // Full approval - update existing message (running state)
+                if let idx = toolMsgIndex {
+                    var msg = messages[idx]
+                    var evt = msg.agentEvent!
+                    evt.kind = "step"
+                    evt.title = toolName
+                    evt.details = change.fileName
+                    evt.toolStatus = "running"
+                    evt.pendingApprovalId = nil
+                    evt.collapsed = true
+                    msg.agentEvent = evt
+                    messages[idx] = msg
+                }
+                messages = messages
+                persistMessages()
             }
-            
-            // Update status to show approval
-            messages.append(ChatMessage(
-                role: "assistant",
-                content: "",
-                agentEvent: AgentEvent(
-                    kind: "status",
-                    title: "File change approved",
-                    details: "Applying changes to: \(change.fileName)",
-                    command: nil,
-                    output: nil,
-                    collapsed: true,
-                    fileChange: change
-                )
-            ))
-            messages = messages
-            persistMessages()
         }
         
         // Record file change to checkpoint for rollback capability
@@ -3067,8 +3434,34 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             )
         }
         
-        // Execute the tool
+        // Execute the tool with potentially modified args for partial approval
+        if partialApprovalApplied {
+            // For partial approval, we need to write the modified content directly
+            // Use the write_file tool behavior
+            if let path = modifiedArgs["path"], let content = modifiedArgs["content"] {
+                do {
+                    let resolvedPath = resolvePath(path, cwd: cwd)
+                    try content.write(toFile: resolvedPath, atomically: true, encoding: .utf8)
+                    return .success("File updated with selected changes: \(path)")
+                } catch {
+                    return .failure("Failed to write partial changes: \(error.localizedDescription)")
+                }
+            }
+        }
+        
+        // Execute the tool normally
         return await tool.execute(args: args, cwd: cwd)
+    }
+    
+    /// Resolve a path relative to the working directory
+    private func resolvePath(_ path: String, cwd: String?) -> String {
+        if path.hasPrefix("/") || path.hasPrefix("~") {
+            return (path as NSString).expandingTildeInPath
+        }
+        if let cwd = cwd {
+            return (cwd as NSString).appendingPathComponent(path)
+        }
+        return path
     }
     
     // MARK: - Title Generation
@@ -4326,7 +4719,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             providerName: providerName,
             systemPrompt: nil,  // No longer used
             sessionTitle: sessionTitle,
-            agentModeEnabled: agentModeEnabled,
+            agentMode: agentMode,
+            agentProfile: agentProfile,
             temperature: temperature,
             maxTokens: maxTokens,
             reasoningEffort: reasoningEffort,
@@ -4350,7 +4744,11 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             providerName = settings.providerName
             // Note: systemPrompt is no longer loaded from settings - using hard-coded prompt
             sessionTitle = settings.sessionTitle ?? ""
-            agentModeEnabled = settings.agentModeEnabled ?? false
+            agentMode = settings.agentMode ?? .scout
+            agentProfile = settings.agentProfile ?? .general
+            // Initialize activeProfile (will be dynamically managed in Auto mode)
+            let loadedProfile = settings.agentProfile ?? .general
+            activeProfile = loadedProfile.isAuto ? .general : loadedProfile
             
             // Load generation settings
             temperature = settings.temperature ?? 0.7
@@ -4432,7 +4830,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     /// During agent execution, this is a no-op since we use actual API-reported tokens
     func updateContextUsage(persist: Bool = true) {
         // During active agent execution, skip estimation - we use actual API tokens set by callOneShotText()
-        if agentModeEnabled && isAgentRunning {
+        if isAgentRunning {
             if persist {
                 persistSettings()
             }
@@ -4441,7 +4839,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         
         var totalTokens = 0
         
-        if agentModeEnabled && !agentContextLog.isEmpty {
+        if !agentContextLog.isEmpty {
             // Agent mode but not actively running - show combined estimate
             let messageArray = buildMessageArray()
             let messageText = messageArray.map { $0.content }.joined(separator: "\n")
@@ -4449,7 +4847,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             let agentContext = agentContextLog.joined(separator: "\n")
             totalTokens += TokenEstimator.estimateTokens(agentContext, model: model)
         } else {
-            // Normal chat mode: estimate from messages
+            // Estimate from messages
             let messageArray = buildMessageArray()
             let messageText = messageArray.map { $0.content }.joined(separator: "\n")
             totalTokens = TokenEstimator.estimateTokens(messageText, model: model)
@@ -4500,7 +4898,8 @@ private struct SessionSettings: Codable {
     let providerName: String
     let systemPrompt: String? // Kept for backward compatibility but no longer used
     let sessionTitle: String?
-    let agentModeEnabled: Bool?
+    let agentMode: AgentMode?
+    let agentProfile: AgentProfile?
     
     // Generation settings
     let temperature: Double?

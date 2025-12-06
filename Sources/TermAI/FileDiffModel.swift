@@ -315,6 +315,273 @@ struct PendingFileChangeApproval: Identifiable {
     }
 }
 
+// MARK: - Hunk Decision
+
+/// Tracks the user's decision for a specific hunk during approval
+enum HunkDecision: Equatable {
+    case pending
+    case accepted
+    case rejected
+}
+
+// MARK: - Diff Hunk
+
+/// Represents a contiguous block of changes in a diff (like git hunks)
+/// Groups consecutive added/removed lines with surrounding context
+struct DiffHunk: Identifiable, Equatable {
+    let id: UUID
+    
+    /// Line range in the original (before) file
+    let oldStartLine: Int
+    let oldLineCount: Int
+    
+    /// Line range in the new (after) file
+    let newStartLine: Int
+    let newLineCount: Int
+    
+    /// The diff lines that make up this hunk (context + changes)
+    let lines: [DiffLine]
+    
+    /// Index range into the parent FileDiff.lines array
+    let lineIndexRange: Range<Int>
+    
+    init(
+        id: UUID = UUID(),
+        oldStartLine: Int,
+        oldLineCount: Int,
+        newStartLine: Int,
+        newLineCount: Int,
+        lines: [DiffLine],
+        lineIndexRange: Range<Int>
+    ) {
+        self.id = id
+        self.oldStartLine = oldStartLine
+        self.oldLineCount = oldLineCount
+        self.newStartLine = newStartLine
+        self.newLineCount = newLineCount
+        self.lines = lines
+        self.lineIndexRange = lineIndexRange
+    }
+    
+    /// Git-style hunk header (e.g., "@@ -10,5 +12,8 @@")
+    var header: String {
+        let oldPart = oldLineCount == 1 ? "\(oldStartLine)" : "\(oldStartLine),\(oldLineCount)"
+        let newPart = newLineCount == 1 ? "\(newStartLine)" : "\(newStartLine),\(newLineCount)"
+        return "@@ -\(oldPart) +\(newPart) @@"
+    }
+    
+    /// Number of added lines in this hunk
+    var addedCount: Int {
+        lines.filter { $0.type == .added }.count
+    }
+    
+    /// Number of removed lines in this hunk
+    var removedCount: Int {
+        lines.filter { $0.type == .removed }.count
+    }
+    
+    /// Whether this hunk has any actual changes (not just context)
+    var hasChanges: Bool {
+        lines.contains { $0.type == .added || $0.type == .removed }
+    }
+}
+
+// MARK: - FileDiff Hunk Extension
+
+extension FileDiff {
+    /// Number of context lines to include around each change block
+    static let contextLines = 3
+    
+    /// Group diff lines into hunks with context
+    var hunks: [DiffHunk] {
+        guard !lines.isEmpty else { return [] }
+        
+        var result: [DiffHunk] = []
+        var currentHunkLines: [DiffLine] = []
+        var hunkStartIndex = 0
+        var oldLineNum = 1
+        var newLineNum = 1
+        var hunkOldStart = 1
+        var hunkNewStart = 1
+        var lastChangeIndex = -1
+        
+        for (index, line) in lines.enumerated() {
+            let isChange = line.type == .added || line.type == .removed
+            
+            if isChange {
+                // Start a new hunk if we're too far from the last change
+                if lastChangeIndex >= 0 && index - lastChangeIndex > Self.contextLines * 2 {
+                    // Finalize the current hunk
+                    if !currentHunkLines.isEmpty {
+                        // Trim trailing context to contextLines
+                        let trailingContextCount = currentHunkLines.reversed().prefix(while: { $0.type == .unchanged }).count
+                        let trimCount = max(0, trailingContextCount - Self.contextLines)
+                        if trimCount > 0 {
+                            currentHunkLines.removeLast(trimCount)
+                        }
+                        
+                        let oldCount = currentHunkLines.filter { $0.type == .removed || $0.type == .unchanged }.count
+                        let newCount = currentHunkLines.filter { $0.type == .added || $0.type == .unchanged }.count
+                        
+                        result.append(DiffHunk(
+                            oldStartLine: hunkOldStart,
+                            oldLineCount: oldCount,
+                            newStartLine: hunkNewStart,
+                            newLineCount: newCount,
+                            lines: currentHunkLines,
+                            lineIndexRange: hunkStartIndex..<(hunkStartIndex + currentHunkLines.count)
+                        ))
+                    }
+                    
+                    // Start new hunk with leading context
+                    currentHunkLines = []
+                    hunkStartIndex = max(0, index - Self.contextLines)
+                    
+                    // Add leading context
+                    let contextStart = max(0, index - Self.contextLines)
+                    for i in contextStart..<index {
+                        currentHunkLines.append(lines[i])
+                    }
+                    
+                    // Update start line numbers
+                    hunkOldStart = oldLineNum - currentHunkLines.filter { $0.type == .unchanged || $0.type == .removed }.count
+                    hunkNewStart = newLineNum - currentHunkLines.filter { $0.type == .unchanged || $0.type == .added }.count
+                }
+                
+                // If this is the first change, start the hunk
+                if currentHunkLines.isEmpty {
+                    hunkStartIndex = max(0, index - Self.contextLines)
+                    
+                    // Add leading context
+                    let contextStart = max(0, index - Self.contextLines)
+                    for i in contextStart..<index {
+                        currentHunkLines.append(lines[i])
+                    }
+                    
+                    hunkOldStart = oldLineNum - currentHunkLines.filter { $0.type == .unchanged || $0.type == .removed }.count
+                    hunkNewStart = newLineNum - currentHunkLines.filter { $0.type == .unchanged || $0.type == .added }.count
+                }
+                
+                lastChangeIndex = index
+            }
+            
+            // Add line to current hunk if we're building one
+            if lastChangeIndex >= 0 && index >= hunkStartIndex {
+                if !currentHunkLines.contains(where: { $0.id == line.id }) {
+                    currentHunkLines.append(line)
+                }
+            }
+            
+            // Track line numbers
+            switch line.type {
+            case .unchanged:
+                oldLineNum += 1
+                newLineNum += 1
+            case .removed:
+                oldLineNum += 1
+            case .added:
+                newLineNum += 1
+            default:
+                break
+            }
+        }
+        
+        // Finalize last hunk
+        if !currentHunkLines.isEmpty {
+            // Trim trailing context to contextLines
+            let trailingContextCount = currentHunkLines.reversed().prefix(while: { $0.type == .unchanged }).count
+            let trimCount = max(0, trailingContextCount - Self.contextLines)
+            if trimCount > 0 {
+                currentHunkLines.removeLast(trimCount)
+            }
+            
+            let oldCount = currentHunkLines.filter { $0.type == .removed || $0.type == .unchanged }.count
+            let newCount = currentHunkLines.filter { $0.type == .added || $0.type == .unchanged }.count
+            
+            result.append(DiffHunk(
+                oldStartLine: hunkOldStart,
+                oldLineCount: oldCount,
+                newStartLine: hunkNewStart,
+                newLineCount: newCount,
+                lines: currentHunkLines,
+                lineIndexRange: hunkStartIndex..<(hunkStartIndex + currentHunkLines.count)
+            ))
+        }
+        
+        return result
+    }
+    
+    /// Apply only the accepted hunks and return the resulting content
+    /// - Parameter decisions: Map of hunk ID to decision
+    /// - Returns: The file content with only accepted hunks applied
+    func applyPartialHunks(decisions: [UUID: HunkDecision]) -> String {
+        let beforeLines = fileChange.beforeContent?.components(separatedBy: "\n") ?? []
+        var resultLines = beforeLines
+        
+        // Sort hunks by their position in the file (reverse order for safe modification)
+        let sortedHunks = hunks.sorted { $0.oldStartLine > $1.oldStartLine }
+        
+        for hunk in sortedHunks {
+            let decision = decisions[hunk.id] ?? .pending
+            
+            // Only apply accepted hunks
+            guard decision == .accepted else { continue }
+            
+            // Calculate the lines to remove and add
+            let removedLines = hunk.lines.filter { $0.type == .removed }
+            let addedLines = hunk.lines.filter { $0.type == .added }
+            
+            // Find the range in resultLines to replace
+            let startIdx = max(0, hunk.oldStartLine - 1)
+            let endIdx = min(resultLines.count, startIdx + removedLines.count)
+            
+            // Replace the old lines with new lines
+            let newContent = addedLines.map { $0.content }
+            if startIdx < resultLines.count {
+                resultLines.replaceSubrange(startIdx..<endIdx, with: newContent)
+            } else {
+                resultLines.append(contentsOf: newContent)
+            }
+        }
+        
+        return resultLines.joined(separator: "\n")
+    }
+}
+
+// MARK: - Diff History Entry
+
+/// Represents a file change in the session history for navigation
+struct DiffHistoryEntry: Identifiable, Equatable {
+    let id: UUID
+    let fileChange: FileChange
+    let checkpointId: UUID?
+    let sequenceNumber: Int
+    
+    init(
+        id: UUID = UUID(),
+        fileChange: FileChange,
+        checkpointId: UUID? = nil,
+        sequenceNumber: Int
+    ) {
+        self.id = id
+        self.fileChange = fileChange
+        self.checkpointId = checkpointId
+        self.sequenceNumber = sequenceNumber
+    }
+    
+    /// Display title for the history entry
+    var title: String {
+        "\(fileChange.operationType.description): \(fileChange.fileName)"
+    }
+    
+    /// Formatted timestamp
+    var formattedTime: String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: fileChange.timestamp)
+    }
+}
+
 // MARK: - File Change Result
 
 /// Result of a file change operation

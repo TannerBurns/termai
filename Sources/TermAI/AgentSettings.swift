@@ -35,6 +35,934 @@ enum AppearanceMode: String, Codable, CaseIterable {
     }
 }
 
+/// Terminal bell behavior mode
+enum TerminalBellMode: String, Codable, CaseIterable {
+    case sound = "Sound"
+    case visual = "Visual"
+    case off = "Off"
+    
+    /// SF Symbol icon for the mode
+    var icon: String {
+        switch self {
+        case .sound: return "bell.fill"
+        case .visual: return "light.max"
+        case .off: return "bell.slash"
+        }
+    }
+    
+    /// Description for the mode
+    var description: String {
+        switch self {
+        case .sound: return "Play system alert sound"
+        case .visual: return "Flash the terminal window"
+        case .off: return "Disable terminal bell"
+        }
+    }
+}
+
+/// Agent mode determines the level of autonomy and tools available
+enum AgentMode: String, Codable, CaseIterable {
+    case scout = "Scout"       // Read-only tools - explore and understand
+    case copilot = "Copilot"   // File read/write but no shell execution
+    case pilot = "Pilot"       // Full agent with shell access
+    
+    /// SF Symbol icon for the mode
+    var icon: String {
+        switch self {
+        case .scout: return "binoculars"
+        case .copilot: return "airplane"
+        case .pilot: return "airplane.departure"
+        }
+    }
+    
+    /// Short description for tooltips
+    var description: String {
+        switch self {
+        case .scout: return "Read-only exploration"
+        case .copilot: return "File operations, no shell"
+        case .pilot: return "Full autonomous agent"
+        }
+    }
+    
+    /// Detailed description for settings
+    var detailedDescription: String {
+        switch self {
+        case .scout: return "Can read files and explore the codebase, but cannot make changes"
+        case .copilot: return "Can read and write files, but cannot execute shell commands"
+        case .pilot: return "Full access to all tools including shell command execution"
+        }
+    }
+    
+    /// Color for the mode indicator
+    var color: Color {
+        switch self {
+        case .scout: return Color(red: 0.3, green: 0.7, blue: 0.9)    // Soft blue
+        case .copilot: return Color(red: 0.9, green: 0.7, blue: 0.2)  // Amber/gold
+        case .pilot: return Color(red: 0.1, green: 0.85, blue: 0.65)  // Neon mint (matches old agent active)
+        }
+    }
+    
+    /// Whether this mode enables any tools (vs pure chat)
+    var hasTools: Bool {
+        true // All modes have tools now
+    }
+    
+    /// Whether this mode can modify files
+    var canWriteFiles: Bool {
+        self == .copilot || self == .pilot
+    }
+    
+    /// Whether this mode can execute shell commands
+    var canExecuteShell: Bool {
+        self == .pilot
+    }
+}
+
+/// Agent profile determines the task-specific behavior, planning style, and reflection focus
+/// Profiles layer on top of modes - mode defines capability, profile defines approach
+enum AgentProfile: String, Codable, CaseIterable {
+    case auto = "Auto"
+    case general = "General"
+    case coding = "Coding"
+    case testing = "Testing"
+    case devops = "DevOps"
+    case documentation = "Documentation"
+    case productManagement = "Product Management"
+    
+    /// Whether this profile automatically adapts to the task
+    var isAuto: Bool {
+        self == .auto
+    }
+    
+    /// The specialized profiles that Auto mode can switch between
+    static var specializableProfiles: [AgentProfile] {
+        [.coding, .testing, .devops, .documentation, .productManagement]
+    }
+    
+    /// Initialize from a string (used for JSON parsing in Auto mode)
+    static func fromString(_ string: String) -> AgentProfile? {
+        let lowercased = string.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        switch lowercased {
+        case "auto": return .auto
+        case "general": return .general
+        case "coding": return .coding
+        case "testing": return .testing
+        case "devops": return .devops
+        case "documentation": return .documentation
+        case "productmanagement", "product management", "product_management", "pm": return .productManagement
+        default: return nil
+        }
+    }
+    
+    /// SF Symbol icon for the profile
+    var icon: String {
+        switch self {
+        case .auto: return "wand.and.stars"
+        case .general: return "sparkles"
+        case .coding: return "chevron.left.forwardslash.chevron.right"
+        case .testing: return "checkmark.seal"
+        case .devops: return "server.rack"
+        case .documentation: return "doc.text"
+        case .productManagement: return "list.clipboard"
+        }
+    }
+    
+    /// Short description for tooltips
+    var description: String {
+        switch self {
+        case .auto: return "Automatically adapts profile based on task"
+        case .general: return "Balanced general-purpose assistant"
+        case .coding: return "Code quality, architecture & SOLID principles"
+        case .testing: return "Test coverage, TDD & quality assurance"
+        case .devops: return "Infrastructure & safety focus"
+        case .documentation: return "Content quality & clarity focus"
+        case .productManagement: return "User value & requirements focus"
+        }
+    }
+    
+    /// Detailed description for settings
+    var detailedDescription: String {
+        switch self {
+        case .auto:
+            return "Analyzes the current task and dynamically switches between specialized profiles (Coding, Testing, DevOps, etc.) as work progresses."
+        case .general:
+            return "Standard task breakdown with progress tracking. Good for mixed or unknown task types."
+        case .coding:
+            return "SOLID principles, modular design, testable chunks. Emphasizes clean architecture and error handling."
+        case .testing:
+            return "Test-first and test-after approaches. Focuses on coverage, edge cases, and test maintainability."
+        case .devops:
+            return "Rollback-first planning with staged execution. Emphasizes safety checks and state verification."
+        case .documentation:
+            return "Outline-first approach with audience awareness. Focuses on consistency, completeness, and clarity."
+        case .productManagement:
+            return "User story breakdown with acceptance criteria. Tracks stakeholder alignment and scope."
+        }
+    }
+    
+    /// Color for the profile indicator
+    var color: Color {
+        switch self {
+        case .auto: return Color(red: 0.7, green: 0.5, blue: 0.9)         // Auto purple (gradient-like)
+        case .general: return Color(red: 0.6, green: 0.6, blue: 0.65)    // Neutral gray
+        case .coding: return Color(red: 0.4, green: 0.7, blue: 1.0)      // Code blue
+        case .testing: return Color(red: 0.3, green: 0.85, blue: 0.6)    // Test green
+        case .devops: return Color(red: 1.0, green: 0.5, blue: 0.3)      // Infra orange
+        case .documentation: return Color(red: 0.6, green: 0.8, blue: 0.4) // Doc green
+        case .productManagement: return Color(red: 0.8, green: 0.5, blue: 0.9) // PM purple
+        }
+    }
+    
+    /// System prompt addition specific to this profile
+    /// Takes the current agent mode to provide mode-appropriate guidance
+    /// Note: For .auto profile, use the activeProfile's systemPromptAddition instead
+    func systemPromptAddition(for mode: AgentMode) -> String {
+        switch self {
+        case .auto:
+            // Auto mode uses the active profile's prompt - this is a fallback
+            return AgentProfilePrompts.autoSystemPrompt(for: mode)
+        case .general:
+            return AgentProfilePrompts.generalSystemPrompt(for: mode)
+        case .coding:
+            return AgentProfilePrompts.codingSystemPrompt(for: mode)
+        case .testing:
+            return AgentProfilePrompts.testingSystemPrompt(for: mode)
+        case .devops:
+            return AgentProfilePrompts.devopsSystemPrompt(for: mode)
+        case .documentation:
+            return AgentProfilePrompts.documentationSystemPrompt(for: mode)
+        case .productManagement:
+            return AgentProfilePrompts.productManagementSystemPrompt(for: mode)
+        }
+    }
+    
+    /// Planning guidance for this profile (injected when planning is enabled)
+    /// Note: For .auto profile, use the activeProfile's planningGuidance instead
+    func planningGuidance(for mode: AgentMode) -> String {
+        switch self {
+        case .auto:
+            // Auto mode uses the active profile's guidance - this is a fallback
+            return AgentProfilePrompts.generalPlanningGuidance(for: mode)
+        case .general:
+            return AgentProfilePrompts.generalPlanningGuidance(for: mode)
+        case .coding:
+            return AgentProfilePrompts.codingPlanningGuidance(for: mode)
+        case .testing:
+            return AgentProfilePrompts.testingPlanningGuidance(for: mode)
+        case .devops:
+            return AgentProfilePrompts.devopsPlanningGuidance(for: mode)
+        case .documentation:
+            return AgentProfilePrompts.documentationPlanningGuidance(for: mode)
+        case .productManagement:
+            return AgentProfilePrompts.productManagementPlanningGuidance(for: mode)
+        }
+    }
+    
+    /// Reflection prompt questions for periodic progress assessment
+    /// Note: For .auto profile, use the activeProfile's reflectionPrompt instead
+    func reflectionPrompt(for mode: AgentMode) -> String {
+        switch self {
+        case .auto:
+            // Auto mode uses the active profile's reflection - this is a fallback
+            return AgentProfilePrompts.generalReflectionPrompt(for: mode)
+        case .general:
+            return AgentProfilePrompts.generalReflectionPrompt(for: mode)
+        case .coding:
+            return AgentProfilePrompts.codingReflectionPrompt(for: mode)
+        case .testing:
+            return AgentProfilePrompts.testingReflectionPrompt(for: mode)
+        case .devops:
+            return AgentProfilePrompts.devopsReflectionPrompt(for: mode)
+        case .documentation:
+            return AgentProfilePrompts.documentationReflectionPrompt(for: mode)
+        case .productManagement:
+            return AgentProfilePrompts.productManagementReflectionPrompt(for: mode)
+        }
+    }
+}
+
+// MARK: - Agent Profile Prompts
+
+/// Contains all profile-specific prompt content
+/// Separated into a namespace for organization
+enum AgentProfilePrompts {
+    
+    // MARK: - General Profile
+    
+    static func generalSystemPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            
+            PROFILE: General Assistant (Exploration Mode)
+            
+            You are exploring and analyzing to help the user understand their codebase or system.
+            Focus on providing clear, accurate information about what you find.
+            """
+        } else {
+            return """
+            
+            PROFILE: General Assistant
+            
+            You are a balanced, general-purpose assistant. Approach tasks systematically:
+            - Break down complex requests into manageable steps
+            - Verify each step before moving to the next
+            - Communicate progress and any issues clearly
+            """
+        }
+    }
+    
+    static func generalPlanningGuidance(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            PLANNING (Exploration):
+            - Identify what information the user needs
+            - Plan which files/directories to examine
+            - Note patterns and relationships to report
+            """
+        } else {
+            return """
+            PLANNING:
+            - Break the task into numbered steps
+            - Identify dependencies between steps
+            - Include verification for key milestones
+            - Consider what could go wrong
+            """
+        }
+    }
+    
+    static func generalReflectionPrompt(for mode: AgentMode) -> String {
+        return """
+        REFLECTION QUESTIONS:
+        1. What has been accomplished so far?
+        2. Are there any blockers or issues?
+        3. Is the current approach working, or should we adjust?
+        4. What remains to complete the goal?
+        """
+    }
+    
+    // MARK: - Coding Profile
+    
+    static func codingSystemPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            
+            PROFILE: Coding Assistant (Code Review Mode)
+            
+            You are analyzing code to help the user understand architecture, patterns, and potential issues.
+            
+            ANALYSIS FOCUS:
+            - Architecture: Identify patterns (MVC, MVVM, Clean Architecture, Hexagonal, etc.)
+            - SOLID Principles: Check for violations (Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion)
+            - Modularity: Assess coupling, cohesion, and module boundaries
+            - Testability: Identify hard-to-test code (tight coupling, hidden dependencies, global state)
+            - Performance: Spot potential bottlenecks, inefficient algorithms, memory issues
+            - Error Handling: Check for unhandled errors, missing validation, unclear error paths
+            - Security: Look for vulnerabilities, injection risks, data exposure
+            """
+        } else {
+            return """
+            
+            PROFILE: Coding Assistant
+            
+            You are a senior software engineer focused on writing high-quality, maintainable, testable code.
+            
+            SOLID PRINCIPLES (Apply these):
+            - Single Responsibility: Each class/function does ONE thing well
+            - Open/Closed: Open for extension, closed for modification
+            - Liskov Substitution: Subtypes must be substitutable for base types
+            - Interface Segregation: Many specific interfaces over one general-purpose
+            - Dependency Inversion: Depend on abstractions, not concretions
+            
+            MODULAR DESIGN:
+            - Build in TESTABLE CHUNKS: Small, focused functions that can be tested in isolation
+            - Loose coupling: Minimize dependencies between modules
+            - High cohesion: Related functionality stays together
+            - Clear boundaries: Well-defined interfaces between components
+            - Dependency injection: Pass dependencies explicitly, don't create them internally
+            
+            ARCHITECTURE AWARENESS:
+            - Identify the existing architecture pattern (MVC, MVVM, Clean, Hexagonal, etc.)
+            - Respect layer boundaries (don't let UI logic leak into business logic)
+            - Keep business logic pure and framework-agnostic when possible
+            - Use appropriate design patterns (Factory, Strategy, Observer, etc.) where they add clarity
+            
+            ERROR HANDLING:
+            - Fail fast: Validate inputs early, fail clearly
+            - Use appropriate error types (don't just catch/ignore all errors)
+            - Provide meaningful error messages with context
+            - Consider recovery strategies where appropriate
+            - Log errors with enough detail to debug
+            
+            PERFORMANCE MINDSET:
+            - Choose appropriate data structures and algorithms
+            - Be aware of time/space complexity (O(n), O(n²), etc.)
+            - Avoid premature optimization, but don't ignore obvious inefficiencies
+            - Consider memory usage and potential leaks
+            - Profile before optimizing - measure, don't guess
+            
+            CODE QUALITY:
+            - Would this pass a thorough code review?
+            - Is the code self-documenting with clear names?
+            - Are there tests for the new/changed code?
+            - Does it follow the project's existing conventions?
+            """
+        }
+    }
+    
+    static func codingPlanningGuidance(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            PLANNING (Code Analysis):
+            - Identify the architecture pattern and layer boundaries
+            - Map data flow and dependencies between components
+            - Check SOLID principle adherence
+            - Look for testability issues (tight coupling, hidden dependencies)
+            - Note performance concerns and error handling gaps
+            - Document specific recommendations for improvement
+            """
+        } else {
+            return """
+            PLANNING (Code Changes):
+            1. UNDERSTAND: Read existing code to understand patterns, architecture, and conventions
+            2. DESIGN: Plan changes with SOLID principles and testability in mind
+               - What is the single responsibility of each new component?
+               - How will this be tested? (Write test plan before implementation)
+               - What abstractions/interfaces are needed?
+            3. IMPLEMENT IN CHUNKS: Build incrementally in testable pieces
+               - Start with interfaces/protocols
+               - Implement one small piece at a time
+               - Keep functions focused and small
+            4. HANDLE ERRORS: Add appropriate error handling
+               - Validate inputs
+               - Use typed errors where appropriate
+               - Consider edge cases and failure modes
+            5. TEST: Verify behavior and don't break existing functionality
+            6. REVIEW: Check code quality, SOLID adherence, and performance
+            
+            Before modifying any file:
+            - Read it first to understand its role in the architecture
+            - Identify dependencies that need to be abstracted
+            - Consider how to make changes testable
+            """
+        }
+    }
+    
+    static func codingReflectionPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            REFLECTION QUESTIONS (Code Analysis):
+            1. Have I mapped the full architecture and identified the pattern used?
+            2. Are there SOLID principle violations to report?
+            3. What testability issues exist (tight coupling, hidden dependencies)?
+            4. Are there performance or error handling concerns?
+            5. What specific, actionable improvements should I recommend?
+            """
+        } else {
+            return """
+            REFLECTION QUESTIONS (Code Changes):
+            1. Does the code compile/run without errors?
+            2. SOLID CHECK:
+               - Does each new class/function have a single responsibility?
+               - Are dependencies injected, not created internally?
+               - Are abstractions used appropriately?
+            3. TESTABILITY CHECK:
+               - Can the new code be tested in isolation?
+               - Have I written or updated tests?
+               - Are there hidden dependencies that make testing hard?
+            4. ERROR HANDLING CHECK:
+               - Are inputs validated?
+               - Are errors handled appropriately (not swallowed)?
+               - Are error messages helpful for debugging?
+            5. PERFORMANCE CHECK:
+               - Are there any obvious inefficiencies?
+               - Is the algorithm complexity appropriate?
+            6. Would this pass a thorough code review?
+            """
+        }
+    }
+    
+    // MARK: - Testing Profile
+    
+    static func testingSystemPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            
+            PROFILE: Testing Assistant (Test Analysis Mode)
+            
+            You are analyzing tests and test coverage to assess quality and identify gaps.
+            
+            ANALYSIS FOCUS:
+            - Test coverage: What code paths are tested vs untested?
+            - Test quality: Are tests testing behavior or implementation details?
+            - Edge cases: Are boundary conditions and error paths covered?
+            - Test organization: Is the test structure clear and maintainable?
+            - Flaky tests: Identify tests that may be non-deterministic
+            - Test performance: Are there slow tests that could be optimized?
+            - Mocking strategy: Is mocking used appropriately (not over-mocked)?
+            """
+        } else {
+            return """
+            
+            PROFILE: Testing Assistant
+            
+            You are a QA engineer focused on comprehensive, maintainable test coverage.
+            
+            TESTING PHILOSOPHY:
+            - Tests document behavior: Tests should explain what the code does
+            - Test behavior, not implementation: Tests shouldn't break when refactoring
+            - One assertion per concept: Each test verifies one specific behavior
+            - Tests should be fast, isolated, and deterministic
+            
+            WHEN TO USE TDD (Test-First):
+            - New features with clear requirements
+            - Bug fixes (write failing test first, then fix)
+            - Refactoring (tests as safety net)
+            - When design is unclear (tests help clarify the API)
+            
+            WHEN TO USE TEST-AFTER:
+            - Exploratory/prototype code being promoted to production
+            - Legacy code that needs test coverage
+            - When you're learning a new domain
+            - Quick spikes that need hardening
+            
+            TEST TYPES (Use the right level):
+            - Unit tests: Fast, isolated, test single units of logic
+            - Integration tests: Test component interactions
+            - End-to-end tests: Test full user flows (use sparingly)
+            
+            TEST QUALITY CHECKLIST:
+            - Clear test names that describe the behavior being tested
+            - Arrange-Act-Assert structure (Given-When-Then)
+            - No test interdependencies (each test runs in isolation)
+            - Minimal mocking (mock boundaries, not internals)
+            - Edge cases covered (null, empty, boundary values, errors)
+            
+            COVERAGE STRATEGY:
+            - Focus on critical paths and business logic first
+            - Cover error handling and edge cases
+            - Don't chase 100% - focus on meaningful coverage
+            - Untested code is a liability, but bad tests are worse
+            """
+        }
+    }
+    
+    static func testingPlanningGuidance(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            PLANNING (Test Analysis):
+            - Survey existing test structure and organization
+            - Identify coverage gaps (untested code paths)
+            - Check test quality (behavior vs implementation testing)
+            - Look for flaky or slow tests
+            - Note edge cases that aren't covered
+            - Document recommendations for test improvements
+            """
+        } else {
+            return """
+            PLANNING (Test Development):
+            1. ASSESS: Understand what needs testing
+               - Is this new code (TDD candidate) or existing code (test-after)?
+               - What are the critical paths and edge cases?
+               - What test types are appropriate (unit, integration, e2e)?
+            2. DESIGN TEST STRATEGY:
+               - List the behaviors to test (not implementation details)
+               - Identify edge cases: null, empty, boundary values, errors
+               - Determine mocking strategy (what are the boundaries?)
+            3. IMPLEMENT TESTS:
+               - Write clear test names that describe behavior
+               - Use Arrange-Act-Assert pattern
+               - One concept per test
+               - Start with happy path, then edge cases, then errors
+            4. VERIFY:
+               - Run tests to ensure they pass
+               - Verify tests fail when code is broken (mutation testing mindset)
+               - Check for flakiness (run multiple times)
+            5. REFACTOR TESTS:
+               - Remove duplication (setup helpers, fixtures)
+               - Improve test names and clarity
+               - Ensure tests are maintainable
+            """
+        }
+    }
+    
+    static func testingReflectionPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            REFLECTION QUESTIONS (Test Analysis):
+            1. Have I identified the main coverage gaps?
+            2. Are existing tests testing behavior or implementation?
+            3. What edge cases are missing from the test suite?
+            4. Are there flaky or problematic tests?
+            5. What specific test improvements should I recommend?
+            """
+        } else {
+            return """
+            REFLECTION QUESTIONS (Test Development):
+            1. Do all tests pass consistently?
+            2. COVERAGE CHECK:
+               - Are critical paths tested?
+               - Are edge cases covered (null, empty, boundaries)?
+               - Are error paths tested?
+            3. QUALITY CHECK:
+               - Do test names clearly describe the behavior?
+               - Are tests testing behavior (not implementation)?
+               - Is each test focused on one concept?
+            4. MAINTAINABILITY CHECK:
+               - Are tests isolated (no interdependencies)?
+               - Is mocking minimal and at boundaries?
+               - Will these tests survive refactoring?
+            5. Would these tests fail if the code was broken? (mutation testing mindset)
+            """
+        }
+    }
+    
+    // MARK: - DevOps Profile
+    
+    static func devopsSystemPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            
+            PROFILE: DevOps Assistant (Infrastructure Analysis Mode)
+            
+            You are analyzing infrastructure, configurations, and deployment patterns.
+            
+            FOCUS AREAS:
+            - Infrastructure configuration and IaC files
+            - CI/CD pipelines and deployment workflows
+            - Environment configurations and secrets management
+            - Service dependencies and network topology
+            - Security configurations and access controls
+            """
+        } else {
+            return """
+            
+            PROFILE: DevOps Assistant
+            
+            You are a DevOps/SRE engineer focused on reliable, safe infrastructure changes.
+            
+            SAFETY PRINCIPLES:
+            - Rollback-first: Always have a rollback plan before making changes
+            - Staged execution: Test in lower environments before production
+            - Verify state: Check current state before and after changes
+            - Minimal blast radius: Make smallest possible changes
+            - Document changes: Keep clear records of what was changed
+            
+            INFRASTRUCTURE MINDSET:
+            - What is the current state of the system?
+            - What could go wrong with this change?
+            - How do we detect if something goes wrong?
+            - How do we roll back if needed?
+            """
+        }
+    }
+    
+    static func devopsPlanningGuidance(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            PLANNING (Infrastructure Analysis):
+            - Identify infrastructure components and their relationships
+            - Check configuration files and environment variables
+            - Review deployment and CI/CD configurations
+            - Note security configurations and potential issues
+            """
+        } else {
+            return """
+            PLANNING (Infrastructure Changes):
+            1. ASSESS: Document current state before any changes
+            2. PLAN: Define the change with explicit rollback steps
+            3. BACKUP: Create backups or snapshots if applicable
+            4. EXECUTE: Make changes incrementally with verification
+            5. VERIFY: Confirm the system is in the expected state
+            6. DOCUMENT: Record what was changed for future reference
+            
+            For each change:
+            - What is the rollback command/procedure?
+            - How do we verify success?
+            - What logs/metrics should we check?
+            """
+        }
+    }
+    
+    static func devopsReflectionPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            REFLECTION QUESTIONS (Infrastructure Analysis):
+            1. Have I identified all relevant infrastructure components?
+            2. Are there any security or configuration issues?
+            3. Is the infrastructure following best practices?
+            4. What recommendations should I make?
+            """
+        } else {
+            return """
+            REFLECTION QUESTIONS (Infrastructure Changes):
+            1. Is the system in the expected state?
+            2. Have I verified the change worked correctly?
+            3. Are logs/metrics showing normal behavior?
+            4. Do I have a working rollback if needed?
+            5. Have I documented what was changed?
+            6. Are there any lingering issues or warnings?
+            """
+        }
+    }
+    
+    // MARK: - Documentation Profile
+    
+    static func documentationSystemPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            
+            PROFILE: Documentation Assistant (Content Analysis Mode)
+            
+            You are analyzing existing documentation to assess quality and identify gaps.
+            
+            FOCUS AREAS:
+            - Documentation coverage and completeness
+            - Accuracy and currency of information
+            - Structure and organization
+            - Consistency in style and terminology
+            - Cross-references and navigation
+            """
+        } else {
+            return """
+            
+            PROFILE: Documentation Assistant
+            
+            You are a technical writer focused on clear, accurate, and useful documentation.
+            
+            DOCUMENTATION PRINCIPLES:
+            - Audience awareness: Write for the intended reader's knowledge level
+            - Structure first: Create clear outlines before writing content
+            - Consistency: Use consistent terminology and formatting
+            - Completeness: Cover all necessary topics without over-documenting
+            - Maintainability: Write docs that are easy to update
+            
+            WRITING MINDSET:
+            - Who is the reader and what do they need?
+            - Is this clear to someone unfamiliar with the topic?
+            - Is there anything missing or confusing?
+            - Does this follow the existing documentation style?
+            """
+        }
+    }
+    
+    static func documentationPlanningGuidance(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            PLANNING (Documentation Analysis):
+            - Survey existing documentation structure
+            - Identify gaps and outdated content
+            - Check for consistency in style and terminology
+            - Note areas that need improvement
+            """
+        } else {
+            return """
+            PLANNING (Documentation Writing):
+            1. OUTLINE: Create a clear structure before writing
+            2. AUDIENCE: Define who will read this and their knowledge level
+            3. DRAFT: Write content following the outline
+            4. REVIEW: Check for clarity, accuracy, and completeness
+            5. POLISH: Ensure consistent style and formatting
+            
+            Before writing:
+            - Review existing docs for style and conventions
+            - Identify the key points to communicate
+            - Consider what examples or diagrams would help
+            """
+        }
+    }
+    
+    static func documentationReflectionPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            REFLECTION QUESTIONS (Documentation Analysis):
+            1. Have I reviewed all relevant documentation?
+            2. What are the main gaps or issues?
+            3. Is the documentation accurate and up-to-date?
+            4. What specific improvements should I recommend?
+            """
+        } else {
+            return """
+            REFLECTION QUESTIONS (Documentation Writing):
+            1. Is the content clear to the target audience?
+            2. Is the structure logical and easy to navigate?
+            3. Is the terminology consistent throughout?
+            4. Are there any gaps in coverage?
+            5. Do examples and code snippets work correctly?
+            6. Does this match the existing documentation style?
+            """
+        }
+    }
+    
+    // MARK: - Product Management Profile
+    
+    static func productManagementSystemPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            
+            PROFILE: Product Management Assistant (Research Mode)
+            
+            You are gathering information to support product decisions and planning.
+            
+            FOCUS AREAS:
+            - Feature requirements and user stories
+            - Technical feasibility and constraints
+            - Dependencies and integration points
+            - Existing functionality and capabilities
+            - Potential risks and blockers
+            """
+        } else {
+            return """
+            
+            PROFILE: Product Management Assistant
+            
+            You are a product manager focused on delivering user value through well-defined requirements.
+            
+            PRODUCT PRINCIPLES:
+            - User value: Every task should connect to user benefit
+            - Clear requirements: Define acceptance criteria for each item
+            - Scope awareness: Watch for scope creep and undefined requirements
+            - Stakeholder alignment: Ensure understanding of goals and constraints
+            - Incremental delivery: Break work into deliverable increments
+            
+            PRODUCT MINDSET:
+            - What problem are we solving for users?
+            - How do we know when this is "done"?
+            - What are the must-haves vs nice-to-haves?
+            - Are there any undefined requirements we should clarify?
+            """
+        }
+    }
+    
+    static func productManagementPlanningGuidance(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            PLANNING (Product Research):
+            - Identify relevant features and capabilities
+            - Gather technical context and constraints
+            - Note dependencies and integration points
+            - Document findings for product decisions
+            """
+        } else {
+            return """
+            PLANNING (Product Delivery):
+            1. DEFINE: Break down into user stories with acceptance criteria
+            2. PRIORITIZE: Identify must-haves vs nice-to-haves
+            3. SCOPE: Watch for scope creep and undefined requirements
+            4. EXECUTE: Deliver incrementally with verification
+            5. VALIDATE: Confirm acceptance criteria are met
+            
+            For each user story:
+            - What is the user value?
+            - What are the acceptance criteria?
+            - Are there any dependencies or blockers?
+            """
+        }
+    }
+    
+    static func productManagementReflectionPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            REFLECTION QUESTIONS (Product Research):
+            1. Do I have enough information for product decisions?
+            2. Are there any technical constraints or risks?
+            3. What questions should the product team consider?
+            4. Are there any undefined requirements?
+            """
+        } else {
+            return """
+            REFLECTION QUESTIONS (Product Delivery):
+            1. Are we delivering on the defined user value?
+            2. Have acceptance criteria been met for completed items?
+            3. Has the scope changed? If so, is it justified?
+            4. Are there any undefined requirements that need clarification?
+            5. Are stakeholders aligned on progress and priorities?
+            6. What is the next highest-priority item?
+            """
+        }
+    }
+    
+    // MARK: - Auto Profile
+    
+    static func autoSystemPrompt(for mode: AgentMode) -> String {
+        if mode == .scout {
+            return """
+            
+            PROFILE: Auto (Adaptive Mode)
+            
+            You are in adaptive mode, automatically adjusting your approach based on the task at hand.
+            You will analyze the work being done and apply the most appropriate specialized focus:
+            - Coding: For implementation, architecture, and code quality
+            - Testing: For test coverage, TDD, and quality assurance
+            - DevOps: For infrastructure, deployment, and safety-first operations
+            - Documentation: For content clarity, structure, and audience awareness
+            - Product Management: For user value, requirements, and acceptance criteria
+            """
+        } else {
+            return """
+            
+            PROFILE: Auto (Adaptive Mode)
+            
+            You are in adaptive mode, automatically adjusting your approach based on the task at hand.
+            As you work, you will analyze the current task and apply the most appropriate specialized focus:
+            - Coding: SOLID principles, clean architecture, testable code
+            - Testing: Test coverage, edge cases, TDD approaches
+            - DevOps: Rollback-first planning, safety checks, staged execution
+            - Documentation: Outline-first, audience awareness, consistency
+            - Product Management: User stories, acceptance criteria, scope tracking
+            
+            Your approach will adapt as the work progresses through different phases.
+            """
+        }
+    }
+    
+    // MARK: - Profile Analysis (for Auto mode)
+    
+    /// Prompt for analyzing what profile best fits the current task
+    /// Used during reflection and plan item transitions in Auto mode
+    static func profileAnalysisPrompt(
+        currentTask: String,
+        nextItems: [String],
+        recentContext: String,
+        currentProfile: AgentProfile
+    ) -> String {
+        let profileOptions = AgentProfile.specializableProfiles.map { profile in
+            "- \(profile.rawValue): \(profile.description)"
+        }.joined(separator: "\n")
+        
+        return """
+        Analyze the current work and determine the most appropriate profile.
+        
+        AVAILABLE PROFILES:
+        \(profileOptions)
+        - General: Balanced approach for mixed or unclear tasks
+        
+        CURRENT PROFILE: \(currentProfile.rawValue)
+        CURRENT/NEXT TASK: \(currentTask)
+        \(nextItems.isEmpty ? "" : "UPCOMING ITEMS:\n" + nextItems.prefix(3).map { "- \($0)" }.joined(separator: "\n"))
+        
+        RECENT CONTEXT:
+        \(recentContext)
+        
+        Reply with ONLY valid JSON:
+        {
+            "suggested_profile": "coding|testing|devops|documentation|productManagement|general",
+            "reason": "brief explanation of why this profile fits",
+            "confidence": "high|medium|low"
+        }
+        
+        Rules:
+        - Only suggest switching if the work clearly fits a different profile
+        - Prefer keeping current profile if work is ambiguous or mixed
+        - "coding" for implementation, refactoring, architecture work
+        - "testing" for writing tests, test coverage, TDD
+        - "devops" for infrastructure, deployment, CI/CD, shell scripts
+        - "documentation" for README, docs, comments, API documentation
+        - "productManagement" for requirements, user stories, acceptance criteria
+        - "general" for mixed tasks or when unsure
+        """
+    }
+}
+
 /// Global agent settings that control the terminal agent's behavior
 /// These settings are shared across all sessions and persisted to disk
 final class AgentSettings: ObservableObject, Codable {
@@ -45,31 +973,106 @@ final class AgentSettings: ObservableObject, Codable {
     /// Maximum number of iterations the agent will attempt to complete a goal
     @Published var maxIterations: Int = 100
     
+    /// Maximum number of tool calls allowed within a single step (prevents infinite loops)
+    @Published var maxToolCallsPerStep: Int = 100
+    
     /// Maximum number of fix attempts when a command fails
     @Published var maxFixAttempts: Int = 3
     
-    /// Timeout in seconds to wait for command output
-    @Published var commandTimeout: TimeInterval = 10.0
+    /// Timeout in seconds to wait for command output (default 5 minutes for builds/tests)
+    @Published var commandTimeout: TimeInterval = 300.0
     
     /// Delay in seconds before capturing command output after execution
     @Published var commandCaptureDelay: TimeInterval = 1.5
     
-    // MARK: - Context Limits
+    // MARK: - Context Limits (Dynamic Scaling)
     
-    /// Maximum characters to capture from command output
-    @Published var maxOutputCapture: Int = 3000
+    /// Percentage of model context to allocate per individual output capture (0.0-1.0)
+    /// Default 15% means a 128K context model gets ~19K chars per output
+    @Published var outputCapturePercent: Double = 0.15
     
-    /// Maximum characters for the agent context log
-    @Published var maxContextSize: Int = 8000
+    /// Percentage of model context to allocate for agent working memory (0.0-1.0)
+    /// Default 40% means a 128K context model gets ~51K chars for agent memory
+    @Published var agentMemoryPercent: Double = 0.40
+    
+    /// Hard cap on output capture to prevent excessive memory use (chars)
+    @Published var maxOutputCaptureCap: Int = 50000
+    
+    /// Hard cap on agent memory to prevent excessive memory use (chars)
+    @Published var maxAgentMemoryCap: Int = 100000
+    
+    /// Minimum characters to capture from command output (floor for small models)
+    @Published var minOutputCapture: Int = 8000
+    
+    /// Minimum characters for agent context log (floor for small models)
+    @Published var minContextSize: Int = 16000
+    
+    // Legacy settings - kept for migration, now used as minimums
+    /// Maximum characters to capture from command output (legacy - use dynamic calculation)
+    @Published var maxOutputCapture: Int = 8000
+    
+    /// Maximum characters for the agent context log (legacy - use dynamic calculation)
+    @Published var maxContextSize: Int = 16000
     
     /// Threshold above which output is summarized
-    @Published var outputSummarizationThreshold: Int = 5000
+    @Published var outputSummarizationThreshold: Int = 10000
     
     /// Enable automatic summarization of long outputs
     @Published var enableOutputSummarization: Bool = true
     
     /// Maximum size of the full output buffer for search
-    @Published var maxFullOutputBuffer: Int = 50000
+    @Published var maxFullOutputBuffer: Int = 100000
+    
+    // MARK: - Dynamic Context Calculation
+    
+    /// Calculate effective output capture limit based on model context size
+    /// - Parameter contextTokens: The model's context window size in tokens
+    /// - Returns: Maximum characters to capture for a single output
+    func effectiveOutputCaptureLimit(forContextTokens contextTokens: Int) -> Int {
+        // Approximate 4 chars per token
+        let contextChars = contextTokens * 4
+        let dynamic = Int(Double(contextChars) * outputCapturePercent)
+        
+        // Apply floor and cap
+        let withFloor = max(dynamic, minOutputCapture)
+        return min(withFloor, maxOutputCaptureCap)
+    }
+    
+    /// Calculate effective agent memory limit based on model context size
+    /// - Parameter contextTokens: The model's context window size in tokens
+    /// - Returns: Maximum characters for agent working memory
+    func effectiveAgentMemoryLimit(forContextTokens contextTokens: Int) -> Int {
+        // Approximate 4 chars per token
+        let contextChars = contextTokens * 4
+        let dynamic = Int(Double(contextChars) * agentMemoryPercent)
+        
+        // Apply floor and cap
+        let withFloor = max(dynamic, minContextSize)
+        return min(withFloor, maxAgentMemoryCap)
+    }
+    
+    /// Get a human-readable description of current context allocation
+    /// - Parameter contextTokens: The model's context window size in tokens
+    /// - Returns: Description of how context is allocated
+    func contextAllocationDescription(forContextTokens contextTokens: Int) -> String {
+        let outputLimit = effectiveOutputCaptureLimit(forContextTokens: contextTokens)
+        let memoryLimit = effectiveAgentMemoryLimit(forContextTokens: contextTokens)
+        let contextChars = contextTokens * 4
+        
+        return """
+        Model context: ~\(formatChars(contextChars))
+        Per-output capture: \(formatChars(outputLimit)) (\(Int(outputCapturePercent * 100))%)
+        Agent memory: \(formatChars(memoryLimit)) (\(Int(agentMemoryPercent * 100))%)
+        """
+    }
+    
+    /// Format character count for display
+    private func formatChars(_ chars: Int) -> String {
+        if chars >= 1000 {
+            return "\(chars / 1000)K chars"
+        }
+        return "\(chars) chars"
+    }
     
     // MARK: - Planning & Reflection
     
@@ -114,8 +1117,11 @@ final class AgentSettings: ObservableObject, Codable {
     
     // MARK: - Defaults
     
-    /// Enable agent mode by default for new chat sessions
-    @Published var agentModeEnabledByDefault: Bool = false
+    /// Default agent mode for new chat sessions
+    @Published var defaultAgentMode: AgentMode = .scout
+    
+    /// Default agent profile for new chat sessions
+    @Published var defaultAgentProfile: AgentProfile = .general
     
     // MARK: - Appearance
     
@@ -134,10 +1140,77 @@ final class AgentSettings: ObservableObject, Codable {
     /// Note: Destructive operations (delete_file, rm, rmdir) ALWAYS require approval regardless of this setting
     @Published var requireFileEditApproval: Bool = false
     
+    /// Whether to send macOS system notifications when agent approval is needed
+    /// Useful for alerting users who are away or in another window
+    @Published var enableApprovalNotifications: Bool = true
+    
+    /// Whether to play a sound with approval notifications
+    @Published var enableApprovalNotificationSound: Bool = true
+    
+    /// Command patterns that always require user approval before execution
+    /// These are dangerous commands that could cause data loss or system changes
+    @Published var blockedCommandPatterns: [String] = AgentSettings.defaultBlockedCommandPatterns
+    
+    /// Default blocked command patterns for safe agent operation
+    static let defaultBlockedCommandPatterns: [String] = [
+        // File/directory deletion
+        "rm",
+        "rmdir",
+        "unlink",
+        // Elevated privileges
+        "sudo",
+        "su ",
+        "doas",
+        // Permission/ownership changes
+        "chmod",
+        "chown",
+        "chgrp",
+        // Git destructive operations
+        "git push --force",
+        "git push -f",
+        "git reset --hard",
+        "git clean -fd",
+        "git clean -f",
+        "git checkout -- .",
+        // Dangerous moves/copies
+        "mv /",
+        "cp /dev/",
+        // Disk operations
+        "dd ",
+        "mkfs",
+        "fdisk",
+        "diskutil eraseDisk",
+        "diskutil partitionDisk",
+        // Process termination
+        "kill ",
+        "killall ",
+        "pkill ",
+        // System shutdown/reboot
+        "shutdown",
+        "reboot",
+        "halt",
+        // Package removal
+        "brew uninstall",
+        "brew remove",
+        "pip uninstall",
+        "npm uninstall -g",
+        "apt remove",
+        "apt purge",
+        // Database destructive
+        "DROP DATABASE",
+        "DROP TABLE",
+        "TRUNCATE",
+        "DELETE FROM"
+    ]
+    
     // MARK: - Debug
     
     /// Enable verbose logging for agent operations
     @Published var verboseLogging: Bool = false
+    
+    /// Show verbose agent events in chat (progress checks, internal status updates, etc.)
+    /// When false, only essential events like tool calls and file changes are shown
+    @Published var showVerboseAgentEvents: Bool = false
     
     // MARK: - Model Favorites
     
@@ -163,6 +1236,11 @@ final class AgentSettings: ObservableObject, Codable {
     
     /// Reasoning effort for terminal suggestions (for models that support it)
     @Published var terminalSuggestionsReasoningEffort: ReasoningEffort = .none
+    
+    // MARK: - Terminal Bell
+    
+    /// Terminal bell behavior (sound, visual flash, or off)
+    @Published var terminalBellMode: TerminalBellMode = .sound
     
     // MARK: - Test Runner
     
@@ -208,9 +1286,18 @@ final class AgentSettings: ObservableObject, Codable {
     
     enum CodingKeys: String, CodingKey {
         case maxIterations
+        case maxToolCallsPerStep
         case maxFixAttempts
         case commandTimeout
         case commandCaptureDelay
+        // Dynamic context settings
+        case outputCapturePercent
+        case agentMemoryPercent
+        case maxOutputCaptureCap
+        case maxAgentMemoryCap
+        case minOutputCapture
+        case minContextSize
+        // Legacy (still encoded for backward compat)
         case maxOutputCapture
         case maxContextSize
         case outputSummarizationThreshold
@@ -225,12 +1312,17 @@ final class AgentSettings: ObservableObject, Codable {
         case backgroundProcessTimeout
         case fileLockTimeout
         case enableFileMerging
-        case agentModeEnabledByDefault
+        case defaultAgentMode
+        case defaultAgentProfile
         case appAppearance
         case requireCommandApproval
         case autoApproveReadOnly
         case requireFileEditApproval
+        case enableApprovalNotifications
+        case enableApprovalNotificationSound
+        case blockedCommandPatterns
         case verboseLogging
+        case showVerboseAgentEvents
         case agentTemperature
         case titleTemperature
         case favoriteModels
@@ -240,6 +1332,7 @@ final class AgentSettings: ObservableObject, Codable {
         case terminalSuggestionsDebounceSeconds
         case readShellHistory
         case terminalSuggestionsReasoningEffort
+        case terminalBellMode
         case testRunnerEnabled
         case ollamaBaseURL
         case lmStudioBaseURL
@@ -252,14 +1345,60 @@ final class AgentSettings: ObservableObject, Codable {
     required init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         maxIterations = try container.decodeIfPresent(Int.self, forKey: .maxIterations) ?? 100
+        maxToolCallsPerStep = try container.decodeIfPresent(Int.self, forKey: .maxToolCallsPerStep) ?? 100
         maxFixAttempts = try container.decodeIfPresent(Int.self, forKey: .maxFixAttempts) ?? 3
-        commandTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .commandTimeout) ?? 10.0
+        commandTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .commandTimeout) ?? 300.0
         commandCaptureDelay = try container.decodeIfPresent(TimeInterval.self, forKey: .commandCaptureDelay) ?? 1.5
-        maxOutputCapture = try container.decodeIfPresent(Int.self, forKey: .maxOutputCapture) ?? 3000
-        maxContextSize = try container.decodeIfPresent(Int.self, forKey: .maxContextSize) ?? 8000
-        outputSummarizationThreshold = try container.decodeIfPresent(Int.self, forKey: .outputSummarizationThreshold) ?? 5000
+        
+        // Dynamic context settings - check if these exist to detect migration
+        let hasNewSettings = container.contains(.outputCapturePercent)
+        
+        if hasNewSettings {
+            // New settings exist - use them directly
+            outputCapturePercent = try container.decodeIfPresent(Double.self, forKey: .outputCapturePercent) ?? 0.15
+            agentMemoryPercent = try container.decodeIfPresent(Double.self, forKey: .agentMemoryPercent) ?? 0.40
+            maxOutputCaptureCap = try container.decodeIfPresent(Int.self, forKey: .maxOutputCaptureCap) ?? 50000
+            maxAgentMemoryCap = try container.decodeIfPresent(Int.self, forKey: .maxAgentMemoryCap) ?? 100000
+            minOutputCapture = try container.decodeIfPresent(Int.self, forKey: .minOutputCapture) ?? 8000
+            minContextSize = try container.decodeIfPresent(Int.self, forKey: .minContextSize) ?? 16000
+            maxOutputCapture = try container.decodeIfPresent(Int.self, forKey: .maxOutputCapture) ?? 8000
+            maxContextSize = try container.decodeIfPresent(Int.self, forKey: .maxContextSize) ?? 16000
+        } else {
+            // Migration from old fixed settings
+            let legacyOutputCapture = try container.decodeIfPresent(Int.self, forKey: .maxOutputCapture) ?? 3000
+            let legacyContextSize = try container.decodeIfPresent(Int.self, forKey: .maxContextSize) ?? 8000
+            
+            // Convert old fixed values to approximate percentages (assuming ~32K default context)
+            // Old defaults: 3000 chars output, 8000 chars context
+            // New: We'll set percentages that give similar results for a 32K model but scale up for larger models
+            
+            // If user customized old settings significantly higher, try to preserve that intent
+            if legacyOutputCapture > 5000 {
+                // User wanted more output - increase percentage
+                outputCapturePercent = min(0.25, Double(legacyOutputCapture) / (32_000.0 * 4))
+            } else {
+                outputCapturePercent = 0.15 // Default for new users
+            }
+            
+            if legacyContextSize > 12000 {
+                // User wanted more context - increase percentage
+                agentMemoryPercent = min(0.50, Double(legacyContextSize) / (32_000.0 * 4))
+            } else {
+                agentMemoryPercent = 0.40 // Default for new users
+            }
+            
+            // Set new defaults for caps and minimums
+            maxOutputCaptureCap = 50000
+            maxAgentMemoryCap = 100000
+            minOutputCapture = max(8000, legacyOutputCapture) // At least as much as they had before
+            minContextSize = max(16000, legacyContextSize) // At least as much as they had before
+            maxOutputCapture = minOutputCapture
+            maxContextSize = minContextSize
+        }
+        
+        outputSummarizationThreshold = try container.decodeIfPresent(Int.self, forKey: .outputSummarizationThreshold) ?? 10000
         enableOutputSummarization = try container.decodeIfPresent(Bool.self, forKey: .enableOutputSummarization) ?? true
-        maxFullOutputBuffer = try container.decodeIfPresent(Int.self, forKey: .maxFullOutputBuffer) ?? 50000
+        maxFullOutputBuffer = try container.decodeIfPresent(Int.self, forKey: .maxFullOutputBuffer) ?? 100000
         enablePlanning = try container.decodeIfPresent(Bool.self, forKey: .enablePlanning) ?? true
         reflectionInterval = try container.decodeIfPresent(Int.self, forKey: .reflectionInterval) ?? 10
         enableReflection = try container.decodeIfPresent(Bool.self, forKey: .enableReflection) ?? true
@@ -269,12 +1408,17 @@ final class AgentSettings: ObservableObject, Codable {
         backgroundProcessTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .backgroundProcessTimeout) ?? 5.0
         fileLockTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .fileLockTimeout) ?? 30.0
         enableFileMerging = try container.decodeIfPresent(Bool.self, forKey: .enableFileMerging) ?? true
-        agentModeEnabledByDefault = try container.decodeIfPresent(Bool.self, forKey: .agentModeEnabledByDefault) ?? false
+        defaultAgentMode = try container.decodeIfPresent(AgentMode.self, forKey: .defaultAgentMode) ?? .scout
+        defaultAgentProfile = try container.decodeIfPresent(AgentProfile.self, forKey: .defaultAgentProfile) ?? .general
         appAppearance = try container.decodeIfPresent(AppearanceMode.self, forKey: .appAppearance) ?? .system
         requireCommandApproval = try container.decodeIfPresent(Bool.self, forKey: .requireCommandApproval) ?? false
         autoApproveReadOnly = try container.decodeIfPresent(Bool.self, forKey: .autoApproveReadOnly) ?? true
         requireFileEditApproval = try container.decodeIfPresent(Bool.self, forKey: .requireFileEditApproval) ?? false
+        enableApprovalNotifications = try container.decodeIfPresent(Bool.self, forKey: .enableApprovalNotifications) ?? true
+        enableApprovalNotificationSound = try container.decodeIfPresent(Bool.self, forKey: .enableApprovalNotificationSound) ?? true
+        blockedCommandPatterns = try container.decodeIfPresent([String].self, forKey: .blockedCommandPatterns) ?? AgentSettings.defaultBlockedCommandPatterns
         verboseLogging = try container.decodeIfPresent(Bool.self, forKey: .verboseLogging) ?? false
+        showVerboseAgentEvents = try container.decodeIfPresent(Bool.self, forKey: .showVerboseAgentEvents) ?? false
         agentTemperature = try container.decodeIfPresent(Double.self, forKey: .agentTemperature) ?? 0.2
         titleTemperature = try container.decodeIfPresent(Double.self, forKey: .titleTemperature) ?? 1.0
         favoriteModels = try container.decodeIfPresent(Set<String>.self, forKey: .favoriteModels) ?? []
@@ -284,6 +1428,7 @@ final class AgentSettings: ObservableObject, Codable {
         terminalSuggestionsDebounceSeconds = try container.decodeIfPresent(Double.self, forKey: .terminalSuggestionsDebounceSeconds) ?? 2.5
         readShellHistory = try container.decodeIfPresent(Bool.self, forKey: .readShellHistory) ?? true
         terminalSuggestionsReasoningEffort = try container.decodeIfPresent(ReasoningEffort.self, forKey: .terminalSuggestionsReasoningEffort) ?? .none
+        terminalBellMode = try container.decodeIfPresent(TerminalBellMode.self, forKey: .terminalBellMode) ?? .sound
         testRunnerEnabled = try container.decodeIfPresent(Bool.self, forKey: .testRunnerEnabled) ?? false
         ollamaBaseURL = try container.decodeIfPresent(String.self, forKey: .ollamaBaseURL) ?? "http://localhost:11434/v1"
         lmStudioBaseURL = try container.decodeIfPresent(String.self, forKey: .lmStudioBaseURL) ?? "http://localhost:1234/v1"
@@ -294,9 +1439,20 @@ final class AgentSettings: ObservableObject, Codable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(maxIterations, forKey: .maxIterations)
+        try container.encode(maxToolCallsPerStep, forKey: .maxToolCallsPerStep)
         try container.encode(maxFixAttempts, forKey: .maxFixAttempts)
         try container.encode(commandTimeout, forKey: .commandTimeout)
         try container.encode(commandCaptureDelay, forKey: .commandCaptureDelay)
+        
+        // Dynamic context settings
+        try container.encode(outputCapturePercent, forKey: .outputCapturePercent)
+        try container.encode(agentMemoryPercent, forKey: .agentMemoryPercent)
+        try container.encode(maxOutputCaptureCap, forKey: .maxOutputCaptureCap)
+        try container.encode(maxAgentMemoryCap, forKey: .maxAgentMemoryCap)
+        try container.encode(minOutputCapture, forKey: .minOutputCapture)
+        try container.encode(minContextSize, forKey: .minContextSize)
+        
+        // Legacy settings (for backward compatibility)
         try container.encode(maxOutputCapture, forKey: .maxOutputCapture)
         try container.encode(maxContextSize, forKey: .maxContextSize)
         try container.encode(outputSummarizationThreshold, forKey: .outputSummarizationThreshold)
@@ -311,12 +1467,17 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(backgroundProcessTimeout, forKey: .backgroundProcessTimeout)
         try container.encode(fileLockTimeout, forKey: .fileLockTimeout)
         try container.encode(enableFileMerging, forKey: .enableFileMerging)
-        try container.encode(agentModeEnabledByDefault, forKey: .agentModeEnabledByDefault)
+        try container.encode(defaultAgentMode, forKey: .defaultAgentMode)
+        try container.encode(defaultAgentProfile, forKey: .defaultAgentProfile)
         try container.encode(appAppearance, forKey: .appAppearance)
         try container.encode(requireCommandApproval, forKey: .requireCommandApproval)
         try container.encode(autoApproveReadOnly, forKey: .autoApproveReadOnly)
         try container.encode(requireFileEditApproval, forKey: .requireFileEditApproval)
+        try container.encode(enableApprovalNotifications, forKey: .enableApprovalNotifications)
+        try container.encode(enableApprovalNotificationSound, forKey: .enableApprovalNotificationSound)
+        try container.encode(blockedCommandPatterns, forKey: .blockedCommandPatterns)
         try container.encode(verboseLogging, forKey: .verboseLogging)
+        try container.encode(showVerboseAgentEvents, forKey: .showVerboseAgentEvents)
         try container.encode(agentTemperature, forKey: .agentTemperature)
         try container.encode(titleTemperature, forKey: .titleTemperature)
         try container.encode(favoriteModels, forKey: .favoriteModels)
@@ -326,6 +1487,7 @@ final class AgentSettings: ObservableObject, Codable {
         try container.encode(terminalSuggestionsDebounceSeconds, forKey: .terminalSuggestionsDebounceSeconds)
         try container.encode(readShellHistory, forKey: .readShellHistory)
         try container.encode(terminalSuggestionsReasoningEffort, forKey: .terminalSuggestionsReasoningEffort)
+        try container.encode(terminalBellMode, forKey: .terminalBellMode)
         try container.encode(testRunnerEnabled, forKey: .testRunnerEnabled)
         try container.encode(ollamaBaseURL, forKey: .ollamaBaseURL)
         try container.encode(lmStudioBaseURL, forKey: .lmStudioBaseURL)
@@ -390,14 +1552,25 @@ final class AgentSettings: ObservableObject, Codable {
     /// Reset all settings to defaults
     func resetToDefaults() {
         maxIterations = 100
+        maxToolCallsPerStep = 100
         maxFixAttempts = 3
-        commandTimeout = 10.0
+        commandTimeout = 300.0
         commandCaptureDelay = 1.5
-        maxOutputCapture = 3000
-        maxContextSize = 8000
-        outputSummarizationThreshold = 5000
+        
+        // Dynamic context settings
+        outputCapturePercent = 0.15
+        agentMemoryPercent = 0.40
+        maxOutputCaptureCap = 50000
+        maxAgentMemoryCap = 100000
+        minOutputCapture = 8000
+        minContextSize = 16000
+        
+        // Legacy settings (now used as minimums/fallbacks)
+        maxOutputCapture = 8000
+        maxContextSize = 16000
+        outputSummarizationThreshold = 10000
         enableOutputSummarization = true
-        maxFullOutputBuffer = 50000
+        maxFullOutputBuffer = 100000
         enablePlanning = true
         reflectionInterval = 10
         enableReflection = true
@@ -407,12 +1580,17 @@ final class AgentSettings: ObservableObject, Codable {
         backgroundProcessTimeout = 5.0
         fileLockTimeout = 30.0
         enableFileMerging = true
-        agentModeEnabledByDefault = false
+        defaultAgentMode = .scout
+        defaultAgentProfile = .general
         appAppearance = .system
         requireCommandApproval = false
         autoApproveReadOnly = true
         requireFileEditApproval = false
+        enableApprovalNotifications = true
+        enableApprovalNotificationSound = true
+        blockedCommandPatterns = AgentSettings.defaultBlockedCommandPatterns
         verboseLogging = false
+        showVerboseAgentEvents = false
         agentTemperature = 0.2
         titleTemperature = 1.0
         terminalSuggestionsEnabled = true
@@ -421,6 +1599,7 @@ final class AgentSettings: ObservableObject, Codable {
         terminalSuggestionsDebounceSeconds = 2.5
         readShellHistory = true
         terminalSuggestionsReasoningEffort = .none
+        terminalBellMode = .sound
         testRunnerEnabled = false
         ollamaBaseURL = "http://localhost:11434/v1"
         lmStudioBaseURL = "http://localhost:1234/v1"
@@ -510,24 +1689,66 @@ final class AgentSettings: ObservableObject, Codable {
         }
     }
     
-    // MARK: - Destructive Command Detection
+    // MARK: - Destructive/Blocked Command Detection
     
-    /// Destructive commands that always require approval (file deletion)
-    private static let destructiveCommandPrefixes = [
-        "rm ", "rm\t", "rmdir ", "rmdir\t"
-    ]
-    
-    /// Check if a command is destructive (file deletion) - these always require approval
+    /// Check if a command matches any blocked pattern - these always require approval
     func isDestructiveCommand(_ command: String) -> Bool {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        // Check for rm/rmdir as standalone commands
-        if trimmed == "rm" || trimmed == "rmdir" {
-            return true
+        
+        for pattern in blockedCommandPatterns {
+            let lowerPattern = pattern.lowercased()
+            
+            // Check for exact match (e.g., command is just "rm" or "sudo")
+            if trimmed == lowerPattern {
+                return true
+            }
+            
+            // Check for pattern as prefix with space or tab after (e.g., "rm file.txt")
+            if trimmed.hasPrefix(lowerPattern + " ") || trimmed.hasPrefix(lowerPattern + "\t") {
+                return true
+            }
+            
+            // Check if pattern contains spaces (multi-word like "git push --force")
+            // In this case, check if the command contains the pattern
+            if lowerPattern.contains(" ") && trimmed.contains(lowerPattern) {
+                return true
+            }
+            
+            // For patterns ending with space (like "dd "), check prefix directly
+            if lowerPattern.hasSuffix(" ") && trimmed.hasPrefix(lowerPattern) {
+                return true
+            }
         }
-        // Check for rm/rmdir with arguments
-        return Self.destructiveCommandPrefixes.contains { prefix in
-            trimmed.hasPrefix(prefix)
-        }
+        
+        return false
+    }
+    
+    // MARK: - Blocked Command Helpers
+    
+    /// Add a command pattern to the blocklist
+    func addBlockedPattern(_ pattern: String) {
+        let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !blockedCommandPatterns.contains(trimmed) else { return }
+        blockedCommandPatterns.append(trimmed)
+        save()
+    }
+    
+    /// Remove a command pattern from the blocklist
+    func removeBlockedPattern(_ pattern: String) {
+        blockedCommandPatterns.removeAll { $0 == pattern }
+        save()
+    }
+    
+    /// Remove blocked patterns at specific indices
+    func removeBlockedPatterns(at offsets: IndexSet) {
+        blockedCommandPatterns.remove(atOffsets: offsets)
+        save()
+    }
+    
+    /// Reset blocked patterns to defaults
+    func resetBlockedPatternsToDefaults() {
+        blockedCommandPatterns = AgentSettings.defaultBlockedCommandPatterns
+        save()
     }
     
     /// Determine if a command should be auto-approved based on settings
