@@ -2910,7 +2910,11 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     }
     
     /// Execute a command with optional approval flow
-    private func executeCommandWithApproval(_ command: String) async -> String? {
+    /// - Parameters:
+    ///   - command: The shell command to execute
+    ///   - timeout: Custom timeout for command execution (defaults to settings value)
+    private func executeCommandWithApproval(_ command: String, timeout: TimeInterval? = nil) async -> String? {
+        let effectiveTimeout = timeout ?? AgentSettings.shared.commandTimeout
         // Request approval if needed
         guard let approvedCommand = await requestCommandApproval(command) else {
             // Command was rejected - update the existing approval message
@@ -2957,7 +2961,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         )
         
         // Wait for output
-        let output = await waitForCommandOutput(matching: approvedCommand, timeout: AgentSettings.shared.commandTimeout)
+        let output = await waitForCommandOutput(matching: approvedCommand, timeout: effectiveTimeout)
         
         // Record in context log - note: recentCommands tracking done in caller
         agentContextLog.append("RAN: \(approvedCommand)")
@@ -3008,7 +3012,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         let output: String?
         if AgentSettings.shared.isDestructiveCommand(command) ||
            (requireApproval && !AgentSettings.shared.shouldAutoApprove(command)) {
-            output = await executeCommandWithApproval(command)
+            output = await executeCommandWithApproval(command, timeout: effectiveTimeout)
         } else {
             // Direct execution
             await MainActor.run {
