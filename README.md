@@ -44,6 +44,7 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 - **Image Preview** — View PNG, JPG, GIF, WebP, and SVG with transparency support
 - **Markdown Preview** — Toggle between source code and rendered markdown
 - **Edit & Save** — Full editing with Cmd+S to save, undo/redo support
+- **Live Reload** — Prompt to reload when agent modifies an open file
 - **Add to Chat** — Send file content or selected lines to chat with line numbers
 
 ### Terminal

@@ -1,6 +1,40 @@
 import SwiftUI
 import AppKit
 
+// MARK: - Native Tooltip Modifier
+
+/// A view modifier that adds native AppKit tooltips
+struct NativeTooltip: ViewModifier {
+    let text: String
+    
+    func body(content: Content) -> some View {
+        content
+            .background(TooltipView(text: text))
+    }
+}
+
+/// NSViewRepresentable that adds a native tooltip
+private struct TooltipView: NSViewRepresentable {
+    let text: String
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.toolTip = text
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.toolTip = text
+    }
+}
+
+extension View {
+    /// Adds a native AppKit tooltip that works reliably
+    func nativeTooltip(_ text: String) -> some View {
+        modifier(NativeTooltip(text: text))
+    }
+}
+
 // MARK: - File Viewer Tab
 
 /// File viewer/editor with syntax highlighting, line numbers, and search
@@ -26,6 +60,8 @@ struct FileViewerTab: View {
     @State private var imageData: NSImage?
     @State private var showMarkdownPreview: Bool = false
     @State private var showUnsavedAlert: Bool = false
+    @State private var showExternalChangeAlert: Bool = false
+    @State private var externallyModified: Bool = false
     @FocusState private var isSearchFocused: Bool
     
     private var theme: FileViewerTheme {
@@ -110,6 +146,30 @@ struct FileViewerTab: View {
                 .keyboardShortcut("s", modifiers: .command)
                 .opacity(0)
         )
+        // Listen for file modifications from agent tools
+        .onReceive(NotificationCenter.default.publisher(for: .TermAIFileModifiedOnDisk)) { notification in
+            handleExternalFileChange(notification)
+        }
+        // External change alert
+        .alert("File Modified Externally", isPresented: $showExternalChangeAlert) {
+            Button("Reload from Disk", role: .destructive) {
+                loadFile()
+                externallyModified = false
+            }
+            Button("Keep My Version") {
+                // User wants to keep their version - mark that we've seen the change
+                externallyModified = false
+            }
+            if isDirty {
+                Button("Cancel", role: .cancel) {}
+            }
+        } message: {
+            if isDirty {
+                Text("This file was modified by the agent. You have unsaved changes. Reloading will discard your changes.")
+            } else {
+                Text("This file was modified by the agent. Would you like to reload it?")
+            }
+        }
     }
     
     // MARK: - File Header
@@ -155,11 +215,11 @@ struct FileViewerTab: View {
                         Image(systemName: "square.and.arrow.down.fill")
                             .font(.system(size: 12))
                             .foregroundColor(.white)
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Color.blue))
                     }
-                    .buttonStyle(.plain)
-                    .frame(width: 24, height: 24)
-                    .background(Circle().fill(Color.blue))
-                    .help("Save changes (⌘S)")
+                    .buttonStyle(.borderless)
+                    .nativeTooltip("Save changes (⌘S)")
                 }
                 
                 // Markdown preview toggle (for markdown files only)
@@ -183,8 +243,8 @@ struct FileViewerTab: View {
                                 .fill(showMarkdownPreview ? Color.purple.opacity(0.15) : Color.primary.opacity(0.05))
                         )
                     }
-                    .buttonStyle(.plain)
-                    .help(showMarkdownPreview ? "Show source code" : "Preview rendered markdown")
+                    .buttonStyle(.borderless)
+                    .nativeTooltip(showMarkdownPreview ? "Show source code" : "Preview rendered markdown")
                 }
                 
                 // Search toggle (not for images or markdown preview)
@@ -198,9 +258,10 @@ struct FileViewerTab: View {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 12))
                             .foregroundColor(showSearch ? theme.accent : theme.secondaryText)
+                            .frame(width: 24, height: 24)
                     }
-                    .buttonStyle(.plain)
-                    .help("Search in File (⌘F)")
+                    .buttonStyle(.borderless)
+                    .nativeTooltip("Search in File (⌘F)")
                     .keyboardShortcut("f", modifiers: .command)
                 }
                 
@@ -231,8 +292,8 @@ struct FileViewerTab: View {
                         )
                     }
                     .fixedSize()
-                    .buttonStyle(.plain)
-                    .help(selectedText.isEmpty ? "Add file content to chat context" : "Add selected lines to chat context")
+                    .buttonStyle(.borderless)
+                    .nativeTooltip(selectedText.isEmpty ? "Add file content to chat context" : "Add selected lines to chat context")
                 }
                 
                 // Copy button
@@ -240,9 +301,10 @@ struct FileViewerTab: View {
                     Image(systemName: "doc.on.doc")
                         .font(.system(size: 12))
                         .foregroundColor(theme.secondaryText)
+                        .frame(width: 24, height: 24)
                 }
-                .buttonStyle(.plain)
-                .help("Copy Content")
+                .buttonStyle(.borderless)
+                .nativeTooltip("Copy Content")
             }
             .fixedSize(horizontal: true, vertical: false)  // Prevent buttons from wrapping
         }
@@ -279,7 +341,8 @@ struct FileViewerTab: View {
                             .font(.system(size: 11))
                             .foregroundColor(theme.secondaryText)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
+                    .nativeTooltip("Clear Search")
                 }
             }
             .padding(.horizontal, 8)
@@ -338,16 +401,18 @@ struct FileViewerTab: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(theme.secondaryText)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .disabled(searchMatches.isEmpty)
+                .nativeTooltip("Previous Match (⇧Enter)")
                 
                 Button(action: findNext) {
                     Image(systemName: "chevron.down")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(theme.secondaryText)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .disabled(searchMatches.isEmpty)
+                .nativeTooltip("Next Match (Enter)")
             }
             
             Spacer()
@@ -358,7 +423,8 @@ struct FileViewerTab: View {
                     .font(.system(size: 11))
                     .foregroundColor(theme.secondaryText)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
+            .nativeTooltip("Close Search (Esc)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -392,8 +458,8 @@ struct FileViewerTab: View {
                         .fill(isActive ? Color.accentColor : Color.primary.opacity(0.08))
                 )
             }
-            .buttonStyle(.plain)
-            .help(help)
+            .buttonStyle(.borderless)
+            .nativeTooltip(help)
         }
     }
     
@@ -644,6 +710,30 @@ struct FileViewerTab: View {
         let match = searchMatches[index]
         let prefix = fileContent[..<match.lowerBound]
         return prefix.components(separatedBy: .newlines).count - 1
+    }
+    
+    // MARK: - External File Change Handling
+    
+    /// Handle notification that a file was modified externally (by agent tools)
+    private func handleExternalFileChange(_ notification: Notification) {
+        guard let modifiedPath = notification.userInfo?["path"] as? String,
+              let currentPath = tab.filePath else { return }
+        
+        // Normalize paths for comparison
+        let normalizedModified = URL(fileURLWithPath: modifiedPath).standardized.path
+        let normalizedCurrent = URL(fileURLWithPath: currentPath).standardized.path
+        
+        guard normalizedModified == normalizedCurrent else { return }
+        
+        // This file was modified
+        if isDirty {
+            // User has unsaved changes - show conflict alert
+            externallyModified = true
+            showExternalChangeAlert = true
+        } else {
+            // No local changes - auto-reload
+            loadFile()
+        }
     }
 }
 

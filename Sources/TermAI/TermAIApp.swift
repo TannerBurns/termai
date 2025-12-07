@@ -347,7 +347,7 @@ struct AppTabPill: View {
 struct AppTabContentView: View {
     @ObservedObject var tab: AppTab
     @State private var showChat: Bool = true
-    @State private var showFileTree: Bool = false  // Default to closed
+    @State private var showFileTree: Bool = true  // Default to open
     @State private var editorWidth: CGFloat = 0
     @State private var chatWidth: CGFloat = 0  // 0 means use minimum (default)
     @State private var fileTreeWidth: CGFloat = 200
@@ -409,15 +409,37 @@ struct AppTabContentView: View {
                                     .replacingOccurrences(of: "\"", with: "\\\"")
                                     .replacingOccurrences(of: " ", with: "\\ ")
                                 tab.ptyModel.sendInput?("cd \(escapedPath)\n")
+                                
+                                // Directly navigate file tree (with lock to ignore OSC 7)
+                                let targetPath = node.path
+                                if FileManager.default.fileExists(atPath: targetPath) {
+                                    tab.fileTreeModel.navigateTo(path: targetPath)
+                                    tab.ptyModel.currentWorkingDirectory = targetPath
+                                }
                             }
                         },
                         onNavigateUp: {
                             // Go up one directory
+                            let currentCWD = tab.ptyModel.currentWorkingDirectory
+                            let newPath = (currentCWD as NSString).deletingLastPathComponent
+                            
                             tab.ptyModel.sendInput?("cd ..\n")
+                            
+                            // Directly navigate file tree (with lock to ignore OSC 7)
+                            if FileManager.default.fileExists(atPath: newPath) {
+                                tab.fileTreeModel.navigateTo(path: newPath)
+                                tab.ptyModel.currentWorkingDirectory = newPath
+                            }
                         },
                         onNavigateHome: {
                             // Go to home directory
+                            let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+                            
                             tab.ptyModel.sendInput?("cd ~\n")
+                            
+                            // Directly navigate file tree (with lock to ignore OSC 7)
+                            tab.fileTreeModel.navigateTo(path: homePath)
+                            tab.ptyModel.currentWorkingDirectory = homePath
                         }
                     )
                     .frame(width: effectiveFileTreeWidth)
@@ -484,7 +506,8 @@ struct AppTabContentView: View {
                             )
                         }
                     },
-                    isFileTreeVisible: showFileTree
+                    isFileTreeVisible: showFileTree,
+                    isChatVisible: showChat
                 )
                 .environmentObject(tab.ptyModel)
                 .environmentObject(tab.suggestionService)

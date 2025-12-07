@@ -101,7 +101,7 @@ struct FileTreeSidebar: View {
             .help("Refresh")
             
             // Collapse all button
-            Button(action: collapseAll) {
+            Button(action: { model.collapseAll() }) {
                 Image(systemName: "arrow.down.right.and.arrow.up.left")
                     .font(.system(size: 10))
                     .foregroundColor(theme.secondaryText)
@@ -218,19 +218,6 @@ struct FileTreeSidebar: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    // MARK: - Actions
-    
-    private func collapseAll() {
-        func collapse(_ node: FileTreeNode) {
-            if node.isDirectory && node.isExpanded {
-                node.isExpanded = false
-            }
-            node.children?.forEach { collapse($0) }
-        }
-        if let root = model.rootNode {
-            root.children?.forEach { collapse($0) }
-        }
-    }
 }
 
 // MARK: - File Tree Row
@@ -264,6 +251,7 @@ struct FileTreeRow: View {
                         .frame(width: 12, height: 12)
                 }
                 .buttonStyle(.plain)
+                .help(node.isExpanded ? "Collapse" : "Expand")
             } else {
                 Color.clear.frame(width: 12)
             }

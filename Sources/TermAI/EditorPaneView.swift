@@ -14,6 +14,7 @@ struct EditorPaneView: View {
     let onOpenSettings: () -> Void
     let onAddFileToChat: (String, String?, [LineRange]?) -> Void  // (content, filePath, lineRanges)
     let isFileTreeVisible: Bool
+    let isChatVisible: Bool
     
     @Environment(\.colorScheme) var colorScheme
     
@@ -50,7 +51,8 @@ struct EditorPaneView: View {
             onToggleChat: onToggleChat,
             onToggleFileTree: onToggleFileTree,
             onOpenSettings: onOpenSettings,
-            isFileTreeVisible: isFileTreeVisible
+            isFileTreeVisible: isFileTreeVisible,
+            isChatVisible: isChatVisible
         )
         .environmentObject(ptyModel)
         .environmentObject(suggestionService)
@@ -75,6 +77,7 @@ struct TerminalPaneContent: View {
     let onToggleFileTree: () -> Void
     let onOpenSettings: () -> Void
     let isFileTreeVisible: Bool
+    let isChatVisible: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -193,13 +196,13 @@ struct TerminalPaneContent: View {
             
             // Chat toggle button
             Button(action: onToggleChat) {
-                Image(systemName: "bubble.right")
+                Image(systemName: isChatVisible ? "bubble.right.fill" : "bubble.right")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(isChatVisible ? .accentColor : .secondary)
                     .frame(width: 26, height: 26)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.primary.opacity(0.05))
+                            .fill(isChatVisible ? Color.accentColor.opacity(0.1) : Color.primary.opacity(0.05))
                     )
             }
             .buttonStyle(.plain)
@@ -321,7 +324,8 @@ struct EditorPaneView_Previews: PreviewProvider {
             onToggleFileTree: {},
             onOpenSettings: {},
             onAddFileToChat: { _, _, _ in },
-            isFileTreeVisible: true
+            isFileTreeVisible: true,
+            isChatVisible: true
         )
         .environmentObject(PTYModel())
         .environmentObject(TerminalSuggestionService())

@@ -148,6 +148,11 @@ final class FileTreeModel: ObservableObject {
     @Published var selectedNode: FileTreeNode?
     @Published var isVisible: Bool = false
     
+    /// Timestamp of last manual navigation - used to ignore OSC 7 updates briefly
+    private var lastManualNavigationTime: Date?
+    /// How long to ignore automatic CWD updates after manual navigation (in seconds)
+    private let navigationLockDuration: TimeInterval = 0.5
+    
     /// Directories to always ignore
     private let ignoredDirectories: Set<String> = [
         ".git", ".svn", ".hg", "node_modules", "__pycache__", ".venv", "venv",
@@ -168,8 +173,27 @@ final class FileTreeModel: ObservableObject {
     
     // MARK: - Public Methods
     
-    /// Update the tree root when CWD changes
+    /// Update the tree root when CWD changes (from OSC 7 or other automatic sources)
     func updateRoot(to path: String) {
+        // Check if we're in a navigation lock period (ignore automatic updates)
+        if let lastNav = lastManualNavigationTime,
+           Date().timeIntervalSince(lastNav) < navigationLockDuration {
+            fileTreeLogger.debug("Ignoring automatic CWD update during navigation lock: \(path, privacy: .public)")
+            return
+        }
+        
+        updateRootInternal(to: path)
+    }
+    
+    /// Navigate to a specific path (manual navigation from UI buttons)
+    /// This sets a lock to prevent OSC 7 from overriding the navigation
+    func navigateTo(path: String) {
+        lastManualNavigationTime = Date()
+        updateRootInternal(to: path)
+    }
+    
+    /// Internal method to actually update the root
+    private func updateRootInternal(to path: String) {
         guard path != currentPath, !path.isEmpty else { return }
         
         fileTreeLogger.info("Updating file tree root to: \(path, privacy: .public)")
@@ -223,6 +247,21 @@ final class FileTreeModel: ObservableObject {
         let path = currentPath
         currentPath = ""
         updateRoot(to: path)
+    }
+    
+    /// Collapse all expanded directories
+    func collapseAll() {
+        guard let root = rootNode else { return }
+        collapseNode(root)
+        // Trigger UI update by signaling change
+        objectWillChange.send()
+    }
+    
+    private func collapseNode(_ node: FileTreeNode) {
+        if node.isDirectory && node.isExpanded && node !== rootNode {
+            node.isExpanded = false
+        }
+        node.children?.forEach { collapseNode($0) }
     }
     
     /// Expand to and select a specific file

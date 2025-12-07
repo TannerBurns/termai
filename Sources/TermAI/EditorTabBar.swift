@@ -146,6 +146,7 @@ struct EditorTabPill: View {
                 }
                 .buttonStyle(.plain)
                 .onHover { closeHovered = $0 }
+                .help("Close Tab")
             } else if !tab.type.isTerminal {
                 // Spacer to maintain consistent width
                 Color.clear.frame(width: 14, height: 14)
