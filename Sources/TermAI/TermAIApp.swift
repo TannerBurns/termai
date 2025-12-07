@@ -547,7 +547,7 @@ struct AppTabContentView: View {
                 // Adjust chat width proportionally when window resizes
                 if !isDraggingChat && !isDraggingFileTree && chatWidth > 0 {
                     let ratio = chatWidth / totalWidth
-                    let maxChatWidth = newWidth - (showFileTree ? fileTreeWidth : 0) - minEditorWidth - dividerWidth * 2
+                    let maxChatWidth = newWidth - (showFileTree ? fileTreeWidth : 0) - minEditorWidth - (showFileTree ? dividerWidth : 0) - dividerWidth
                     chatWidth = max(minChatWidth, min(newWidth * ratio, maxChatWidth))
                 }
             }
