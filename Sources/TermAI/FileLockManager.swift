@@ -444,9 +444,11 @@ final class FileLockManager: ObservableObject {
                     handle.write(data)
                 }
                 try handle.close()
+                notifyFileModified(path: path)
                 return .success(output: "Appended \(content.count) chars to \(path)")
             } else {
                 try content.write(to: url, atomically: true, encoding: .utf8)
+                notifyFileModified(path: path)
                 return .success(output: "Wrote \(content.count) chars to \(path)")
             }
         } catch {
@@ -481,6 +483,7 @@ final class FileLockManager: ObservableObject {
             }
             
             try content.write(to: url, atomically: true, encoding: .utf8)
+            notifyFileModified(path: path)
             
             let resultLines = content.components(separatedBy: "\n")
             let previewLines = resultLines.prefix(20).enumerated().map { "\($0.offset + 1)| \($0.element)" }.joined(separator: "\n")
@@ -518,6 +521,7 @@ final class FileLockManager: ObservableObject {
             
             let newContent = lines.joined(separator: "\n")
             try newContent.write(to: url, atomically: true, encoding: .utf8)
+            notifyFileModified(path: path)
             
             let previewStart = max(0, insertIndex - 2)
             let previewEnd = min(lines.count, insertIndex + newLines.count + 2)
@@ -554,6 +558,7 @@ final class FileLockManager: ObservableObject {
             
             let newContent = lines.joined(separator: "\n")
             try newContent.write(to: url, atomically: true, encoding: .utf8)
+            notifyFileModified(path: path)
             
             return .success(output: "Deleted \(deletedCount) line(s) from \(path)")
         } catch {
@@ -566,6 +571,15 @@ final class FileLockManager: ObservableObject {
     private func normalizePath(_ path: String) -> String {
         let expandedPath = NSString(string: path).expandingTildeInPath
         return URL(fileURLWithPath: expandedPath).standardizedFileURL.path
+    }
+    
+    /// Notify observers that a file was modified on disk
+    private func notifyFileModified(path: String) {
+        NotificationCenter.default.post(
+            name: .TermAIFileModifiedOnDisk,
+            object: nil,
+            userInfo: ["path": path]
+        )
     }
     
     // MARK: - Status Queries

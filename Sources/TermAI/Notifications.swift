@@ -17,6 +17,11 @@ extension Notification.Name {
     static let TermAITestRunnerShow = Notification.Name("TermAITestRunnerShow")
     static let TermAITestRunnerStatusUpdate = Notification.Name("TermAITestRunnerStatusUpdate")
     static let TermAITestRunnerCompleted = Notification.Name("TermAITestRunnerCompleted")
+    
+    // File change notifications (agent tools → editor)
+    /// Posted when an agent tool modifies a file on disk
+    /// userInfo: ["path": String] - the absolute file path that was modified
+    static let TermAIFileModifiedOnDisk = Notification.Name("TermAIFileModifiedOnDisk")
 }
 
 

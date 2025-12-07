@@ -29,6 +29,18 @@ extension AgentTool {
         // Fall back to expanding the path (will be relative to app's CWD)
         return expandedPath
     }
+    
+    /// Notify observers that a file was modified on disk
+    /// This allows open file editors to refresh their content
+    func notifyFileModified(path: String) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .TermAIFileModifiedOnDisk,
+                object: nil,
+                userInfo: ["path": path]
+            )
+        }
+    }
 }
 
 struct AgentToolResult {
@@ -965,9 +977,11 @@ struct WriteFileTool: AgentTool, FileOperationTool {
                     handle.write(data)
                 }
                 try handle.close()
+                notifyFileModified(path: path)
                 return .success("Appended \(content.count) chars to \(path)", fileChange: fileChange)
             } else {
                 try content.write(to: url, atomically: true, encoding: .utf8)
+                notifyFileModified(path: path)
                 return .success("Wrote \(content.count) chars to \(path)", fileChange: fileChange)
             }
         } catch {
@@ -1123,6 +1137,7 @@ struct EditFileTool: AgentTool, FileOperationTool {
             }
             
             try content.write(to: url, atomically: true, encoding: .utf8)
+            notifyFileModified(path: path)
             
             let resultLines = content.components(separatedBy: "\n")
             let previewLines = resultLines.prefix(20).enumerated().map { "\($0.offset + 1)| \($0.element)" }.joined(separator: "\n")
@@ -1267,6 +1282,7 @@ struct InsertLinesTool: AgentTool, FileOperationTool {
             
             let newContent = lines.joined(separator: "\n")
             try newContent.write(to: url, atomically: true, encoding: .utf8)
+            notifyFileModified(path: path)
             
             let previewStart = max(0, insertIndex - 2)
             let previewEnd = min(lines.count, insertIndex + newLines.count + 2)
@@ -1414,6 +1430,7 @@ struct DeleteLinesTool: AgentTool, FileOperationTool {
             
             let newContent = lines.joined(separator: "\n")
             try newContent.write(to: url, atomically: true, encoding: .utf8)
+            notifyFileModified(path: path)
             
             return .success("Deleted \(deletedCount) line(s) from \(path)", fileChange: fileChange)
         } catch {
@@ -1492,6 +1509,7 @@ struct DeleteFileTool: AgentTool, FileOperationTool, RequiresApprovalTool {
         // Delete the file
         do {
             try FileManager.default.removeItem(atPath: expandedPath)
+            notifyFileModified(path: expandedPath)  // Notify so any open tabs can react
             return .success("Deleted file: \(expandedPath)", fileChange: fileChange)
         } catch {
             return .failure("Error deleting file: \(error.localizedDescription)")

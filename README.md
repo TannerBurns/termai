@@ -10,11 +10,12 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 
 ### Core Experience
 - **Native macOS App** — Built with SwiftUI for a fast, responsive experience
-- **Side-by-Side Layout** — Terminal and chat panels with a resizable divider
+- **IDE-Style Layout** — File tree, terminal, editor tabs, and chat panels with resizable dividers
 - **Multiple Tabs** — Each tab contains its own terminal and chat sessions
 - **Multiple Chat Sessions** — Create independent chat sessions per tab with their own settings
 - **Persistent State** — Messages, settings, and sessions are saved automatically
 - **Menu Bar Integration** — Quick access to TermAI with provider and model status display
+- **Performance Monitoring** — Real-time CPU and memory usage graphs in the tab bar
 
 ### AI Providers
 - **Cloud Providers** — OpenAI, Anthropic, and Google AI Studio with API key support
@@ -23,6 +24,29 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 - **Reasoning Models** — Full support for OpenAI o-series and Anthropic extended thinking
 - **Flexible API Keys** — Use environment variables or configure in-app overrides
 
+### File Explorer
+- **File Tree Sidebar** — Browse project files synced to the terminal's working directory
+- **Smart Filtering** — Automatically ignores node_modules, .git, build folders, and gitignored files
+- **Search** — Quick filter to find files by name
+- **Language Icons** — Color-coded icons for Swift, Python, JavaScript, TypeScript, Rust, Go, and more
+- **Lazy Loading** — Directories load on expand for fast navigation of large projects
+- **Navigation Buttons** — Quick access to home (~) and parent (..) directories
+- **Folder Navigation** — Double-click a folder to cd into it in the terminal
+- **Context Menu** — Right-click for "Open in Terminal", "Reveal in Finder", "Copy Path"
+- **Resizable** — Drag to adjust sidebar width
+
+### Editor Tabs
+- **IDE-Style Tabs** — Open files in tabs alongside the terminal
+- **Preview Mode** — Single-click opens files in preview (italic), double-click to pin
+- **Syntax Highlighting** — Multi-language support with theme-aware colors
+- **Line Numbers** — With diff indicators showing added/modified lines
+- **Search in File** — Regex support with case-sensitive and whole-word options
+- **Image Preview** — View PNG, JPG, GIF, WebP, and SVG with transparency support
+- **Markdown Preview** — Toggle between source code and rendered markdown
+- **Edit & Save** — Full editing with Cmd+S to save, undo/redo support
+- **Live Reload** — Prompt to reload when agent modifies an open file
+- **Add to Chat** — Send file content or selected lines to chat with line numbers
+
 ### Terminal
 - **SwiftTerm Powered** — Full terminal emulation with ANSI color support
 - **Multiple Themes** — System, Xterm, VGA Dark, Terminal.app, Pale
@@ -30,6 +54,7 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 - **Context Actions** — Select text or capture last output to send to chat
 - **Code Execution** — Run shell commands directly from chat code blocks
 - **Favorite Commands** — Quick-access toolbar with AI-generated emoji icons
+- **File Tree Toggle** — Show/hide the file explorer with Cmd+B
 
 ### Agent Mode
 When enabled, the AI can autonomously execute commands and use tools to complete complex tasks.
@@ -108,13 +133,14 @@ An AI-powered command suggestion system that proactively offers relevant command
 - **Request Type Breakdown** — Track chat, tool calls, planning, reflection, suggestions, and more
 - **Context Window Indicator** — Visual display of context usage percentage
 - **30-Day Retention** — Usage data stored in daily files with automatic cleanup
+- **Performance Graphs** — Real-time CPU and memory sparklines in the editor tab bar
 
 ### Settings
 - **Chat & Model** — Per-session provider, model, temperature, and system prompt
 - **Providers** — Configure API keys and local provider URLs
 - **Agent** — Mode, profile, execution limits, planning, reflection, safety controls
 - **Favorites** — Manage model and command favorites
-- **Appearance** — App theme (light/dark/system) and terminal color schemes
+- **Appearance** — App theme (light/dark/system), terminal color schemes, and editor preferences
 - **Usage** — Token usage dashboard with charts and breakdowns
 - **Data** — Storage location, clear history, factory reset
 
@@ -210,12 +236,37 @@ For local models, you can set a custom context size if auto-detection is incorre
 
 ## Using the App
 
+### File Explorer
+Toggle the file tree sidebar with the sidebar button or Cmd+B:
+- **Single-click** a file to preview it (shown in italic in the tab bar)
+- **Double-click** a file or double-click the tab to pin it permanently
+- **Double-click** a folder to navigate the terminal to that directory
+- **Right-click** any item for context menu (Reveal in Finder, Copy Path, Open in Terminal)
+- Use the **Home** and **Up** buttons to quickly navigate directories
+- Directories expand on click; use the refresh button to rescan
+
+The file tree automatically follows the terminal's working directory.
+
+### Editor Tabs
+Open files appear as tabs alongside the terminal:
+- **Preview tabs** (italic) are replaced when opening another file
+- **Pinned tabs** stay open until explicitly closed
+- Right-click tabs for context menu options (Close, Close Others, Reveal in Finder)
+- Dirty files show an orange dot indicator
+
 ### Terminal to Chat
 Hover over the terminal to reveal action buttons:
 - **Add Selection** — Send highlighted text to chat with metadata
 - **Add Last Output** — Send the most recent command output to chat
 
 Context includes the current working directory and line range hints.
+
+### File to Chat
+When viewing a file:
+- **Add File** — Send the entire file content to chat
+- **Add Selection** — Select lines and send just those with line numbers (e.g., "L12-45")
+
+Line ranges are preserved so the agent knows exactly which code you're referencing.
 
 ### Chat to Terminal
 Code blocks labeled as shell (`bash`, `sh`, `zsh`) show quick actions:
@@ -294,6 +345,9 @@ Configure the terminal suggestion agent in **Settings > Chat & Model** (per-sess
 | Send Message | Cmd+Enter |
 | Toggle Suggestions | Ctrl+Space |
 | Dismiss Suggestions | Esc |
+| Toggle File Tree | Cmd+B |
+| Save File | Cmd+S |
+| Find in File | Cmd+F |
 | Settings | Cmd+, |
 
 ## Data Storage
@@ -349,6 +403,8 @@ Choose how the terminal bell behaves:
 | Agent stuck in loop | Increase stuck detection threshold or reduce max iterations |
 | Context limit warnings | Switch to a model with larger context or clear chat history |
 | Approval notifications not showing | Grant notification permission in System Preferences |
+| File tree not updating | Click the refresh button or cd to trigger an update |
+| Syntax highlighting missing | Check that the file has a recognized extension |
 
 ## Dependencies
 

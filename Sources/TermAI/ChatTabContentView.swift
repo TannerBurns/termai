@@ -1011,25 +1011,60 @@ private struct TerminalContextCard: View {
     
     @State private var isExpanded: Bool = false
     
+    /// Whether this is a file context (vs terminal output)
+    private var isFileContext: Bool {
+        meta?.filePath != nil
+    }
+    
+    private var displayTitle: String {
+        if let filePath = meta?.filePath {
+            return (filePath as NSString).lastPathComponent
+        }
+        return "Terminal Context"
+    }
+    
+    private var displaySubtitle: String? {
+        if let filePath = meta?.filePath {
+            return shortenPath(filePath)
+        }
+        return meta?.cwd.flatMap { shortenPath($0) }
+    }
+    
+    private var iconName: String {
+        isFileContext ? "doc.text.fill" : "terminal.fill"
+    }
+    
+    private var accentColor: Color {
+        isFileContext ? .blue : .orange
+    }
+    
+    private func shortenPath(_ path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 // Icon with glow effect
                 ZStack {
                     Circle()
-                        .fill(Color.orange.opacity(0.2))
+                        .fill(accentColor.opacity(0.2))
                         .frame(width: 24, height: 24)
-                    Image(systemName: "terminal.fill")
+                    Image(systemName: iconName)
                         .font(.system(size: 10))
-                        .foregroundColor(.orange)
+                        .foregroundColor(accentColor)
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Terminal Context")
+                    Text(displayTitle)
                         .font(.caption)
                         .fontWeight(.semibold)
-                    if let meta = meta, let cwd = meta.cwd, !cwd.isEmpty {
-                        Text(cwd)
+                    if let subtitle = displaySubtitle {
+                        Text(subtitle)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
@@ -1038,6 +1073,17 @@ private struct TerminalContextCard: View {
                 }
                 
                 Spacer()
+                
+                // Line count badge for files
+                if isFileContext {
+                    let lineCount = context.components(separatedBy: .newlines).count
+                    Text("\(lineCount) lines")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.05)))
+                }
                 
                 Button(action: { withAnimation(.spring(response: 0.3)) { isExpanded.toggle() } }) {
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
@@ -1078,7 +1124,7 @@ private struct TerminalContextCard: View {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(
                     LinearGradient(
-                        colors: [Color.orange.opacity(0.4), Color.orange.opacity(0.1)],
+                        colors: [accentColor.opacity(0.4), accentColor.opacity(0.1)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),

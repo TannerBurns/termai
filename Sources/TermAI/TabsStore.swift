@@ -12,6 +12,10 @@ final class AppTab: Identifiable, ObservableObject {
     let chatTabsManager: ChatTabsManager
     /// Each app tab has its own suggestion service to avoid cross-tab state leakage
     let suggestionService: TerminalSuggestionService
+    /// File tree model synced to terminal CWD
+    let fileTreeModel: FileTreeModel
+    /// Editor tabs manager for terminal + file tabs
+    let editorTabsManager: EditorTabsManager
     
     /// Tracks whether any agent was running in the previous check (for detecting completion)
     private var wasAgentRunning: Bool = false
@@ -26,6 +30,9 @@ final class AppTab: Identifiable, ObservableObject {
         self.chatTabsManager = chatTabsManager ?? ChatTabsManager(tabId: id)
         // Create a per-tab suggestion service
         self.suggestionService = TerminalSuggestionService()
+        // Create file tree model and editor tabs manager
+        self.fileTreeModel = FileTreeModel()
+        self.editorTabsManager = EditorTabsManager()
         
         // Wire up the agent running check - pause suggestions while chat agent is active
         self.suggestionService.checkAgentRunning = { [weak self] in
@@ -35,6 +42,20 @@ final class AppTab: Identifiable, ObservableObject {
         
         // Observe agent execution phase changes to resume suggestions when agent completes
         setupAgentCompletionObserver()
+        
+        // Sync file tree with terminal CWD
+        setupFileTreeSync()
+    }
+    
+    /// Sets up observation of terminal CWD to sync file tree
+    private func setupFileTreeSync() {
+        ptyModel.$currentWorkingDirectory
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] cwd in
+                guard let self = self, !cwd.isEmpty else { return }
+                self.fileTreeModel.updateRoot(to: cwd)
+            }
+            .store(in: &cancellables)
     }
     
     /// Sets up observation of chat sessions to detect when agent finishes
