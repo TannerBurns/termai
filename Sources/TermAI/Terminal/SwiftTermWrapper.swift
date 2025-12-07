@@ -747,10 +747,8 @@ struct SwiftTermView: NSViewRepresentable {
             guard let term = term, let model = model else { return }
             
             // Check for pending service directory (from "New TermAI at Folder" Finder integration)
-            let pendingDir = AppDelegate.pendingServiceDirectory
-            if pendingDir != nil {
-                AppDelegate.pendingServiceDirectory = nil  // Clear it so only this terminal uses it
-            }
+            // Uses atomic consume to avoid race conditions with the Services handler
+            let pendingDir = AppDelegate.consumePendingServiceDirectory()
             
             let startDir = pendingDir ?? model.initialDirectory ?? FileManager.default.homeDirectoryForCurrentUser.path
             let escaped = startDir.replacingOccurrences(of: "\"", with: "\\\"")

@@ -285,13 +285,9 @@ struct WindowContentWrapper: View {
         self.openWindowAction = openWindowAction
         
         // Check if there's a pending directory for this new window
+        // Both methods atomically consume (read and clear) the pending directory
         let initialDirectory = WindowOpener.consumePendingDirectory()
-            ?? AppDelegate.pendingServiceDirectory
-        
-        // Clear service directory if we used it
-        if initialDirectory == AppDelegate.pendingServiceDirectory {
-            AppDelegate.pendingServiceDirectory = nil
-        }
+            ?? AppDelegate.consumePendingServiceDirectory()
         
         // Create TabsStore with initial directory if provided
         _tabsStore = StateObject(wrappedValue: TabsStore(initialDirectory: initialDirectory))
@@ -805,8 +801,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     weak var tabsStore: TabsStore?
     private var notificationObservers: [NSObjectProtocol] = []
     
-    /// Pending directory from Services - picked up when app launches
-    static var pendingServiceDirectory: String?
+    /// Pending directory from Services - picked up when app launches (thread-safe)
+    private static let pendingServiceDirectoryLock = NSLock()
+    private static var _pendingServiceDirectory: String?
+    
+    static var pendingServiceDirectory: String? {
+        get {
+            pendingServiceDirectoryLock.lock()
+            defer { pendingServiceDirectoryLock.unlock() }
+            return _pendingServiceDirectory
+        }
+        set {
+            pendingServiceDirectoryLock.lock()
+            _pendingServiceDirectory = newValue
+            pendingServiceDirectoryLock.unlock()
+        }
+    }
+    
+    /// Consume the pending service directory (returns it and clears it atomically)
+    static func consumePendingServiceDirectory() -> String? {
+        pendingServiceDirectoryLock.lock()
+        defer { pendingServiceDirectoryLock.unlock() }
+        let dir = _pendingServiceDirectory
+        _pendingServiceDirectory = nil
+        return dir
+    }
     
     /// Track the focused window's TabsStore for menu commands (legacy static access)
     @MainActor static var focusedTabsStore: TabsStore? {

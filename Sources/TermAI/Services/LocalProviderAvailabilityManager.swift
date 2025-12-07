@@ -3,6 +3,7 @@ import Combine
 
 /// Manages availability status of local LLM providers (Ollama, LM Studio, vLLM).
 /// Checks connectivity at startup and caches results, similar to CloudAPIKeyManager for API keys.
+@MainActor
 final class LocalProviderAvailabilityManager: ObservableObject {
     static let shared = LocalProviderAvailabilityManager()
     
@@ -50,9 +51,7 @@ final class LocalProviderAvailabilityManager: ObservableObject {
     func refresh(provider: LocalLLMProvider) {
         Task {
             let available = await checkProvider(provider)
-            await MainActor.run {
-                self.updateAvailability(provider: provider, available: available)
-            }
+            self.updateAvailability(provider: provider, available: available)
         }
     }
     
@@ -65,26 +64,23 @@ final class LocalProviderAvailabilityManager: ObservableObject {
     
     private func checkAllProviders() {
         guard !isChecking else { return }
+        isChecking = true
         
         Task {
-            await MainActor.run {
-                self.isChecking = true
-            }
-            
             // Check all providers in parallel for speed
+            // Network I/O automatically runs off MainActor
             async let ollamaCheck = checkProvider(.ollama)
             async let lmStudioCheck = checkProvider(.lmStudio)
             async let vllmCheck = checkProvider(.vllm)
             
             let (ollama, lmStudio, vllm) = await (ollamaCheck, lmStudioCheck, vllmCheck)
             
-            await MainActor.run {
-                self.ollamaAvailable = ollama
-                self.lmStudioAvailable = lmStudio
-                self.vllmAvailable = vllm
-                self.hasCheckedAvailability = true
-                self.isChecking = false
-            }
+            // Back on MainActor (class is @MainActor isolated)
+            self.ollamaAvailable = ollama
+            self.lmStudioAvailable = lmStudio
+            self.vllmAvailable = vllm
+            self.hasCheckedAvailability = true
+            self.isChecking = false
         }
     }
     
