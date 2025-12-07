@@ -1554,7 +1554,7 @@ final class AgentSettings: ObservableObject, Codable {
         fileLockTimeout = try container.decodeIfPresent(TimeInterval.self, forKey: .fileLockTimeout) ?? 30.0
         enableFileMerging = try container.decodeIfPresent(Bool.self, forKey: .enableFileMerging) ?? true
         defaultAgentMode = try container.decodeIfPresent(AgentMode.self, forKey: .defaultAgentMode) ?? .scout
-        defaultAgentProfile = try container.decodeIfPresent(AgentProfile.self, forKey: .defaultAgentProfile) ?? .general
+        defaultAgentProfile = try container.decodeIfPresent(AgentProfile.self, forKey: .defaultAgentProfile) ?? .auto
         appAppearance = try container.decodeIfPresent(AppearanceMode.self, forKey: .appAppearance) ?? .system
         requireCommandApproval = try container.decodeIfPresent(Bool.self, forKey: .requireCommandApproval) ?? false
         autoApproveReadOnly = try container.decodeIfPresent(Bool.self, forKey: .autoApproveReadOnly) ?? true
