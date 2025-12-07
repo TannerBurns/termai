@@ -347,39 +347,94 @@ struct AppTabPill: View {
 struct AppTabContentView: View {
     @ObservedObject var tab: AppTab
     @State private var showChat: Bool = true
-    @State private var terminalWidth: CGFloat = 0
-    @State private var isDragging: Bool = false
+    @State private var showFileTree: Bool = false  // Default to closed
+    @State private var editorWidth: CGFloat = 0
+    @State private var chatWidth: CGFloat = 0  // 0 means use minimum (default)
+    @State private var fileTreeWidth: CGFloat = 200
+    @State private var isDraggingChat: Bool = false
+    @State private var isDraggingFileTree: Bool = false
     @State private var dragStartWidth: CGFloat = 0
     
     private let minChatWidth: CGFloat = 380
-    private let minTerminalWidth: CGFloat = 400
+    private let minEditorWidth: CGFloat = 400
+    private let minFileTreeWidth: CGFloat = 150
+    private let maxFileTreeWidth: CGFloat = 400
+    private let defaultFileTreeWidth: CGFloat = 200
     private let dividerWidth: CGFloat = 16
     
     var body: some View {
         GeometryReader { geometry in
             let totalWidth = geometry.size.width
             
-            // Initialize terminal width if not set
-            let effectiveTerminalWidth: CGFloat = {
-                if terminalWidth == 0 {
-                    // Default: terminal takes 65% of space
-                    return max(minTerminalWidth, (totalWidth - dividerWidth) * 0.65)
+            // Calculate widths
+            let effectiveFileTreeWidth = showFileTree ? min(fileTreeWidth, maxFileTreeWidth) : 0
+            
+            // Chat width: use stored width if set, otherwise minimum
+            let effectiveChatWidth: CGFloat = showChat ? (chatWidth > 0 ? chatWidth : minChatWidth) : 0
+            
+            let effectiveEditorWidth: CGFloat = {
+                if editorWidth == 0 {
+                    // Default: editor takes all remaining space, chat gets its width
+                    let dividers = (showFileTree ? dividerWidth : 0) + (showChat ? dividerWidth : 0)
+                    return max(minEditorWidth, totalWidth - effectiveFileTreeWidth - effectiveChatWidth - dividers)
                 }
-                return terminalWidth
+                return editorWidth
             }()
             
-            let chatWidth = showChat ? max(minChatWidth, totalWidth - effectiveTerminalWidth - dividerWidth) : 0
-            let actualTerminalWidth = showChat ? max(minTerminalWidth, totalWidth - chatWidth - dividerWidth) : totalWidth
+            let actualEditorWidth = max(minEditorWidth, totalWidth - effectiveFileTreeWidth - effectiveChatWidth - (showFileTree ? dividerWidth : 0) - (showChat ? dividerWidth : 0))
             
             HStack(spacing: 0) {
-                // Terminal pane (owned by this tab)
-                TerminalPane(
+                // File Tree Sidebar (left)
+                if showFileTree {
+                    FileTreeSidebar(
+                        model: tab.fileTreeModel,
+                        onFileSelected: { node in
+                            // Preview file on single click
+                            if !node.isDirectory {
+                                tab.editorTabsManager.openFile(at: node.path, asPreview: true)
+                            }
+                        },
+                        onFileDoubleClicked: { node in
+                            // Open file permanently on double click
+                            if !node.isDirectory {
+                                tab.editorTabsManager.openFile(at: node.path, asPreview: false)
+                            }
+                        }
+                    )
+                    .frame(width: effectiveFileTreeWidth)
+                    
+                    // File tree resize handle
+                    ResizableDivider(isDragging: $isDraggingFileTree)
+                        .gesture(
+                            DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                                .onChanged { value in
+                                    if !isDraggingFileTree {
+                                        isDraggingFileTree = true
+                                        dragStartWidth = fileTreeWidth
+                                    }
+                                    let newWidth = dragStartWidth + value.translation.width
+                                    fileTreeWidth = max(minFileTreeWidth, min(newWidth, maxFileTreeWidth))
+                                }
+                                .onEnded { _ in
+                                    isDraggingFileTree = false
+                                }
+                        )
+                }
+                
+                // Editor Pane (center - contains terminal + file tabs)
+                EditorPaneView(
+                    tabsManager: tab.editorTabsManager,
                     onAddToChat: { text, meta in
                         var enriched = meta
                         enriched?.cwd = tab.ptyModel.currentWorkingDirectory
                         tab.chatTabsManager.selectedSession?.setPendingTerminalContext(text, meta: enriched)
                     },
                     onToggleChat: { showChat.toggle() },
+                    onToggleFileTree: { 
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showFileTree.toggle()
+                        }
+                    },
                     onOpenSettings: {
                         // Open settings via keyboard shortcut simulation
                         if let event = NSEvent.keyEvent(
@@ -396,53 +451,74 @@ struct AppTabContentView: View {
                         ) {
                             NSApp.sendEvent(event)
                         }
-                    }
+                    },
+                    onAddFileToChat: { content, filePath, lineRanges in
+                        // Add file content using the proper PinnedContext system
+                        if let path = filePath {
+                            // Read full file content for later range editing
+                            let fullContent = FilePickerService.shared.readFile(at: path) ?? content
+                            tab.chatTabsManager.selectedSession?.attachFileWithRanges(
+                                path: path,
+                                selectedContent: content,
+                                fullContent: fullContent,
+                                lineRanges: lineRanges ?? []
+                            )
+                        }
+                    },
+                    isFileTreeVisible: showFileTree
                 )
                 .environmentObject(tab.ptyModel)
                 .environmentObject(tab.suggestionService)
-                .frame(width: actualTerminalWidth)
+                .environmentObject(tab.editorTabsManager)
+                .frame(width: actualEditorWidth)
                 
-                // Resizable divider and chat pane
+                // Resizable divider and chat pane (right)
                 if showChat {
                     // Draggable divider
-                    ResizableDivider(isDragging: $isDragging)
+                    ResizableDivider(isDragging: $isDraggingChat)
                         .gesture(
                             DragGesture(minimumDistance: 0, coordinateSpace: .global)
                                 .onChanged { value in
-                                    if !isDragging {
-                                        // Capture starting width when drag begins
-                                        isDragging = true
-                                        dragStartWidth = actualTerminalWidth
+                                    if !isDraggingChat {
+                                        isDraggingChat = true
+                                        dragStartWidth = effectiveChatWidth
                                     }
-                                    // Calculate new terminal width based on drag translation
-                                    let newWidth = dragStartWidth + value.translation.width
-                                    let maxTerminalWidth = totalWidth - minChatWidth - dividerWidth
-                                    terminalWidth = max(minTerminalWidth, min(newWidth, maxTerminalWidth))
+                                    // Dragging left = positive translation = smaller chat
+                                    let newChatWidth = dragStartWidth - value.translation.width
+                                    let maxChatWidth = totalWidth - effectiveFileTreeWidth - minEditorWidth - (showFileTree ? dividerWidth : 0) - dividerWidth
+                                    chatWidth = max(minChatWidth, min(newChatWidth, maxChatWidth))
                                 }
                                 .onEnded { _ in
-                                    isDragging = false
+                                    isDraggingChat = false
                                 }
                         )
                     
                     ChatContainerView(ptyModel: tab.ptyModel)
                         .environmentObject(tab.chatTabsManager)
-                        .frame(width: chatWidth)
+                        .frame(width: effectiveChatWidth)
                 }
             }
             .onAppear {
-                // Set initial terminal width
-                if terminalWidth == 0 {
-                    terminalWidth = max(minTerminalWidth, (totalWidth - dividerWidth) * 0.65)
-                }
+                // Chat starts at minimum width by default (chatWidth = 0 means use minChatWidth)
             }
             .onChange(of: geometry.size.width) { newWidth in
-                // Adjust terminal width proportionally when window resizes
-                if !isDragging && terminalWidth > 0 {
-                    let ratio = terminalWidth / totalWidth
-                    let maxTerminalWidth = newWidth - minChatWidth - dividerWidth
-                    terminalWidth = max(minTerminalWidth, min(newWidth * ratio, maxTerminalWidth))
+                // Adjust chat width proportionally when window resizes
+                if !isDraggingChat && !isDraggingFileTree && chatWidth > 0 {
+                    let ratio = chatWidth / totalWidth
+                    let maxChatWidth = newWidth - (showFileTree ? fileTreeWidth : 0) - minEditorWidth - dividerWidth * 2
+                    chatWidth = max(minChatWidth, min(newWidth * ratio, maxChatWidth))
                 }
             }
+            // Keyboard shortcut to toggle file tree (Cmd+B)
+            .background(
+                Button("") {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showFileTree.toggle()
+                    }
+                }
+                .keyboardShortcut("b", modifiers: .command)
+                .opacity(0)
+            )
         }
     }
 }

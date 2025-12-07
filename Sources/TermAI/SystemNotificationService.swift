@@ -7,7 +7,11 @@ import AppKit
 final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegate {
     static let shared = SystemNotificationService()
     
-    private let notificationCenter = UNUserNotificationCenter.current()
+    /// The notification center, nil if not available (e.g., when running via `swift run`)
+    private var notificationCenter: UNUserNotificationCenter?
+    
+    /// Whether notifications are available (requires running from an app bundle)
+    var isAvailable: Bool { notificationCenter != nil }
     
     /// Category identifiers for notification actions
     private enum Category {
@@ -17,12 +21,28 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
     
     private override init() {
         super.init()
-        notificationCenter.delegate = self
-        setupCategories()
+        
+        // UNUserNotificationCenter requires running from an app bundle
+        // Check if we're in a proper bundle before trying to access it
+        if Bundle.main.bundleIdentifier != nil && Bundle.main.bundlePath.hasSuffix(".app") {
+            do {
+                // Try to get the notification center - this can crash if not in an app bundle
+                let center = UNUserNotificationCenter.current()
+                self.notificationCenter = center
+                center.delegate = self
+                setupCategories()
+            } catch {
+                print("[SystemNotificationService] Notifications unavailable: \(error)")
+            }
+        } else {
+            print("[SystemNotificationService] Notifications unavailable - not running from app bundle")
+        }
     }
     
     /// Setup notification categories for actionable notifications
     private func setupCategories() {
+        guard let notificationCenter = notificationCenter else { return }
+        
         let commandCategory = UNNotificationCategory(
             identifier: Category.commandApproval,
             actions: [],
@@ -45,6 +65,11 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
     /// Request notification authorization from the user
     /// - Parameter completion: Called with authorization result
     func requestAuthorization(completion: ((Bool) -> Void)? = nil) {
+        guard let notificationCenter = notificationCenter else {
+            completion?(false)
+            return
+        }
+        
         notificationCenter.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if let error = error {
                 print("[SystemNotificationService] Authorization error: \(error.localizedDescription)")
@@ -57,6 +82,11 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
     
     /// Check if notifications are authorized
     func checkAuthorizationStatus(completion: @escaping (UNAuthorizationStatus) -> Void) {
+        guard let notificationCenter = notificationCenter else {
+            completion(.notDetermined)
+            return
+        }
+        
         notificationCenter.getNotificationSettings { settings in
             DispatchQueue.main.async {
                 completion(settings.authorizationStatus)
@@ -71,7 +101,8 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
     ///   - command: The command awaiting approval
     ///   - sessionId: The session ID requesting approval
     func postCommandApprovalNotification(command: String, sessionId: UUID) {
-        guard AgentSettings.shared.enableApprovalNotifications else { return }
+        guard AgentSettings.shared.enableApprovalNotifications,
+              let notificationCenter = notificationCenter else { return }
         
         let content = UNMutableNotificationContent()
         content.title = "TermAI: Command Approval Required"
@@ -113,7 +144,8 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
     ///   - operation: Description of the operation (e.g., "edit", "create", "delete")
     ///   - sessionId: The session ID requesting approval
     func postFileChangeApprovalNotification(fileName: String, operation: String, sessionId: UUID) {
-        guard AgentSettings.shared.enableApprovalNotifications else { return }
+        guard AgentSettings.shared.enableApprovalNotifications,
+              let notificationCenter = notificationCenter else { return }
         
         let content = UNMutableNotificationContent()
         content.title = "TermAI: File Change Approval Required"
@@ -147,20 +179,22 @@ final class SystemNotificationService: NSObject, UNUserNotificationCenterDelegat
     
     /// Remove all pending approval notifications (e.g., when approval is handled)
     func clearPendingNotifications() {
+        guard let notificationCenter = notificationCenter else { return }
         notificationCenter.removeAllDeliveredNotifications()
         notificationCenter.removeAllPendingNotificationRequests()
     }
     
     /// Remove notifications for a specific session
     func clearNotifications(forSessionId sessionId: UUID) {
+        guard let notificationCenter = notificationCenter else { return }
         let sessionString = sessionId.uuidString
         
-        notificationCenter.getDeliveredNotifications { notifications in
+        notificationCenter.getDeliveredNotifications { [weak self] notifications in
             let identifiersToRemove = notifications
                 .filter { $0.request.content.userInfo["sessionId"] as? String == sessionString }
                 .map { $0.request.identifier }
             
-            self.notificationCenter.removeDeliveredNotifications(withIdentifiers: identifiersToRemove)
+            self?.notificationCenter?.removeDeliveredNotifications(withIdentifiers: identifiersToRemove)
         }
     }
     
