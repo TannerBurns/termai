@@ -79,7 +79,7 @@ enum TokenEstimator {
 // MARK: - Chat Message Types
 
 struct AgentEvent: Codable, Equatable {
-    var kind: String // "status", "step", "summary", "checklist", "file_change"
+    var kind: String // "status", "step", "summary", "checklist", "file_change", "plan_created"
     var title: String
     var details: String? = nil
     var command: String? = nil
@@ -99,6 +99,8 @@ struct AgentEvent: Codable, Equatable {
     var isInternal: Bool? = nil
     /// Category for grouping: "tool", "profile", "progress", etc. Events with a category can be grouped together.
     var eventCategory: String? = nil
+    /// For plan_created events - the ID of the created plan
+    var planId: UUID? = nil
 }
 
 // MARK: - Task Checklist
@@ -387,7 +389,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
 
 /// A completely self-contained chat session with its own state, messages, and streaming
 @MainActor
-final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, PlanTrackDelegate {
+final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, PlanTrackDelegate, CreatePlanDelegate {
     let id: UUID
     
     // Chat state
@@ -405,6 +407,9 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     @Published var pendingAttachedContexts: [PinnedContext] = []  // Files/contexts to attach to next message
     @Published var agentMode: AgentMode = .scout
     @Published var agentProfile: AgentProfile = .general
+    
+    /// The ID of the current plan being implemented (Navigator mode integration)
+    @Published var currentPlanId: UUID? = nil
     
     /// The currently active profile (for Auto mode, this tracks the dynamically selected profile)
     /// When agentProfile is not .auto, this always equals agentProfile
@@ -610,7 +615,24 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         let info = await SystemInfo.cachedAsync
         let basePrompt = info.injectIntoPromptWithNativeToolCalling()
         let profileAddition = effectiveProfile.systemPromptAddition(for: agentMode)
-        return basePrompt + profileAddition
+        
+        // For Navigator mode, inject plan state context
+        var planStateContext = ""
+        if agentMode == .navigator {
+            if currentPlanId != nil {
+                // A plan already exists - emphasize build mode switching
+                planStateContext = """
+                
+                ⚠️ PLAN ALREADY EXISTS - If user wants to build/implement:
+                → For "pilot", "yes", "go ahead", "build", "start" → Reply: <BUILD_MODE>pilot</BUILD_MODE>
+                → For "copilot" specifically → Reply: <BUILD_MODE>copilot</BUILD_MODE>
+                DO NOT create another plan. Just output the BUILD_MODE tag.
+                
+                """
+            }
+        }
+        
+        return basePrompt + profileAddition + planStateContext
     }
     
     // Private streaming state
@@ -1543,10 +1565,12 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         // Set up shell executor and plan track delegate for native tool calling
         AgentToolRegistry.shared.setShellExecutor(self)
         AgentToolRegistry.shared.setPlanTrackDelegate(self)
-        defer { 
+        AgentToolRegistry.shared.setCreatePlanDelegate(self)
+        defer {
             // Clean up delegate references
             AgentToolRegistry.shared.setShellExecutor(nil)
             AgentToolRegistry.shared.setPlanTrackDelegate(nil)
+            AgentToolRegistry.shared.setCreatePlanDelegate(nil)
             if !agentExecutionPhase.isTerminal {
                 transitionToPhase(.idle)
             }
@@ -1573,8 +1597,14 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         accumulatedContextTokens = 0
         currentContextTokens = 0
         
-        // Reset checklist - agent will create one via plan_and_track tool if needed
-        agentChecklist = nil
+        // Only reset checklist if not already set (e.g., by Navigator mode plan extraction)
+        // Agent will create one via plan_and_track tool if needed and none exists
+        if agentChecklist == nil {
+            // No checklist set - agent can create one if needed
+            AgentDebugConfig.log("[Agent] No pre-set checklist, agent may create one")
+        } else {
+            AgentDebugConfig.log("[Agent] Using pre-set checklist with \(agentChecklist!.items.count) items")
+        }
         
         // Reset activeProfile for Auto mode (starts with general, will analyze and switch)
         if agentProfile.isAuto {
@@ -1881,6 +1911,28 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             // Check if done
             if nativeResult.isDone {
                 if let response = nativeResult.textResponse, !response.isEmpty {
+                    // Check for Navigator mode BUILD_MODE trigger
+                    if agentMode == .navigator, let buildMode = extractBuildMode(from: response) {
+                        // Clean the response (remove the BUILD_MODE tag)
+                        let cleanedResponse = response.replacingOccurrences(
+                            of: "<BUILD_MODE>\\w+</BUILD_MODE>",
+                            with: "",
+                            options: .regularExpression
+                        ).trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        // Add the cleaned response first
+                        if !cleanedResponse.isEmpty {
+                            messages.append(ChatMessage(role: "assistant", content: cleanedResponse))
+                            messages = messages
+                            persistMessages()
+                        }
+                        
+                        // Switch to the requested mode and start building
+                        await startBuildingPlan(with: buildMode)
+                        transitionToPhase(.completed)
+                        break stepLoop
+                    }
+                    
                     // Model provided a text response (completion or answer)
                     transitionToPhase(.summarizing)
                     messages.append(ChatMessage(role: "assistant", content: response))
@@ -2231,10 +2283,12 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         } else if !checklistContext.isEmpty {
             basePlanningGuidance = """
             
-            TASK TRACKING:
+            TASK TRACKING (checklist is already set - do NOT create a new one):
+            - The checklist above was extracted from the implementation plan
             - Focus on completing the CURRENT TASK shown above
             - When you finish a task, call plan_and_track with complete_task=<id> to mark it done
             - The next pending task will automatically become current
+            - Do NOT call plan_and_track with goal/tasks - the checklist is already set up
             """
         } else {
             basePlanningGuidance = ""
@@ -2244,32 +2298,123 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
         let profilePlanningGuidance = AgentSettings.shared.enablePlanning ? effectiveProfile.planningGuidance(for: agentMode) : ""
         let planningGuidance = basePlanningGuidance + (profilePlanningGuidance.isEmpty ? "" : "\n\n" + profilePlanningGuidance)
         
-        let systemPrompt = """
-        You are a terminal agent executing commands in the user's real shell (PTY).
-        Environment changes (cd, source, export) persist in the user's session.
+        // Navigator mode has a special system prompt for planning and build mode switching
+        let systemPrompt: String
+        if agentMode == .navigator {
+            // Build Navigator-specific context
+            let planExistsContext = currentPlanId != nil ? """
+            
+            ╔══════════════════════════════════════════════════════════════════╗
+            ║ A PLAN ALREADY EXISTS!                                           ║
+            ║                                                                  ║
+            ║ If user says "build", "implement", "yes", "go ahead", "pilot":  ║
+            ║   → Reply ONLY with: <BUILD_MODE>pilot</BUILD_MODE>              ║
+            ║                                                                  ║
+            ║ If user specifically says "copilot":                             ║
+            ║   → Reply ONLY with: <BUILD_MODE>copilot</BUILD_MODE>            ║
+            ║                                                                  ║
+            ║ DO NOT create another plan. Just output the BUILD_MODE tag.     ║
+            ╚══════════════════════════════════════════════════════════════════╝
+            """ : ""
+            
+            systemPrompt = """
+            MODE: Navigator - Implementation Planning
+            \(planExistsContext)
+            
+            USER REQUEST: \(userRequest)
+            
+            You are a Navigator - your role is to create implementation plans.
+            You can READ files but CANNOT write files or execute commands.
+            
+            If asked to build/implement an existing plan, output:
+            <BUILD_MODE>pilot</BUILD_MODE> (for pilot mode)
+            or <BUILD_MODE>copilot</BUILD_MODE> (for copilot mode)
+            
+            \(planningGuidance)
+            """
+        } else {
+            systemPrompt = """
+            You are a terminal agent executing commands in the user's real shell (PTY).
+            Environment changes (cd, source, export) persist in the user's session.
+            
+            USER REQUEST: \(userRequest)
+            \(goal != userRequest ? "GOAL: \(goal)" : "")
+            Progress: Step \(iterations) of max \(maxIterations == 0 ? "unlimited" : String(maxIterations))
+            
+            ENVIRONMENT:
+            - CWD: \(self.lastKnownCwd.isEmpty ? "(discover with pwd or list_dir .)" : self.lastKnownCwd)
+            - Shell: /bin/zsh
+            
+            \(checklistContext.isEmpty ? "" : "CHECKLIST:\n\(checklistContext)")
+            \(planningGuidance)
+            
+            RULES:
+            - Use the provided tools to accomplish the request
+            - For file operations, prefer file tools (read_file, edit_file, etc.) over shell commands
+            - For EXISTING files: use edit_file (search/replace), insert_lines, or delete_lines for surgical changes
+            - Only use write_file to CREATE new files or when you need to COMPLETELY rewrite a file
+            - Verify your changes by reading files after editing
+            - When the task is complete, respond with a summary (no tool calls)
+            """
+        }
         
-        USER REQUEST: \(userRequest)
-        \(goal != userRequest ? "GOAL: \(goal)" : "")
-        Progress: Step \(iterations) of max \(maxIterations == 0 ? "unlimited" : String(maxIterations))
+        // Build the context as user message, including any attached contexts (like plans)
+        var contextParts: [String] = []
         
-        ENVIRONMENT:
-        - CWD: \(self.lastKnownCwd.isEmpty ? "(discover with pwd or list_dir .)" : self.lastKnownCwd)
-        - Shell: /bin/zsh
+        // For implementation mode: inject the LATEST plan from THIS SESSION
+        // This ensures we always use the most recent plan created in this chat session
+        if agentMode != .navigator {
+            // First try: Get the latest plan for this session
+            if let latestPlan = PlanManager.shared.latestPlan(for: self.id),
+               let planContent = PlanManager.shared.getPlanContent(id: latestPlan.id) {
+                let planContext = PinnedContext(
+                    type: .snippet,
+                    path: "plan://\(latestPlan.id.uuidString)",
+                    displayName: "Implementation Plan: \(latestPlan.title)",
+                    content: planContent
+                )
+                contextParts.append(formatAttachedContext(planContext))
+                AgentDebugConfig.log("[Agent] Injected latest plan for session \(self.id): \(latestPlan.title)")
+                
+                // Update currentPlanId to match the latest plan
+                if currentPlanId != latestPlan.id {
+                    currentPlanId = latestPlan.id
+                    persistSettings()
+                    AgentDebugConfig.log("[Agent] Updated currentPlanId to latest: \(latestPlan.id)")
+                }
+            }
+            // Fallback: Use currentPlanId if it exists and belongs to this session
+            else if let planId = currentPlanId,
+                    let plan = PlanManager.shared.getPlan(id: planId),
+                    plan.sessionId == self.id,
+                    let planContent = PlanManager.shared.getPlanContent(id: planId) {
+                let planContext = PinnedContext(
+                    type: .snippet,
+                    path: "plan://\(planId.uuidString)",
+                    displayName: "Implementation Plan: \(plan.title)",
+                    content: planContent
+                )
+                contextParts.append(formatAttachedContext(planContext))
+                AgentDebugConfig.log("[Agent] Injected plan from currentPlanId: \(plan.title)")
+            }
+        }
         
-        \(checklistContext.isEmpty ? "" : "CHECKLIST:\n\(checklistContext)")
-        \(planningGuidance)
+        // Also add attached contexts from the MOST RECENT user message (for files, etc.)
+        if let lastUserMessage = messages.filter({ $0.role == "user" }).last,
+           let contexts = lastUserMessage.attachedContexts, !contexts.isEmpty {
+            for context in contexts {
+                // Skip plan contexts - we already injected the current plan above
+                if context.path.hasPrefix("plan://") {
+                    continue
+                }
+                contextParts.append(formatAttachedContext(context))
+            }
+        }
         
-        RULES:
-        - Use the provided tools to accomplish the request
-        - For file operations, prefer file tools (read_file, edit_file, etc.) over shell commands
-        - For EXISTING files: use edit_file (search/replace), insert_lines, or delete_lines for surgical changes
-        - Only use write_file to CREATE new files or when you need to COMPLETELY rewrite a file
-        - Verify your changes by reading files after editing
-        - When the task is complete, respond with a summary (no tool calls)
-        """
+        // Add the context log
+        contextParts.append("CONTEXT LOG:\n\(contextLog.joined(separator: "\n"))")
         
-        // Build the context as user message
-        let contextMessage = "CONTEXT LOG:\n\(contextLog.joined(separator: "\n"))"
+        let contextMessage = contextParts.joined(separator: "\n")
         
         // Initial messages for the conversation
         var conversationMessages: [[String: Any]] = [
@@ -3157,6 +3302,198 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
     /// Get the current checklist status for context
     func getChecklistStatus() -> String? {
         return agentChecklist?.displayString
+    }
+    
+    // MARK: - Navigator Mode Build Trigger
+    
+    /// Extract build mode from a BUILD_MODE tag in the response (Navigator mode)
+    private func extractBuildMode(from response: String) -> AgentMode? {
+        // Pattern: <BUILD_MODE>pilot</BUILD_MODE> or <BUILD_MODE>copilot</BUILD_MODE>
+        let pattern = "<BUILD_MODE>(\\w+)</BUILD_MODE>"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let match = regex.firstMatch(in: response, range: NSRange(response.startIndex..., in: response)),
+              let modeRange = Range(match.range(at: 1), in: response) else {
+            return nil
+        }
+        
+        let modeString = String(response[modeRange]).lowercased()
+        switch modeString {
+        case "pilot": return .pilot
+        case "copilot": return .copilot
+        default: return nil
+        }
+    }
+    
+    /// Start building the current plan with the specified mode
+    private func startBuildingPlan(with mode: AgentMode) async {
+        // Get the LATEST plan for THIS session - more reliable than currentPlanId
+        guard let plan = PlanManager.shared.latestPlan(for: self.id),
+              let planContent = PlanManager.shared.getPlanContent(id: plan.id) else {
+            // Fallback to currentPlanId if no session plan found
+            guard let planId = currentPlanId,
+                  let planContent = PlanManager.shared.getPlanContent(id: planId),
+                  let fallbackPlan = PlanManager.shared.getPlan(id: planId),
+                  fallbackPlan.sessionId == self.id else {
+                AgentDebugConfig.log("[Navigator] No plan found for session \(self.id)")
+                return
+            }
+            // Use fallback
+            await startBuildingPlanInternal(plan: fallbackPlan, planContent: planContent, mode: mode)
+            return
+        }
+        
+        // Update currentPlanId to match the latest plan
+        currentPlanId = plan.id
+        persistSettings()
+        AgentDebugConfig.log("[Navigator] Using latest plan for session: \(plan.title) (id: \(plan.id))")
+        
+        await startBuildingPlanInternal(plan: plan, planContent: planContent, mode: mode)
+    }
+    
+    /// Internal helper to build a plan
+    private func startBuildingPlanInternal(plan: Plan, planContent: String, mode: AgentMode) async {
+        let planId = plan.id
+        
+        // Add mode switch indicator to chat
+        messages.append(ChatMessage(
+            role: "assistant",
+            content: "",
+            agentEvent: AgentEvent(
+                kind: "mode_switch",
+                title: "Navigator → \(mode.rawValue)",
+                details: "Switching to \(mode.rawValue) mode to implement the plan",
+                command: nil,
+                output: nil,
+                collapsed: true
+            )
+        ))
+        messages = messages
+        persistMessages()
+        
+        // Update plan status
+        PlanManager.shared.updatePlanStatus(id: planId, status: .implementing)
+        
+        // Switch to the requested mode
+        agentMode = mode
+        persistSettings()
+        
+        // Extract checklist from plan and set it directly
+        let checklistItems = extractChecklistFromPlan(planContent)
+        if !checklistItems.isEmpty {
+            agentChecklist = TaskChecklist(from: checklistItems, goal: "Implement: \(plan.title)")
+            
+            // Add a checklist message to the UI
+            let checklistDisplay = agentChecklist!.displayString
+            messages.append(ChatMessage(
+                role: "assistant",
+                content: "",
+                agentEvent: AgentEvent(
+                    kind: "checklist",
+                    title: "Task Checklist (\(agentChecklist!.completedCount)/\(agentChecklist!.items.count) done)",
+                    details: checklistDisplay,
+                    command: nil,
+                    output: nil,
+                    collapsed: false,
+                    checklistItems: agentChecklist!.items
+                )
+            ))
+            messages = messages
+            persistMessages()
+        }
+        
+        // Attach the plan as context
+        let planContext = PinnedContext(
+            type: .snippet,
+            path: "plan://\(planId.uuidString)",
+            displayName: "Implementation Plan: \(plan.title)",
+            content: planContent
+        )
+        pendingAttachedContexts.append(planContext)
+        
+        // Send the implementation message
+        // The checklist is already set, so tell the agent to use it
+        let implementationMessage = checklistItems.isEmpty
+            ? "Please implement the attached implementation plan. Follow the checklist items in order."
+            : "Please implement the attached implementation plan. The checklist has already been extracted from the plan and is ready - use it to track your progress. Focus on completing each item in order. Do NOT call plan_and_track to create a new checklist - it's already set up."
+        
+        await sendUserMessage(implementationMessage)
+    }
+    
+    /// Extract checklist items from plan markdown content
+    /// Looks for lines starting with "- [ ]" in the Checklist section
+    private func extractChecklistFromPlan(_ content: String) -> [String] {
+        var items: [String] = []
+        var inChecklistSection = false
+        
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // Look for Checklist header
+            if trimmed.lowercased().contains("## checklist") || trimmed.lowercased() == "checklist" {
+                inChecklistSection = true
+                continue
+            }
+            
+            // Stop at next section
+            if inChecklistSection && trimmed.hasPrefix("##") && !trimmed.lowercased().contains("checklist") {
+                break
+            }
+            
+            // Extract checklist items (- [ ] format)
+            if inChecklistSection && (trimmed.hasPrefix("- [ ]") || trimmed.hasPrefix("- [x]") || trimmed.hasPrefix("- [X]")) {
+                // Remove the checkbox prefix and get the task description
+                let item = trimmed
+                    .replacingOccurrences(of: "- [ ] ", with: "")
+                    .replacingOccurrences(of: "- [x] ", with: "")
+                    .replacingOccurrences(of: "- [X] ", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+                
+                if !item.isEmpty {
+                    items.append(item)
+                }
+            }
+        }
+        
+        return items
+    }
+    
+    // MARK: - CreatePlanDelegate Protocol
+    
+    /// Create a new implementation plan (Navigator mode)
+    func createPlan(title: String, content: String) async -> UUID {
+        // Create the plan
+        let plan = Plan(
+            title: title,
+            content: content,
+            sessionId: id,
+            status: .ready
+        )
+        
+        // Save the plan
+        PlanManager.shared.savePlan(plan)
+        
+        // Track as current plan
+        currentPlanId = plan.id
+        
+        // Add a plan_created message to the UI with the special PlanReadyView display
+        messages.append(ChatMessage(
+            role: "assistant",
+            content: "",
+            agentEvent: AgentEvent(
+                kind: "plan_created",
+                title: title,
+                details: content,
+                command: nil,
+                output: nil,
+                collapsed: false,
+                planId: plan.id
+            )
+        ))
+        messages = messages
+        persistMessages()
+        persistSettings()
+        
+        return plan.id
     }
     
     // MARK: - File Change Approval
@@ -4207,9 +4544,15 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             result = "\(header)\n```\n\(context.content)\n```\n\n"
             
         case .snippet:
-            // Format code snippet
-            let header = "Attached Code Snippet:"
-            result = "\(header)\n```\(context.language ?? "")\n\(context.content)\n```\n\n"
+            // Format code snippet - use displayName if it indicates a plan
+            let header: String
+            if context.displayName.contains("Plan") || context.path.hasPrefix("plan://") {
+                header = "📋 \(context.displayName)\n\n--- IMPLEMENTATION PLAN START ---"
+                result = "\(header)\n\(context.content)\n--- IMPLEMENTATION PLAN END ---\n\n"
+            } else {
+                header = "Attached Code Snippet:"
+                result = "\(header)\n```\(context.language ?? "")\n\(context.content)\n```\n\n"
+            }
         }
         
         return result
@@ -4730,7 +5073,8 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             currentContextTokens: currentContextTokens,
             contextLimitTokens: contextLimitTokens,
             lastSummarizationDate: lastSummarizationDate,
-            summarizationCount: summarizationCount
+            summarizationCount: summarizationCount,
+            currentPlanId: currentPlanId
         )
         // Use background save for settings (not critical path)
         PersistenceService.saveJSONInBackground(settings, to: "session-settings-\(id.uuidString).json")
@@ -4773,6 +5117,9 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             if let count = settings.summarizationCount {
                 summarizationCount = count
             }
+            
+            // Load Navigator mode state
+            currentPlanId = settings.currentPlanId
         }
         
         // Update context limit based on model (only if not already loaded from settings)
@@ -4918,6 +5265,9 @@ private struct SessionSettings: Codable {
     let contextLimitTokens: Int?
     let lastSummarizationDate: Date?
     let summarizationCount: Int?
+    
+    // Navigator mode - current plan being implemented
+    let currentPlanId: UUID?
 }
 
 private struct OpenAIStreamChunk: Decodable {

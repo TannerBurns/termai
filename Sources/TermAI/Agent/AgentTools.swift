@@ -511,6 +511,9 @@ final class AgentToolRegistry {
     /// Reference to the plan and track tool for delegate configuration
     private var planAndTrackTool: PlanAndTrackTool?
     
+    /// Reference to the create plan tool for delegate configuration (Navigator mode)
+    private var createPlanTool: CreatePlanTool?
+    
     private init() {
         self.outputBuffer = OutputBuffer()
         self.memoryStore = MemoryStore()
@@ -541,6 +544,10 @@ final class AgentToolRegistry {
         let planTool = PlanAndTrackTool()
         planAndTrackTool = planTool
         register(planTool)
+        // Create plan tool for Navigator mode (delegate set later by ChatSession)
+        let createPlan = CreatePlanTool()
+        createPlanTool = createPlan
+        register(createPlan)
     }
     
     func register(_ tool: AgentTool) {
@@ -568,6 +575,18 @@ final class AgentToolRegistry {
         "memory"
     ]
     
+    /// Tools available in Navigator mode (read-only + plan creation)
+    private static let navigatorToolNames: Set<String> = [
+        "read_file",
+        "list_dir",
+        "search_files",
+        "search_output",
+        "check_process",
+        "http_request",
+        "memory",
+        "create_plan"  // Navigator-specific tool
+    ]
+    
     /// Tools added in Copilot mode (file operations, no shell)
     private static let copilotToolNames: Set<String> = [
         "write_file",
@@ -591,6 +610,8 @@ final class AgentToolRegistry {
         switch mode {
         case .scout:
             allowedNames = Self.scoutToolNames
+        case .navigator:
+            allowedNames = Self.navigatorToolNames
         case .copilot:
             allowedNames = Self.scoutToolNames.union(Self.copilotToolNames)
         case .pilot:
@@ -632,6 +653,8 @@ final class AgentToolRegistry {
         switch mode {
         case .scout:
             allowedNames = Self.scoutToolNames
+        case .navigator:
+            allowedNames = Self.navigatorToolNames
         case .copilot:
             allowedNames = Self.scoutToolNames.union(Self.copilotToolNames)
         case .pilot:
@@ -648,6 +671,11 @@ final class AgentToolRegistry {
     /// Set the plan track delegate (called by ChatSession when starting agent mode)
     func setPlanTrackDelegate(_ delegate: PlanTrackDelegate?) {
         planAndTrackTool?.delegate = delegate
+    }
+    
+    /// Set the create plan delegate (called by ChatSession when in Navigator mode)
+    func setCreatePlanDelegate(_ delegate: CreatePlanDelegate?) {
+        createPlanTool?.delegate = delegate
     }
     
     /// Store output in the buffer for later search
@@ -2119,6 +2147,82 @@ final class ShellCommandTool: AgentTool {
                 : "Command failed (exit \(result.exitCode)): \(result.output)"
             return .failure(errorMsg)
         }
+    }
+}
+
+// MARK: - Create Plan Tool (Navigator Mode)
+
+/// Protocol for handling plan creation from Navigator mode
+@MainActor
+protocol CreatePlanDelegate: AnyObject {
+    /// Create a new implementation plan
+    /// - Parameters:
+    ///   - title: The plan title
+    ///   - content: The markdown content with implementation checklist
+    /// - Returns: The created plan ID
+    func createPlan(title: String, content: String) async -> UUID
+}
+
+/// Tool for creating implementation plans in Navigator mode
+final class CreatePlanTool: AgentTool {
+    let name = "create_plan"
+    let description = "Create an implementation plan. Use after exploring codebase and clarifying requirements with the user."
+    
+    var schema: ToolSchema {
+        ToolSchema(
+            name: name,
+            description: "Create an implementation plan. Structure: 1) Summary, 2) Phases with context (NO checkboxes), 3) Technical notes, 4) Final flat checklist of high-level objectives at the end.",
+            parameters: [
+                ToolParameter(name: "title", type: .string, description: "Clear, descriptive title for the plan (e.g., 'Add User Authentication System')", required: true),
+                ToolParameter(name: "content", type: .string, description: "Markdown content with phases/context first (no checkboxes), then a single flat checklist at the end with high-level objectives using - [ ] syntax", required: true)
+            ]
+        )
+    }
+    
+    /// Weak reference to the delegate (set by ChatSession when in Navigator mode)
+    weak var delegate: CreatePlanDelegate?
+    
+    init(delegate: CreatePlanDelegate? = nil) {
+        self.delegate = delegate
+    }
+    
+    func execute(args: [String: String], cwd: String?) async -> AgentToolResult {
+        guard let delegate = delegate else {
+            return .failure("Create plan delegate not configured. This is an internal error.")
+        }
+        
+        guard let title = args["title"], !title.isEmpty else {
+            return .failure("Missing required argument: title. Provide a clear, descriptive title for the plan.")
+        }
+        
+        guard let content = args["content"], !content.isEmpty else {
+            return .failure("Missing required argument: content. Provide the full markdown plan with implementation checklist.")
+        }
+        
+        // Validate content has checklist items
+        let hasChecklist = content.contains("- [ ]") || content.contains("- [x]")
+        if !hasChecklist {
+            return .failure("Plan content must include a checklist with '- [ ]' items. Please restructure the plan with actionable checklist items.")
+        }
+        
+        // Create the plan through the delegate
+        let planId = await delegate.createPlan(title: title, content: content)
+        
+        return .success("""
+            ✅ PLAN CREATED SUCCESSFULLY
+            
+            Plan ID: \(planId.uuidString)
+            Title: \(title)
+            
+            Your work as Navigator is complete. STOP HERE.
+            
+            The user will now review the plan and can:
+            - View the full plan
+            - Build with Copilot (file operations only)
+            - Build with Pilot (full shell access)
+            
+            Do not create any more plans or continue exploring.
+            """)
     }
 }
 

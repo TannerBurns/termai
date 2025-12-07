@@ -572,10 +572,10 @@ private struct ChatInputArea: View {
             ZStack(alignment: .topLeading) {
                 if messageText.isEmpty {
                     Text(isAgentRunning ? "Add feedback for the agent..." : "Type @ to attach files, then your message...")
-                        .font(.system(size: 13))
+                        .font(.system(size: 11.5))
                         .foregroundColor(isAgentRunning ? Color.blue.opacity(0.6) : .secondary.opacity(0.6))
                         .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 8)
                 }
                 
                 ChatTextEditor(
@@ -857,7 +857,7 @@ private struct ChatTextEditor: NSViewRepresentable {
         textView.onMentionTrigger = onMentionTrigger
         textView.isRichText = true
         textView.allowsUndo = true
-        textView.font = NSFont.systemFont(ofSize: 13)
+        textView.font = NSFont.systemFont(ofSize: 11.5)
         textView.textColor = NSColor.labelColor
         textView.backgroundColor = .clear
         textView.drawsBackground = false
@@ -869,7 +869,7 @@ private struct ChatTextEditor: NSViewRepresentable {
         
         // Set default typing attributes
         textView.typingAttributes = [
-            .font: NSFont.systemFont(ofSize: 13),
+            .font: NSFont.systemFont(ofSize: 11.5),
             .foregroundColor: NSColor.labelColor
         ]
         
@@ -940,7 +940,7 @@ private struct ChatTextEditor: NSViewRepresentable {
             // Create attributed string with default styling
             let attributedString = NSMutableAttributedString(string: text)
             let defaultAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 13),
+                .font: NSFont.systemFont(ofSize: 11.5),
                 .foregroundColor: NSColor.labelColor
             ]
             attributedString.addAttributes(defaultAttrs, range: NSRange(location: 0, length: text.count))
@@ -953,7 +953,7 @@ private struct ChatTextEditor: NSViewRepresentable {
                 for match in matches {
                     // Apply badge-like styling (visual only)
                     let mentionAttrs: [NSAttributedString.Key: Any] = [
-                        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                        .font: NSFont.systemFont(ofSize: 10.5, weight: .medium),
                         .foregroundColor: NSColor.controlAccentColor,
                         .backgroundColor: NSColor.controlAccentColor.withAlphaComponent(0.15)
                     ]
@@ -1158,20 +1158,20 @@ private struct ChatMessageBubble: View {
     }()
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             // Role label with modern styling
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 ZStack {
                     Circle()
                         .fill(message.role == "user" ? Color.accentColor.opacity(0.15) : Color.purple.opacity(0.15))
-                        .frame(width: 22, height: 22)
+                        .frame(width: 18, height: 18)
                     Image(systemName: message.role == "user" ? "person.fill" : "sparkles")
-                        .font(.system(size: 10))
+                        .font(.system(size: 8))
                         .foregroundColor(message.role == "user" ? .accentColor : .purple)
                 }
                 
                 Text(message.role == "user" ? "You" : "Assistant")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .fontWeight(.semibold)
                     .foregroundColor(.primary.opacity(0.7))
 
@@ -1184,18 +1184,18 @@ private struct ChatMessageBubble: View {
                 
                 // Compact timezone-aware timestamp
                 Text(message.timestamp, formatter: ChatMessageBubble.timestampFormatter)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary.opacity(0.6))
+                    .font(.system(size: 8))
+                    .foregroundColor(.secondary.opacity(0.5))
                     .monospacedDigit()
             }
             
             // Terminal context badge for user messages
             if message.role == "user", let meta = message.terminalContextMeta {
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Label("rows \(meta.startRow)-\(meta.endRow)", systemImage: "terminal")
-                        .font(.caption2)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
                         .background(
                             Capsule()
                                 .fill(Color.orange.opacity(0.1))
@@ -1203,11 +1203,11 @@ private struct ChatMessageBubble: View {
                         .foregroundColor(.orange)
                     if let cwd = meta.cwd, !cwd.isEmpty {
                         Label(shortenPath(cwd), systemImage: "folder")
-                            .font(.caption2)
+                            .font(.system(size: 9))
                             .lineLimit(1)
                             .truncationMode(.middle)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
                             .background(
                                 Capsule()
                                     .fill(Color.blue.opacity(0.1))
@@ -1220,7 +1220,7 @@ private struct ChatMessageBubble: View {
             // Attached files badges for user messages
             if message.role == "user", let contexts = message.attachedContexts, !contexts.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         ForEach(contexts) { context in
                             AttachedFileBadge(context: context)
                         }
@@ -1230,7 +1230,24 @@ private struct ChatMessageBubble: View {
             
             // Message content - either editing mode or display mode
             if let evt = message.agentEvent {
-                AgentEventView(event: evt, ptyModel: ptyModel)
+                // Special handling for plan_created events - show PlanReadyView
+                if evt.kind == "plan_created", let planId = evt.planId {
+                    PlanReadyView(
+                        planId: planId,
+                        planTitle: evt.title,
+                        session: session,
+                        onOpenPlan: { id in
+                            // Post notification to open plan in editor
+                            NotificationCenter.default.post(
+                                name: .TermAIOpenPlanInEditor,
+                                object: nil,
+                                userInfo: ["planId": id]
+                            )
+                        }
+                    )
+                } else {
+                    AgentEventView(event: evt, ptyModel: ptyModel)
+                }
             } else if isEditing {
                 // Inline editing mode with orange/amber tint (distinct edit indicator)
                 VStack(alignment: .leading, spacing: 8) {
@@ -1814,10 +1831,12 @@ private struct AgentEventView: View {
             }
             return .orange
         case "command_approval": return .orange
+        case "plan_created": return Color(red: 0.7, green: 0.4, blue: 0.9)  // Navigator purple
+        case "mode_switch": return .cyan  // Distinctive color for mode switching
         default: return .gray
         }
     }
-    
+
     private func symbol(for kind: String) -> String {
         switch kind.lowercased() {
         case "status": return "bolt.fill"
@@ -1830,6 +1849,8 @@ private struct AgentEventView: View {
             }
             return "doc.text.fill"
         case "command_approval": return "exclamationmark.shield.fill"
+        case "plan_created": return "map.fill"
+        case "mode_switch": return "arrow.triangle.swap"
         default: return "info.circle"
         }
     }
@@ -1889,6 +1910,227 @@ private struct AgentEventView: View {
                 "approved": false
             ]
         )
+    }
+}
+
+// MARK: - Plan Ready View (Navigator Mode)
+
+/// Displays when a plan has been created in Navigator mode
+/// Shows plan title and action buttons to view, build with Copilot, or build with Pilot
+struct PlanReadyView: View {
+    let planId: UUID
+    let planTitle: String
+    @ObservedObject var session: ChatSession
+    let onOpenPlan: (UUID) -> Void
+    
+    @Environment(\.colorScheme) var colorScheme
+    
+    private let navigatorColor = Color(red: 0.7, green: 0.4, blue: 0.9)
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Header with title and view button
+            HStack(spacing: 8) {
+                Image(systemName: "map.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(navigatorColor)
+                
+                Text(planTitle)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                // View Plan button (inline with title)
+                Button(action: { onOpenPlan(planId) }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "eye")
+                            .font(.system(size: 10))
+                        Text("View")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(navigatorColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(navigatorColor.opacity(0.1))
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Open plan in file viewer")
+            }
+            
+            // Build buttons row
+            HStack(spacing: 8) {
+                Text("Build with:")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                
+                // Build with Copilot button
+                Button(action: { buildWithMode(.copilot) }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: AgentMode.copilot.icon)
+                            .font(.system(size: 10))
+                        Text("Copilot")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(AgentMode.copilot.color)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("File operations only")
+                
+                // Build with Pilot button
+                Button(action: { buildWithMode(.pilot) }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: AgentMode.pilot.icon)
+                            .font(.system(size: 10))
+                        Text("Pilot")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(AgentMode.pilot.color)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Full shell access")
+                
+                Spacer()
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(navigatorColor.opacity(0.3), lineWidth: 1)
+        )
+    }
+    
+    private func buildWithMode(_ mode: AgentMode) {
+        // Add mode switch indicator to chat
+        session.messages.append(ChatMessage(
+            role: "assistant",
+            content: "",
+            agentEvent: AgentEvent(
+                kind: "mode_switch",
+                title: "Navigator → \(mode.rawValue)",
+                details: "Switching to \(mode.rawValue) mode to implement the plan",
+                command: nil,
+                output: nil,
+                collapsed: true
+            )
+        ))
+        session.messages = session.messages
+        session.persistMessages()
+        
+        // Switch to the selected mode
+        session.agentMode = mode
+        session.persistSettings()
+        
+        // Load the plan content
+        if let planContent = PlanManager.shared.getPlanContent(id: planId) {
+            // Update plan status to implementing
+            Task { @MainActor in
+                PlanManager.shared.updatePlanStatus(id: planId, status: .implementing)
+            }
+            
+            // Extract checklist from plan and set it directly (so agent doesn't recreate it)
+            let checklistItems = extractChecklistFromPlan(planContent)
+            if !checklistItems.isEmpty {
+                session.agentChecklist = TaskChecklist(from: checklistItems, goal: "Implement: \(planTitle)")
+                
+                // Add a checklist message to the UI
+                let checklistDisplay = session.agentChecklist!.displayString
+                session.messages.append(ChatMessage(
+                    role: "assistant",
+                    content: "",
+                    agentEvent: AgentEvent(
+                        kind: "checklist",
+                        title: "Task Checklist (\(session.agentChecklist!.completedCount)/\(session.agentChecklist!.items.count) done)",
+                        details: checklistDisplay,
+                        command: nil,
+                        output: nil,
+                        collapsed: false,
+                        checklistItems: session.agentChecklist!.items
+                    )
+                ))
+                session.messages = session.messages
+                session.persistMessages()
+            }
+            
+            // Attach the plan as context and send implementation request
+            let planContext = PinnedContext(
+                type: .snippet,
+                path: "plan://\(planId.uuidString)",
+                displayName: "Implementation Plan: \(planTitle)",
+                content: planContent
+            )
+            session.pendingAttachedContexts.append(planContext)
+            
+            // Track current plan
+            session.currentPlanId = planId
+            session.persistSettings()
+            
+            // Send the implementation message
+            // Tell the agent the checklist is already set
+            let implementationMessage = checklistItems.isEmpty
+                ? "Please implement the attached implementation plan. Follow the checklist items in order."
+                : "Please implement the attached implementation plan. The checklist has already been extracted and is shown above - use it to track your progress. Focus on completing each item in order. Do NOT call plan_and_track to create a new checklist."
+            
+            Task {
+                await session.sendUserMessage(implementationMessage)
+            }
+        }
+    }
+    
+    /// Extract checklist items from plan markdown content
+    private func extractChecklistFromPlan(_ content: String) -> [String] {
+        var items: [String] = []
+        var inChecklistSection = false
+        
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // Look for Checklist header
+            if trimmed.lowercased().contains("## checklist") || trimmed.lowercased() == "checklist" {
+                inChecklistSection = true
+                continue
+            }
+            
+            // Stop at next section
+            if inChecklistSection && trimmed.hasPrefix("##") && !trimmed.lowercased().contains("checklist") {
+                break
+            }
+            
+            // Extract checklist items (- [ ] format)
+            if inChecklistSection && (trimmed.hasPrefix("- [ ]") || trimmed.hasPrefix("- [x]") || trimmed.hasPrefix("- [X]")) {
+                let item = trimmed
+                    .replacingOccurrences(of: "- [ ] ", with: "")
+                    .replacingOccurrences(of: "- [x] ", with: "")
+                    .replacingOccurrences(of: "- [X] ", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+                
+                if !item.isEmpty {
+                    items.append(item)
+                }
+            }
+        }
+        
+        return items
     }
 }
 
@@ -3015,21 +3257,21 @@ private struct AttachedFileBadge: View {
     
     var body: some View {
         Button(action: { showingViewer = true }) {
-            HStack(spacing: 4) {
+            HStack(spacing: 3) {
                 Image(systemName: context.icon)
-                    .font(.system(size: 9))
+                    .font(.system(size: 8))
                 Text(context.displayName)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 9, weight: .medium))
                     .lineLimit(1)
                 if let range = context.lineRangeDescription {
                     Text("(\(range))")
-                        .font(.system(size: 9))
+                        .font(.system(size: 8))
                         .foregroundColor(.secondary)
                 }
             }
             .foregroundColor(.accentColor)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
             .background(
                 Capsule()
                     .fill(isHovered ? Color.accentColor.opacity(0.2) : Color.accentColor.opacity(0.1))
@@ -3093,7 +3335,7 @@ private struct MentionTextView: View {
                 switch segment {
                 case .text(let text):
                     Text(text)
-                        .font(.system(size: 13))
+                        .font(.system(size: 12))
                 case .mention(let filename):
                     InlineMentionBadge(
                         filename: filename,

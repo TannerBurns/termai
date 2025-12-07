@@ -39,6 +39,10 @@ final class PTYModel: ObservableObject {
     /// This triggers startup suggestions
     @Published var didFinishInitialLoad: Bool = false
     
+    /// Initial directory for the terminal to start in (used by Services integration)
+    /// If nil, defaults to home directory
+    var initialDirectory: String? = nil
+    
     /// Track the last command sent by the user (for history recording)
     @Published var lastUserCommand: String? = nil
     
@@ -640,6 +644,13 @@ struct SwiftTermView: NSViewRepresentable {
         term.notifyUpdateChanges = true
         // Store terminal reference for cleanup (as BridgedLocalProcessTerminalView)
         model.terminalView = term
+        
+        // Set a smaller, more compact font for better information density
+        let fontSize: CGFloat = 11.5
+        if let font = NSFont(name: "SF Mono", size: fontSize) ?? NSFont(name: "Menlo", size: fontSize) {
+            term.font = font
+        }
+        
         // Keep default scrollback; do not reset buffer to avoid disrupting input/echo
         // Wire helpers for selection/screen text
         model.getSelectionText = { [weak term] in
@@ -729,17 +740,30 @@ struct SwiftTermView: NSViewRepresentable {
         // This MUST happen after startProcess, not via -c flag, because:
         // 1. Using exec /bin/zsh -l would replace the shell and lose the precmd function
         // 2. Injecting via stdin ensures the hook exists in the interactive shell
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let escaped = home.replacingOccurrences(of: "\"", with: "\\\"")
-        // The precmd function emits:
-        // - OSC 7 with the current working directory (standard): ESC ] 7 ; file://hostname/path BEL
-        // - OSC 7777 with the exit code (custom): ESC ] 7777 ; exitcode BEL
-        // IMPORTANT: $? must be captured FIRST before any other command resets it
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak term] in
-            guard let term = term else { return }
+        
+        // Delay the cd command slightly to allow service handler to set pending directory
+        // The service message might arrive after makeNSView is called but before shell is ready
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak term, weak model] in
+            guard let term = term, let model = model else { return }
+            
+            // Check for pending service directory (from "New TermAI at Folder" Finder integration)
+            let pendingDir = AppDelegate.pendingServiceDirectory
+            if pendingDir != nil {
+                AppDelegate.pendingServiceDirectory = nil  // Clear it so only this terminal uses it
+            }
+            
+            let startDir = pendingDir ?? model.initialDirectory ?? FileManager.default.homeDirectoryForCurrentUser.path
+            let escaped = startDir.replacingOccurrences(of: "\"", with: "\\\"")
+            
             // Define precmd hook: capture $? first, then emit OSC sequences
+            // The precmd function emits:
+            // - OSC 7 with the current working directory (standard): ESC ] 7 ; file://hostname/path BEL
+            // - OSC 7777 with the exit code (custom): ESC ] 7777 ; exitcode BEL
             let precmdSetup = "__termai_precmd() { local rc=$?; printf '\\e]7;file://%s%s\\a' \"$(hostname)\" \"$(pwd -P)\"; printf '\\e]7777;%d\\a' $rc; }; precmd_functions+=(__termai_precmd); cd \"\(escaped)\"; clear\n"
             term.send(txt: precmdSetup)
+            
+            // Set CWD so file tree shows correct directory
+            model.currentWorkingDirectory = startDir
         }
         // Apply initial theme
         if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {

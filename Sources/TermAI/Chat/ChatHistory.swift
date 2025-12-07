@@ -9,13 +9,17 @@ struct ChatHistoryEntry: Identifiable, Codable {
     let savedDate: Date
     let messagePreview: String
     let messageCount: Int
+    let planIds: [UUID]  // Associated plan IDs for this session
+    let latestPlanTitle: String?  // Title of the most recent plan (for display)
     
-    init(id: UUID, title: String, savedDate: Date = Date(), messagePreview: String, messageCount: Int) {
+    init(id: UUID, title: String, savedDate: Date = Date(), messagePreview: String, messageCount: Int, planIds: [UUID] = [], latestPlanTitle: String? = nil) {
         self.id = id
         self.title = title
         self.savedDate = savedDate
         self.messagePreview = messagePreview
         self.messageCount = messageCount
+        self.planIds = planIds
+        self.latestPlanTitle = latestPlanTitle
     }
 }
 
@@ -46,11 +50,18 @@ final class ChatHistoryManager: ObservableObject {
         let preview = userMessages.first?.content.prefix(100) ?? ""
         let title = session.sessionTitle.isEmpty ? "Untitled Chat" : session.sessionTitle
         
+        // Get associated plans for this session
+        let sessionPlans = PlanManager.shared.plans(for: session.id)
+        let planIds = sessionPlans.map { $0.id }
+        let latestPlanTitle = sessionPlans.first?.title
+        
         let entry = ChatHistoryEntry(
             id: session.id,
             title: title,
             messagePreview: String(preview),
-            messageCount: session.messages.count
+            messageCount: session.messages.count,
+            planIds: planIds,
+            latestPlanTitle: latestPlanTitle
         )
         
         // Remove existing entry with same ID if present (updating)
@@ -125,6 +136,12 @@ final class ChatHistoryManager: ObservableObject {
         try? FileManager.default.removeItem(at: messagesFile)
         try? FileManager.default.removeItem(at: settingsFile)
         try? FileManager.default.removeItem(at: checkpointsFile)
+        
+        // Also clean up associated plans for this session
+        let sessionPlans = PlanManager.shared.plans(for: sessionId)
+        for plan in sessionPlans {
+            PlanManager.shared.deletePlan(id: plan.id)
+        }
     }
 }
 

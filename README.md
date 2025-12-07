@@ -11,15 +11,19 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 ### Core Experience
 - **Native macOS App** — Built with SwiftUI for a fast, responsive experience
 - **IDE-Style Layout** — File tree, terminal, editor tabs, and chat panels with resizable dividers
+- **Multiple Windows** — Each window has independent tabs, sessions, and state
 - **Multiple Tabs** — Each tab contains its own terminal and chat sessions
 - **Multiple Chat Sessions** — Create independent chat sessions per tab with their own settings
 - **Persistent State** — Messages, settings, and sessions are saved automatically
 - **Menu Bar Integration** — Quick access to TermAI with provider and model status display
+- **Dock Menu** — Right-click dock icon for recent projects and quick window creation
+- **Finder Integration** — Right-click folders in Finder to open in TermAI via Services menu
 - **Performance Monitoring** — Real-time CPU and memory usage graphs in the tab bar
 
 ### AI Providers
 - **Cloud Providers** — OpenAI, Anthropic, and Google AI Studio with API key support
 - **Local Providers** — Ollama, LM Studio, and vLLM with auto-detection
+- **Availability Detection** — Local providers show "Not Running" status when server is offline
 - **Model Selection** — Curated model lists with favorites for quick access
 - **Reasoning Models** — Full support for OpenAI o-series and Anthropic extended thinking
 - **Flexible API Keys** — Use environment variables or configure in-app overrides
@@ -60,13 +64,23 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 When enabled, the AI can autonomously execute commands and use tools to complete complex tasks.
 
 #### Agent Modes
-Three levels of agent autonomy to match your workflow:
+Four levels of agent autonomy to match your workflow:
 
 | Mode | Icon | Description | Capabilities |
 |------|------|-------------|--------------|
 | **Scout** | 🔭 | Read-only exploration | Read files, search, browse directories, HTTP requests |
+| **Navigator** | 🗺️ | Create implementation plans | All Scout tools + create_plan for planning |
 | **Copilot** | ✈️ | File operations, no shell | All Scout tools + write/edit files, plan & track |
 | **Pilot** | 🛫 | Full autonomous agent | All tools including shell execution |
+
+#### Navigator Mode
+A specialized planning mode that helps you chart the course before implementation:
+
+- **Exploration First** — Reads files and explores the codebase to understand context
+- **Clarifying Questions** — Asks questions to confirm requirements before planning
+- **Structured Plans** — Creates implementation plans with phases and a flat checklist
+- **Handoff to Build Mode** — After creating a plan, offers to switch to Copilot or Pilot to implement it
+- **Plan Persistence** — Plans are saved and can be viewed in the file viewer
 
 #### Agent Profiles
 Task-specific behavior profiles that adapt planning, reflection, and execution style:
@@ -278,8 +292,9 @@ Code blocks labeled as shell (`bash`, `sh`, `zsh`) show quick actions:
 Toggle agent mode with the mode selector in the chat header. Choose your mode:
 
 1. **Scout** — Explore and understand the codebase without making changes
-2. **Copilot** — Read and write files, but no shell command execution
-3. **Pilot** — Full autonomous agent with shell access
+2. **Navigator** — Create implementation plans that guide Copilot or Pilot
+3. **Copilot** — Read and write files, but no shell command execution
+4. **Pilot** — Full autonomous agent with shell access
 
 When enabled:
 
@@ -299,6 +314,7 @@ When enabled:
 | `check_process` | Check if a process is running | Scout+ |
 | `http_request` | Make HTTP requests to test APIs | Scout+ |
 | `memory` | Save and recall notes during execution | Scout+ |
+| `create_plan` | Create implementation plans with checklists | Navigator |
 | `write_file` | Write or append content to files | Copilot+ |
 | `edit_file` | Search and replace text in files | Copilot+ |
 | `insert_lines` | Insert lines at a specific position | Copilot+ |
@@ -313,7 +329,7 @@ When enabled:
 
 Configure agent behavior in **Settings > Agent**:
 
-- **Default Mode** — Scout, Copilot, or Pilot for new sessions
+- **Default Mode** — Scout, Navigator, Copilot, or Pilot for new sessions
 - **Default Profile** — Auto, General, Coding, Testing, DevOps, Documentation, or PM
 - **Execution Limits** — Max steps, fix attempts, command timeout
 - **Planning & Reflection** — Enable/disable planning phase, reflection interval
@@ -361,6 +377,8 @@ Contents:
 - Chat messages per session (JSON)
 - Session settings (provider, model, system prompt, title)
 - Agent settings (global)
+- Implementation plans (Navigator mode)
+- Recent projects list
 - Token usage records (daily files, 30-day retention)
 - Favorite commands
 
