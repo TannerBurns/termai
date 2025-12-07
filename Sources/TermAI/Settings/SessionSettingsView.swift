@@ -58,6 +58,7 @@ extension View {
 struct ProviderBadge: View {
     let provider: LocalLLMProvider
     let isSelected: Bool
+    var isAvailable: Bool = true
     
     var icon: String {
         switch provider {
@@ -79,19 +80,28 @@ struct ProviderBadge: View {
         VStack(spacing: 8) {
             ZStack {
                 Circle()
-                    .fill(isSelected ? accentColor : Color.gray.opacity(0.2))
+                    .fill(isSelected && isAvailable ? accentColor : Color.gray.opacity(0.2))
                     .frame(width: 44, height: 44)
                 
                 Image(systemName: icon)
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(isSelected ? .white : .gray)
+                    .foregroundColor(isSelected && isAvailable ? .white : .gray)
             }
             
-            Text(provider.rawValue)
-                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
-                .foregroundColor(isSelected ? .primary : .secondary)
+            VStack(spacing: 2) {
+                Text(provider.rawValue)
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                    .foregroundColor(isAvailable ? (isSelected ? .primary : .secondary) : .secondary)
+                
+                if !isAvailable {
+                    Text("Not Running")
+                        .font(.system(size: 9))
+                        .foregroundColor(.orange)
+                }
+            }
         }
         .frame(width: 80)
+        .opacity(isAvailable ? 1.0 : 0.6)
         .padding(.vertical, 12)
         .background(
             RoundedRectangle(cornerRadius: 10)
@@ -289,6 +299,7 @@ struct SessionSettingsView: View {
     
     @ObservedObject private var apiKeyManager = CloudAPIKeyManager.shared
     @ObservedObject private var agentSettings = AgentSettings.shared
+    @ObservedObject private var localProviderManager = LocalProviderAvailabilityManager.shared
     
     var body: some View {
         ScrollView {
@@ -435,12 +446,15 @@ struct SessionSettingsView: View {
                 HStack(spacing: 12) {
                     ForEach([LocalLLMProvider.ollama, .lmStudio, .vllm], id: \.rawValue) { provider in
                         let isSelected = session.providerType == .local(provider)
+                        let isAvailable = LocalProviderAvailabilityManager.shared.isAvailable(for: provider)
                         
                         ProviderBadge(
                             provider: provider,
-                            isSelected: isSelected
+                            isSelected: isSelected,
+                            isAvailable: isAvailable
                         )
                         .onTapGesture {
+                            guard isAvailable else { return }
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 session.switchToLocalProvider(LocalLLMProvider(rawValue: provider.rawValue)!)
                                 // Use URL from global AgentSettings

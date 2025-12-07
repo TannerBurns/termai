@@ -132,6 +132,15 @@ final class ChatTabsManager: ObservableObject {
             return nil
         }
         
+        // Ensure currentPlanId points to the latest plan for this session
+        // This handles cases where the saved currentPlanId might be stale
+        if let latestPlan = PlanManager.shared.latestPlan(for: sessionId) {
+            if restoredSession.currentPlanId != latestPlan.id {
+                restoredSession.currentPlanId = latestPlan.id
+                restoredSession.persistSettings()
+            }
+        }
+        
         // Add to sessions and select it
         sessions.append(restoredSession)
         selectedSessionId = restoredSession.id

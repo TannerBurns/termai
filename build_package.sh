@@ -132,6 +132,29 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <string>NSApplication</string>
   <key>CFBundleIconFile</key>
   <string>termAIDock</string>
+  <key>NSServices</key>
+  <array>
+    <dict>
+      <key>NSMenuItem</key>
+      <dict>
+        <key>default</key>
+        <string>New TermAI at Folder</string>
+      </dict>
+      <key>NSMessage</key>
+      <string>openTerminalAtFolder</string>
+      <key>NSPortName</key>
+      <string>TermAI</string>
+      <key>NSSendTypes</key>
+      <array>
+        <string>NSFilenamesPboardType</string>
+      </array>
+      <key>NSRequiredContext</key>
+      <dict>
+        <key>NSTextContent</key>
+        <string>FilePath</string>
+      </dict>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

@@ -1207,10 +1207,14 @@ struct ProvidersSettingsView: View {
                 let models = try await LocalProviderService.fetchModels(for: provider)
                 await MainActor.run {
                     status.wrappedValue = .connected(modelCount: models.count)
+                    // Update global availability so provider is no longer greyed out
+                    LocalProviderAvailabilityManager.shared.setAvailable(true, for: provider)
                 }
             } catch {
                 await MainActor.run {
                     status.wrappedValue = .disconnected(error: error.localizedDescription)
+                    // Update global availability to mark provider as unavailable
+                    LocalProviderAvailabilityManager.shared.setAvailable(false, for: provider)
                 }
             }
         }
@@ -2288,8 +2292,10 @@ struct AgentSettingsView: View {
 // MARK: - Data Settings View
 struct DataSettingsView: View {
     @Environment(\.colorScheme) var colorScheme
+    @StateObject private var planManager = PlanManager.shared
     @State private var showFactoryResetConfirmation = false
     @State private var showClearHistoryConfirmation = false
+    @State private var showClearPlansConfirmation = false
     @State private var factoryResetError: String?
     
     var body: some View {
@@ -2300,6 +2306,9 @@ struct DataSettingsView: View {
                 
                 // Chat History Section
                 chatHistorySection
+                
+                // Plan History Section
+                planHistorySection
                 
                 // Factory Reset Section
                 factoryResetSection
@@ -2316,6 +2325,16 @@ struct DataSettingsView: View {
             }
         } message: {
             Text("Are you sure you want to clear all chat history? Active sessions will not be affected.")
+        }
+        .alert("Clear Plan History", isPresented: $showClearPlansConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear", role: .destructive) {
+                Task { @MainActor in
+                    PlanManager.shared.clearAllPlans()
+                }
+            }
+        } message: {
+            Text("Are you sure you want to clear all implementation plans? This cannot be undone.")
         }
         .alert("Factory Reset", isPresented: $showFactoryResetConfirmation) {
             Button("Cancel", role: .cancel) { }
@@ -2427,6 +2446,89 @@ struct DataSettingsView: View {
         }
     }
     
+    // MARK: - Plan History Section
+    private var planHistorySection: some View {
+        let navigatorColor = Color(red: 0.7, green: 0.4, blue: 0.9)
+        
+        return VStack(alignment: .leading, spacing: 12) {
+            SettingsSectionHeader("Implementation Plans", subtitle: "Plans created by Navigator mode")
+            
+            VStack(alignment: .leading, spacing: 12) {
+                // Plans list
+                if planManager.plans.isEmpty {
+                    HStack {
+                        Image(systemName: "map")
+                            .font(.system(size: 20))
+                            .foregroundColor(.secondary.opacity(0.5))
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("No plans yet")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Text("Use Navigator mode to create implementation plans for your projects.")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary.opacity(0.8))
+                        }
+                    }
+                    .padding(12)
+                } else {
+                    // Plan count and clear button
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(planManager.plans.count) Implementation Plan\(planManager.plans.count == 1 ? "" : "s")")
+                                .font(.system(size: 13, weight: .medium))
+                            Text("Plans created by Navigator mode to guide Copilot/Pilot implementations.")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        Button(action: { showClearPlansConfirmation = true }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 12))
+                                Text("Clear All")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.orange.opacity(0.5), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    Divider()
+                    
+                    // Plans list (most recent first, limited to 10)
+                    ForEach(planManager.plans.prefix(10)) { plan in
+                        PlanHistoryRow(plan: plan, navigatorColor: navigatorColor)
+                    }
+                    
+                    if planManager.plans.count > 10 {
+                        Text("+ \(planManager.plans.count - 10) more plans")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .padding(.top, 4)
+                    }
+                }
+            }
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+            )
+        }
+    }
+    
     // MARK: - Factory Reset Section
     private var factoryResetSection: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2457,6 +2559,7 @@ struct DataSettingsView: View {
                                 Label("All settings and preferences", systemImage: "gearshape")
                                 Label("Token usage statistics", systemImage: "chart.bar")
                                 Label("Chat history archive", systemImage: "clock.arrow.circlepath")
+                                Label("Implementation plans", systemImage: "map")
                                 Label("Provider API key overrides", systemImage: "key")
                             }
                             .font(.system(size: 11))
@@ -2518,6 +2621,116 @@ struct DataSettingsView: View {
             NSApplication.shared.terminate(nil)
         } catch {
             factoryResetError = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - Plan History Row
+
+private struct PlanHistoryRow: View {
+    let plan: Plan
+    let navigatorColor: Color
+    
+    @State private var isHovering = false
+    
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy h:mm a"
+        return formatter
+    }()
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            // Status icon
+            ZStack {
+                Circle()
+                    .fill(plan.status.color.opacity(0.15))
+                    .frame(width: 28, height: 28)
+                
+                Image(systemName: plan.status.icon)
+                    .font(.system(size: 12))
+                    .foregroundColor(plan.status.color)
+            }
+            
+            VStack(alignment: .leading, spacing: 3) {
+                Text(plan.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                
+                HStack(spacing: 8) {
+                    Text(Self.dateFormatter.string(from: plan.createdDate))
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    
+                    if plan.checklistItemCount > 0 {
+                        Text("\(plan.completedItemCount)/\(plan.checklistItemCount) items")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Text(plan.status.rawValue)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(plan.status.color)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule()
+                                .fill(plan.status.color.opacity(0.1))
+                        )
+                }
+            }
+            
+            Spacer()
+            
+            // Action buttons (shown on hover)
+            if isHovering {
+                HStack(spacing: 8) {
+                    // View button
+                    Button(action: { openPlan() }) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 11))
+                            .foregroundColor(navigatorColor)
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(navigatorColor.opacity(0.1)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("View plan")
+                    
+                    // Delete button
+                    Button(action: { deletePlan() }) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11))
+                            .foregroundColor(.red)
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Color.red.opacity(0.1)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Delete plan")
+                }
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isHovering ? Color.primary.opacity(0.03) : Color.clear)
+        )
+        .onHover { hovering in
+            isHovering = hovering
+        }
+    }
+    
+    private func openPlan() {
+        // Post notification to open plan in editor
+        NotificationCenter.default.post(
+            name: .TermAIOpenPlanInEditor,
+            object: nil,
+            userInfo: ["planId": plan.id]
+        )
+    }
+    
+    private func deletePlan() {
+        Task { @MainActor in
+            PlanManager.shared.deletePlan(id: plan.id)
         }
     }
 }

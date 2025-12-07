@@ -377,7 +377,8 @@ private struct ChatTabPill: View {
 private struct SessionHeaderView: View {
     @ObservedObject var session: ChatSession
     @ObservedObject private var agentSettings = AgentSettings.shared
-    
+    @ObservedObject private var localProviderManager = LocalProviderAvailabilityManager.shared
+
     private var availableCloudProviders: [CloudProvider] {
         CloudAPIKeyManager.shared.availableProviders
     }
@@ -436,40 +437,25 @@ private struct SessionHeaderView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                Button(action: {
-                    session.switchToLocalProvider(.ollama)
-                }) {
-                    HStack {
-                        Image(systemName: "cube.fill")
-                        Text("Ollama")
-                        if session.providerType == .local(.ollama) {
-                            Image(systemName: "checkmark")
+                ForEach(LocalLLMProvider.allCases, id: \.rawValue) { provider in
+                    let isAvailable = LocalProviderAvailabilityManager.shared.isAvailable(for: provider)
+                    Button(action: {
+                        session.switchToLocalProvider(provider)
+                    }) {
+                        HStack {
+                            Image(systemName: provider.icon)
+                            Text(provider.rawValue)
+                            if !isAvailable {
+                                Text("Not Running")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+                            if session.providerType == .local(provider) {
+                                Image(systemName: "checkmark")
+                            }
                         }
                     }
-                }
-                
-                Button(action: {
-                    session.switchToLocalProvider(.lmStudio)
-                }) {
-                    HStack {
-                        Image(systemName: "sparkles")
-                        Text("LM Studio")
-                        if session.providerType == .local(.lmStudio) {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-
-                Button(action: {
-                    session.switchToLocalProvider(.vllm)
-                }) {
-                    HStack {
-                        Image(systemName: "bolt.fill")
-                        Text("vLLM")
-                        if session.providerType == .local(.vllm) {
-                            Image(systemName: "checkmark")
-                        }
-                    }
+                    .disabled(!isAvailable)
                 }
             } label: {
                 Label(session.providerName, systemImage: providerIcon)
@@ -718,6 +704,20 @@ private struct ChatHistoryRow: View {
                         Text("\(entry.messageCount) messages")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary.opacity(0.8))
+                        
+                        // Show plan indicator if session has plans
+                        if !entry.planIds.isEmpty {
+                            Text("·")
+                                .foregroundColor(.secondary.opacity(0.5))
+                            
+                            HStack(spacing: 3) {
+                                Image(systemName: "map.fill")
+                                    .font(.system(size: 8))
+                                Text(entry.planIds.count == 1 ? "1 plan" : "\(entry.planIds.count) plans")
+                                    .font(.system(size: 10))
+                            }
+                            .foregroundColor(Color(red: 0.7, green: 0.4, blue: 0.9).opacity(0.8))
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1481,6 +1481,7 @@ private struct StatRow: View {
 private struct SessionSetupPromptView: View {
     @ObservedObject var session: ChatSession
     @ObservedObject private var agentSettings = AgentSettings.shared
+    @ObservedObject private var localProviderManager = LocalProviderAvailabilityManager.shared
     @Environment(\.colorScheme) var colorScheme
     
     private var availableCloudProviders: [CloudProvider] {
@@ -1710,6 +1711,8 @@ private struct SessionSetupPromptView: View {
                     icon: "cube.fill",
                     description: "Run models locally with Ollama",
                     isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .local(.ollama),
+                    isAvailable: LocalProviderAvailabilityManager.shared.isAvailable(for: .ollama),
+                    unavailableReason: "Not Running",
                     color: .blue
                 ) {
                     session.switchToLocalProvider(.ollama)
@@ -1720,6 +1723,8 @@ private struct SessionSetupPromptView: View {
                     icon: "sparkles",
                     description: "Local models via LM Studio",
                     isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .local(.lmStudio),
+                    isAvailable: LocalProviderAvailabilityManager.shared.isAvailable(for: .lmStudio),
+                    unavailableReason: "Not Running",
                     color: .purple
                 ) {
                     session.switchToLocalProvider(.lmStudio)
@@ -1730,6 +1735,8 @@ private struct SessionSetupPromptView: View {
                     icon: "bolt.fill",
                     description: "High-performance inference server",
                     isSelected: session.hasExplicitlyConfiguredProvider && session.providerType == .local(.vllm),
+                    isAvailable: LocalProviderAvailabilityManager.shared.isAvailable(for: .vllm),
+                    unavailableReason: "Not Running",
                     color: .orange
                 ) {
                     session.switchToLocalProvider(.vllm)
@@ -1745,6 +1752,7 @@ private struct SessionSetupPromptView: View {
         description: String,
         isSelected: Bool,
         isAvailable: Bool = true,
+        unavailableReason: String = "No API Key",
         color: Color,
         action: @escaping () -> Void
     ) -> some View {
@@ -1769,7 +1777,7 @@ private struct SessionSetupPromptView: View {
                             .foregroundColor(isAvailable ? .primary : .secondary.opacity(0.6))
                         
                         if !isAvailable {
-                            Text("No API Key")
+                            Text(unavailableReason)
                                 .font(.system(size: 9, weight: .medium))
                                 .foregroundColor(.orange)
                                 .padding(.horizontal, 5)

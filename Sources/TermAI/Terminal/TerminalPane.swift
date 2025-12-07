@@ -440,6 +440,7 @@ private struct SuggestionKeyboardHandler: NSViewRepresentable {
 struct TerminalSuggestionsHeaderView: View {
     @ObservedObject private var agentSettings = AgentSettings.shared
     @ObservedObject private var apiKeyManager = CloudAPIKeyManager.shared
+    @ObservedObject private var localProviderManager = LocalProviderAvailabilityManager.shared
     
     // Local models fetching state
     @State private var localModels: [String] = []
@@ -552,17 +553,24 @@ struct TerminalSuggestionsHeaderView: View {
                 .foregroundColor(.secondary)
             
             ForEach(LocalLLMProvider.allCases, id: \.rawValue) { provider in
+                let isAvailable = LocalProviderAvailabilityManager.shared.isAvailable(for: provider)
                 Button(action: {
                     selectLocalProvider(provider)
                 }) {
                     HStack {
                         Image(systemName: provider.icon)
                         Text(provider.rawValue)
+                        if !isAvailable {
+                            Text("Not Running")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
                         if agentSettings.terminalSuggestionsProvider == .local(provider) {
                             Image(systemName: "checkmark")
                         }
                     }
                 }
+                .disabled(!isAvailable)
             }
             
             Divider()

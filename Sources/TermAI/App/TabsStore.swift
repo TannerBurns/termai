@@ -22,10 +22,16 @@ final class AppTab: Identifiable, ObservableObject {
     /// Cancellables for Combine subscriptions
     private var cancellables = Set<AnyCancellable>()
     
-    init(id: UUID = UUID(), title: String = "Tab", ptyModel: PTYModel = PTYModel(), chatTabsManager: ChatTabsManager? = nil) {
+    init(id: UUID = UUID(), title: String = "Tab", ptyModel: PTYModel = PTYModel(), chatTabsManager: ChatTabsManager? = nil, initialDirectory: String? = nil) {
         self.id = id
         self.title = title
         self.ptyModel = ptyModel
+        
+        // Set initial directory if provided (for Services integration)
+        if let dir = initialDirectory {
+            ptyModel.initialDirectory = dir
+        }
+        
         // Create a new ChatTabsManager or use the provided one (for restoration)
         self.chatTabsManager = chatTabsManager ?? ChatTabsManager(tabId: id)
         // Create a per-tab suggestion service
@@ -116,8 +122,11 @@ final class TabsStore: ObservableObject {
     @Published var selectedId: UUID
     @Published private(set) var isLoading: Bool = true
     
+    /// Standard initializer - loads saved tabs or creates default
     init() {
         // Start with a temporary tab - will be replaced by async load
+        // Note: If launched via Services, the pending directory is picked up
+        // in SwiftTermView.makeNSView when the terminal is created
         let first = AppTab(title: "Tab 1")
         self.tabs = [first]
         self.selectedId = first.id
@@ -125,6 +134,30 @@ final class TabsStore: ObservableObject {
         // Load saved tabs asynchronously to avoid blocking main thread
         Task { @MainActor in
             await loadTabsAsync()
+        }
+    }
+    
+    /// Initializer for new windows with a specific starting directory
+    /// When initialDirectory is provided, skips loading saved tabs and creates a fresh window
+    init(initialDirectory: String?) {
+        if let directory = initialDirectory {
+            // Create a fresh tab at the specified directory (for dock menu "Open Recent")
+            let first = AppTab(title: "Tab 1", initialDirectory: directory)
+            self.tabs = [first]
+            self.selectedId = first.id
+            self.isLoading = false
+            
+            // Record to recent projects
+            RecentProjectsStore.shared.addProject(path: directory)
+        } else {
+            // Standard initialization - load saved tabs
+            let first = AppTab(title: "Tab 1")
+            self.tabs = [first]
+            self.selectedId = first.id
+            
+            Task { @MainActor in
+                await loadTabsAsync()
+            }
         }
     }
     
@@ -175,6 +208,32 @@ final class TabsStore: ObservableObject {
     
     func addTab(copySettingsFrom current: AppTab? = nil) {
         let newTab = AppTab(title: "Tab \(tabs.count + 1)")
+        
+        // Copy chat settings from current tab's selected session if available
+        if let currentSession = current?.selectedChatSession {
+            if let newSession = newTab.chatTabsManager.sessions.first {
+                newSession.apiBaseURL = currentSession.apiBaseURL
+                newSession.apiKey = currentSession.apiKey
+                newSession.model = currentSession.model
+                newSession.providerName = currentSession.providerName
+                newSession.persistSettings()
+            }
+        }
+        
+        tabs.append(newTab)
+        selectedId = newTab.id
+        saveManifest()
+    }
+    
+    /// Create a new tab that starts directly at a specific directory
+    /// Used by macOS Services integration for "New TermAI at Folder"
+    /// The terminal starts at the specified directory immediately (no cd command needed)
+    func addTab(atDirectory directory: String, copySettingsFrom current: AppTab? = nil) {
+        // Record to recent projects for dock menu
+        RecentProjectsStore.shared.addProject(path: directory)
+        
+        // Create tab with initialDirectory set - terminal will start there directly
+        let newTab = AppTab(title: "Tab \(tabs.count + 1)", initialDirectory: directory)
         
         // Copy chat settings from current tab's selected session if available
         if let currentSession = current?.selectedChatSession {

@@ -5,24 +5,24 @@ struct MarkdownRenderer: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             ForEach(parseBlocks(text), id: \.self) { block in
                 switch block {
                 case .paragraph(let p):
                     ParagraphView(text: p)
-                        .padding(.vertical, 2)
+                        .padding(.vertical, 1)
                 case .header(let level, let text):
                     HeaderView(level: level, text: text)
-                        .padding(.top, level == 1 ? 8 : 4)
-                        .padding(.bottom, 2)
+                        .padding(.top, level == 1 ? 6 : 3)
+                        .padding(.bottom, 1)
                 case .listItem(let text):
                     ListItemView(text: text)
                 case .code(let lang, let code, let isClosed):
                     CodeBlockView(language: lang, code: code, isClosed: isClosed)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 3)
                 case .table(let headers, let rows):
                     TableView(headers: headers, rows: rows)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 3)
                 }
             }
         }
@@ -172,11 +172,11 @@ private struct HeaderView: View {
     
     private var fontForLevel: Font {
         switch level {
-        case 1: return .title
-        case 2: return .title2
-        case 3: return .title3
-        case 4: return .headline
-        default: return .subheadline
+        case 1: return .system(size: 14, weight: .bold)
+        case 2: return .system(size: 13, weight: .bold)
+        case 3: return .system(size: 12, weight: .semibold)
+        case 4: return .system(size: 11.5, weight: .semibold)
+        default: return .system(size: 11, weight: .medium)
         }
     }
 }
@@ -313,10 +313,10 @@ private struct CodeBlockView: View {
             // Code block with syntax highlighting
             ScrollView(.horizontal, showsIndicators: false) {
                 highlightedCode
-                    .font(.system(size: 12, weight: .regular, design: .monospaced))
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             
@@ -383,15 +383,15 @@ private struct CodeActionButton: View {
     
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Image(systemName: icon)
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 8, weight: .semibold))
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 10, weight: .medium))
             }
             .foregroundColor(isHovered ? .white : color)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
             .background(
                 Capsule()
                     .fill(isHovered ? color : color.opacity(0.12))
@@ -431,18 +431,20 @@ private struct MarkdownText: View {
                 var attr = (try? AttributedString(markdown: hardBreaks, options: .init(interpretedSyntax: .full))) ?? AttributedString(text)
                 for run in attr.runs {
                     if let intent = run.inlinePresentationIntent, intent.contains(.code) {
-                        attr[run.range].font = .system(.body, design: .monospaced)
+                        attr[run.range].font = .system(size: 10.5, design: .monospaced)
                         attr[run.range].backgroundColor = Color.primary.opacity(0.06)
                     }
                 }
                 return attr
             }()
             Text(processed)
-                .lineSpacing(4)
+                .font(.system(size: 11.5))
+                .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(text)
-                .lineSpacing(4)
+                .font(.system(size: 11.5))
+                .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -458,9 +460,9 @@ private struct TableView: View {
             HStack(spacing: 0) {
                 ForEach(headers.indices, id: \.self) { i in
                     MarkdownText(text: headers[i])
-                        .font(.system(size: 12, weight: .semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     
                     if i < headers.count - 1 {
@@ -477,9 +479,9 @@ private struct TableView: View {
                 HStack(spacing: 0) {
                     ForEach(rows[r].indices, id: \.self) { c in
                         MarkdownText(text: rows[r][c])
-                            .font(.system(size: 12))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
+                            .font(.system(size: 10.5))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         
                         if c < rows[r].count - 1 {

@@ -8,6 +8,7 @@ import Combine
 enum EditorTabType: Equatable, Hashable {
     case terminal
     case file(path: String)
+    case plan(id: UUID)  // Implementation plan from Navigator mode
     
     var isTerminal: Bool {
         if case .terminal = self { return true }
@@ -19,8 +20,25 @@ enum EditorTabType: Equatable, Hashable {
         return false
     }
     
+    var isPlan: Bool {
+        if case .plan = self { return true }
+        return false
+    }
+    
     var filePath: String? {
-        if case .file(let path) = self { return path }
+        switch self {
+        case .file(let path):
+            return path
+        case .plan(let id):
+            // Get the plan file path using global helper (doesn't need MainActor)
+            return planFilePath(for: id)
+        default:
+            return nil
+        }
+    }
+    
+    var planId: UUID? {
+        if case .plan(let id) = self { return id }
         return nil
     }
 }
@@ -61,6 +79,13 @@ final class EditorTab: Identifiable, ObservableObject, Equatable {
             self.title = title ?? url.lastPathComponent
             self.fileExtension = url.pathExtension.lowercased()
             self.language = Self.detectLanguage(from: fileExtension)
+            
+        case .plan(let planId):
+            // Use provided title or default - plan details loaded lazily
+            self.title = title ?? "Implementation Plan"
+            self.filePath = planFilePath(for: planId)
+            self.fileExtension = "md"
+            self.language = "markdown"
         }
     }
     
@@ -74,6 +99,8 @@ final class EditorTab: Identifiable, ObservableObject, Equatable {
         switch type {
         case .terminal:
             return "terminal"
+        case .plan:
+            return "map.fill"
         case .file:
             guard let ext = fileExtension else { return "doc.text" }
             switch ext {
@@ -97,6 +124,8 @@ final class EditorTab: Identifiable, ObservableObject, Equatable {
         switch type {
         case .terminal:
             return .green
+        case .plan:
+            return Color(red: 0.7, green: 0.4, blue: 0.9)  // Navigator purple
         case .file:
             guard let ext = fileExtension else { return .secondary }
             switch ext {
@@ -195,6 +224,31 @@ final class EditorTabsManager: ObservableObject {
         selectedTabId = newTab.id
     }
     
+    /// Open a plan in a new tab or focus existing tab
+    func openPlan(id: UUID) {
+        // Check if plan is already open
+        if let existing = tabs.first(where: { $0.type == .plan(id: id) }) {
+            selectedTabId = existing.id
+            return
+        }
+        
+        // Ensure the plan file exists (using global helper)
+        guard planFilePath(for: id) != nil else { return }
+        
+        // Try to get the plan title from PlanManager (on MainActor)
+        let planTitle: String?
+        if let plan = PlanManager.shared.getPlan(id: id) {
+            planTitle = "📋 \(plan.title)"
+        } else {
+            planTitle = nil
+        }
+        
+        // Create new tab for the plan
+        let newTab = EditorTab(type: .plan(id: id), title: planTitle, isPreview: false)
+        tabs.append(newTab)
+        selectedTabId = newTab.id
+    }
+    
     /// Close a tab by ID
     func closeTab(id: UUID) {
         // Can't close terminal tab
@@ -251,14 +305,19 @@ final class EditorTabsManager: ObservableObject {
         tabs.insert(tab, at: adjustedDestination)
     }
     
-    /// Get file tabs only
+    /// Get file tabs only (includes plan tabs since they're also file-based)
     var fileTabs: [EditorTab] {
-        tabs.filter { $0.type.isFile }
+        tabs.filter { $0.type.isFile || $0.type.isPlan }
     }
     
     /// Check if a file is open
     func isFileOpen(_ path: String) -> Bool {
         tabs.contains { $0.type == .file(path: path) }
+    }
+    
+    /// Check if a plan is open
+    func isPlanOpen(_ id: UUID) -> Bool {
+        tabs.contains { $0.type == .plan(id: id) }
     }
     
     /// Pin a preview tab (make it permanent)

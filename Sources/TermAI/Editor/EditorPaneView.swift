@@ -41,6 +41,18 @@ struct EditorPaneView: View {
                 }
             }
         }
+        // Handle plan opening from chat
+        .onReceive(NotificationCenter.default.publisher(for: .TermAIOpenPlanInEditor)) { note in
+            if let planId = note.userInfo?["planId"] as? UUID {
+                tabsManager.openPlan(id: planId)
+            }
+        }
+        // Handle file opening from chat
+        .onReceive(NotificationCenter.default.publisher(for: .TermAIOpenFileInEditor)) { note in
+            if let path = note.userInfo?["path"] as? String {
+                tabsManager.openFile(at: path)
+            }
+        }
     }
     
     // MARK: - Terminal Content
