@@ -1030,8 +1030,12 @@ struct SimpleEditableTextView: NSViewRepresentable {
                 let fullText = textView.string
                 let beforeSelection = String(fullText.prefix(selectedRange.location))
                 let startLine = beforeSelection.components(separatedBy: .newlines).count
-                let selectedLines = selectedText.components(separatedBy: .newlines).count
-                let endLine = startLine + selectedLines - 1
+                var selectedLines = selectedText.components(separatedBy: .newlines).count
+                // If selection ends with newline, the last component is empty - don't count it
+                if selectedText.last?.isNewline == true {
+                    selectedLines -= 1
+                }
+                let endLine = startLine + max(selectedLines, 1) - 1
                 
                 parent.onSelectionChanged(selectedText, (start: startLine, end: endLine))
             } else {
@@ -1344,8 +1348,12 @@ struct SelectableCodeView: NSViewRepresentable {
                 let fullText = textView.string
                 let beforeSelection = String(fullText.prefix(selectedRange.location))
                 let startLine = beforeSelection.components(separatedBy: .newlines).count
-                let selectedLines = selectedText.components(separatedBy: .newlines).count
-                let endLine = startLine + selectedLines - 1
+                var selectedLines = selectedText.components(separatedBy: .newlines).count
+                // If selection ends with newline, the last component is empty - don't count it
+                if selectedText.last?.isNewline == true {
+                    selectedLines -= 1
+                }
+                let endLine = startLine + max(selectedLines, 1) - 1
                 
                 onSelectionChanged(selectedText, (start: startLine, end: endLine))
             } else {

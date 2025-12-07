@@ -30,6 +30,9 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 - **Search** — Quick filter to find files by name
 - **Language Icons** — Color-coded icons for Swift, Python, JavaScript, TypeScript, Rust, Go, and more
 - **Lazy Loading** — Directories load on expand for fast navigation of large projects
+- **Navigation Buttons** — Quick access to home (~) and parent (..) directories
+- **Folder Navigation** — Double-click a folder to cd into it in the terminal
+- **Context Menu** — Right-click for "Open in Terminal", "Reveal in Finder", "Copy Path"
 - **Resizable** — Drag to adjust sidebar width
 
 ### Editor Tabs
@@ -235,7 +238,10 @@ For local models, you can set a custom context size if auto-detection is incorre
 ### File Explorer
 Toggle the file tree sidebar with the sidebar button or Cmd+B:
 - **Single-click** a file to preview it (shown in italic in the tab bar)
-- **Double-click** or double-click the tab to pin it permanently
+- **Double-click** a file or double-click the tab to pin it permanently
+- **Double-click** a folder to navigate the terminal to that directory
+- **Right-click** any item for context menu (Reveal in Finder, Copy Path, Open in Terminal)
+- Use the **Home** and **Up** buttons to quickly navigate directories
 - Directories expand on click; use the refresh button to rescan
 
 The file tree automatically follows the terminal's working directory.

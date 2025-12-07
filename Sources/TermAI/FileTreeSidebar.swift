@@ -7,10 +7,29 @@ struct FileTreeSidebar: View {
     @ObservedObject var model: FileTreeModel
     let onFileSelected: (FileTreeNode) -> Void
     let onFileDoubleClicked: (FileTreeNode) -> Void
+    let onFolderGoTo: ((FileTreeNode) -> Void)?
+    let onNavigateUp: (() -> Void)?
+    let onNavigateHome: (() -> Void)?
     
     @Environment(\.colorScheme) var colorScheme
     @State private var searchText: String = ""
     @State private var hoveredNodeId: String?
+    
+    init(
+        model: FileTreeModel,
+        onFileSelected: @escaping (FileTreeNode) -> Void,
+        onFileDoubleClicked: @escaping (FileTreeNode) -> Void,
+        onFolderGoTo: ((FileTreeNode) -> Void)? = nil,
+        onNavigateUp: (() -> Void)? = nil,
+        onNavigateHome: (() -> Void)? = nil
+    ) {
+        self.model = model
+        self.onFileSelected = onFileSelected
+        self.onFileDoubleClicked = onFileDoubleClicked
+        self.onFolderGoTo = onFolderGoTo
+        self.onNavigateUp = onNavigateUp
+        self.onNavigateHome = onNavigateHome
+    }
     
     private var theme: FileTreeTheme {
         colorScheme == .dark ? .dark : .light
@@ -43,7 +62,7 @@ struct FileTreeSidebar: View {
     // MARK: - Header
     
     private var sidebarHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Image(systemName: "folder.fill")
                 .font(.system(size: 12))
                 .foregroundColor(theme.accent)
@@ -53,6 +72,24 @@ struct FileTreeSidebar: View {
                 .foregroundColor(theme.primaryText)
             
             Spacer()
+            
+            // Navigate to home
+            Button(action: { onNavigateHome?() }) {
+                Image(systemName: "house")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText)
+            }
+            .buttonStyle(.plain)
+            .help("Go to Home (~)")
+            
+            // Navigate up one directory
+            Button(action: { onNavigateUp?() }) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 11))
+                    .foregroundColor(theme.secondaryText)
+            }
+            .buttonStyle(.plain)
+            .help("Go Up One Directory (..)")
             
             // Refresh button
             Button(action: { model.refresh() }) {
@@ -119,12 +156,19 @@ struct FileTreeSidebar: View {
                             }
                         },
                         onDoubleTap: {
-                            if !node.isDirectory {
+                            if node.isDirectory {
+                                // Double-click on folder = go to that folder
+                                onFolderGoTo?(node)
+                            } else {
                                 onFileDoubleClicked(node)
                             }
                         },
                         onToggleExpand: {
                             model.toggleExpansion(node)
+                        },
+                        onGoToFolder: node.isDirectory ? { onFolderGoTo?(node) } : nil,
+                        onRevealInFinder: {
+                            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: node.path)
                         }
                     )
                     .onHover { hovering in
@@ -199,6 +243,8 @@ struct FileTreeRow: View {
     let onTap: () -> Void
     let onDoubleTap: () -> Void
     let onToggleExpand: () -> Void
+    let onGoToFolder: (() -> Void)?
+    let onRevealInFinder: () -> Void
     
     private let indentWidth: CGFloat = 16
     private let iconSize: CGFloat = 14
@@ -253,6 +299,30 @@ struct FileTreeRow: View {
         }
         .onTapGesture(count: 1) {
             onTap()
+        }
+        .contextMenu {
+            if node.isDirectory {
+                Button {
+                    onGoToFolder?()
+                } label: {
+                    Label("Open in Terminal", systemImage: "terminal")
+                }
+                
+                Divider()
+            }
+            
+            Button {
+                onRevealInFinder()
+            } label: {
+                Label("Reveal in Finder", systemImage: "folder")
+            }
+            
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(node.path, forType: .string)
+            } label: {
+                Label("Copy Path", systemImage: "doc.on.doc")
+            }
         }
     }
     
@@ -317,8 +387,33 @@ struct ResizableFileTreeSidebar: View {
     let maxWidth: CGFloat
     let onFileSelected: (FileTreeNode) -> Void
     let onFileDoubleClicked: (FileTreeNode) -> Void
+    let onFolderGoTo: ((FileTreeNode) -> Void)?
+    let onNavigateUp: (() -> Void)?
+    let onNavigateHome: (() -> Void)?
     
     @State private var isDragging: Bool = false
+    
+    init(
+        model: FileTreeModel,
+        width: Binding<CGFloat>,
+        minWidth: CGFloat,
+        maxWidth: CGFloat,
+        onFileSelected: @escaping (FileTreeNode) -> Void,
+        onFileDoubleClicked: @escaping (FileTreeNode) -> Void,
+        onFolderGoTo: ((FileTreeNode) -> Void)? = nil,
+        onNavigateUp: (() -> Void)? = nil,
+        onNavigateHome: (() -> Void)? = nil
+    ) {
+        self.model = model
+        self._width = width
+        self.minWidth = minWidth
+        self.maxWidth = maxWidth
+        self.onFileSelected = onFileSelected
+        self.onFileDoubleClicked = onFileDoubleClicked
+        self.onFolderGoTo = onFolderGoTo
+        self.onNavigateUp = onNavigateUp
+        self.onNavigateHome = onNavigateHome
+    }
     
     var body: some View {
         HStack(spacing: 0) {
@@ -326,7 +421,10 @@ struct ResizableFileTreeSidebar: View {
             FileTreeSidebar(
                 model: model,
                 onFileSelected: onFileSelected,
-                onFileDoubleClicked: onFileDoubleClicked
+                onFileDoubleClicked: onFileDoubleClicked,
+                onFolderGoTo: onFolderGoTo,
+                onNavigateUp: onNavigateUp,
+                onNavigateHome: onNavigateHome
             )
             .frame(width: width)
             

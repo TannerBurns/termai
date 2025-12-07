@@ -399,6 +399,25 @@ struct AppTabContentView: View {
                             if !node.isDirectory {
                                 tab.editorTabsManager.openFile(at: node.path, asPreview: false)
                             }
+                        },
+                        onFolderGoTo: { node in
+                            // Change terminal directory to selected folder
+                            if node.isDirectory {
+                                // Escape path for shell
+                                let escapedPath = node.path
+                                    .replacingOccurrences(of: "\\", with: "\\\\")
+                                    .replacingOccurrences(of: "\"", with: "\\\"")
+                                    .replacingOccurrences(of: " ", with: "\\ ")
+                                tab.ptyModel.sendInput?("cd \(escapedPath)\n")
+                            }
+                        },
+                        onNavigateUp: {
+                            // Go up one directory
+                            tab.ptyModel.sendInput?("cd ..\n")
+                        },
+                        onNavigateHome: {
+                            // Go to home directory
+                            tab.ptyModel.sendInput?("cd ~\n")
                         }
                     )
                     .frame(width: effectiveFileTreeWidth)
