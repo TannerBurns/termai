@@ -5,7 +5,7 @@ import SwiftUI
 /// Tab bar displaying terminal and open file tabs
 struct EditorTabBar: View {
     @ObservedObject var tabsManager: EditorTabsManager
-    @StateObject private var performanceMonitor = PerformanceMonitor.shared
+    @ObservedObject private var performanceMonitor = PerformanceMonitor.shared
     
     @Environment(\.colorScheme) var colorScheme
     @State private var hoveredTabId: UUID?
