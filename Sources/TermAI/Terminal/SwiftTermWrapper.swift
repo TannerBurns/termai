@@ -13,7 +13,7 @@ final class PTYModel: ObservableObject {
     @Published var hasSelection: Bool = false
     @Published var lastOutputChunk: String = ""
     fileprivate var previousBuffer: String = ""
-    fileprivate var lastOutputStartOffset: Int? = nil
+    fileprivate var lastOutputStartLine: Int? = nil  // Line number in buffer when output started (scrollback-safe)
     @Published var lastOutputStartViewportRow: Int? = nil
     @Published var visibleRows: Int = 0
     @Published var lastOutputLineRange: (start: Int, end: Int)? = nil
@@ -200,7 +200,12 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
         let buffer = self.getTerminal().getBufferAsData()
         let text = String(data: buffer, encoding: .utf8) ?? String(data: buffer, encoding: .isoLatin1) ?? ""
         bridgeModel?.previousBuffer = text
-        bridgeModel?.lastOutputStartOffset = text.count
+        // Track line index for where new output should start - this survives scrollback
+        // Count newlines to get line index, but if buffer doesn't end with newline,
+        // add 1 to skip the partial last line (which existed before output started)
+        let newlineCount = text.filter { $0 == "\n" }.count
+        let startLine = text.hasSuffix("\n") ? newlineCount : newlineCount + 1
+        bridgeModel?.lastOutputStartLine = startLine
         // Track viewport row for alignment
         let absRow = self.terminal.buffer.y
         let viewportRow = absRow - self.terminal.buffer.yDisp
@@ -333,10 +338,13 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
             }
             
             // Always compute last output chunk for the "Add Last Output" button
+            // Use line-based tracking to survive terminal scrollback
             var newChunk = ""
-            if let start = model.lastOutputStartOffset, start < text.count {
-                let idx = text.index(text.startIndex, offsetBy: start)
-                newChunk = String(text[idx...])
+            let lines = text.components(separatedBy: "\n")
+            if let startLine = model.lastOutputStartLine, startLine < lines.count {
+                // Extract lines from the start line to the end
+                let outputLines = Array(lines.dropFirst(startLine))
+                newChunk = outputLines.joined(separator: "\n")
             }
             
             // For normal use, just clean up the output minimally

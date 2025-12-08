@@ -2511,6 +2511,18 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                             let errorMsg = "Tool '\(toolCall.name)' is not available in \(agentMode.rawValue) mode"
                             toolResults.append((id: toolCall.id, name: toolCall.name, result: errorMsg, isError: true))
                             agentContextLog.append("TOOL ERROR: \(errorMsg)")
+                            
+                            // Update the tool event to show failure (it was added with "running" status earlier)
+                            if let idx = messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCall.id }) {
+                                var msg = messages[idx]
+                                var evt = msg.agentEvent!
+                                evt.toolStatus = "failed"
+                                evt.output = errorMsg
+                                msg.agentEvent = evt
+                                messages[idx] = msg
+                                messages = messages
+                                persistMessages()
+                            }
                             continue
                         }
                         
@@ -3880,15 +3892,14 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                 if case .cloud(let cloudProvider) = self.providerType {
                     switch cloudProvider {
                     case .openai:
-                        // OpenAI format with max_completion_tokens
+                        // OpenAI format - no max tokens, let the model decide based on prompt
                         var bodyDict: [String: Any] = [
                             "model": self.model,
                             "messages": [
                                 ["role": "system", "content": "You are a helpful assistant that generates concise titles."],
                                 ["role": "user", "content": titlePrompt]
                             ],
-                            "stream": false,
-                            "max_completion_tokens": 256
+                            "stream": false
                         ]
                         // For reasoning models use temperature 1.0, otherwise use title temperature
                         if self.currentModelSupportsReasoning {
@@ -3899,10 +3910,10 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                         requestData = try JSONSerialization.data(withJSONObject: bodyDict)
                         
                     case .anthropic:
-                        // Anthropic format
+                        // Anthropic format - max_tokens is required, use high value to not constrain
                         let bodyDict: [String: Any] = [
                             "model": self.model,
-                            "max_tokens": 256,
+                            "max_tokens": 1024,
                             "system": "You are a helpful assistant that generates concise titles.",
                             "messages": [
                                 ["role": "user", "content": titlePrompt]
@@ -3911,9 +3922,7 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                         requestData = try JSONSerialization.data(withJSONObject: bodyDict)
                         
                     case .google:
-                        // Google AI format
-                        // Note: Gemini 2.5 models use reasoning tokens, so we need more output tokens
-                        // to accommodate both thinking (can use 200-500+ tokens) and the actual response
+                        // Google AI format - no max tokens, let the model decide based on prompt
                         let bodyDict: [String: Any] = [
                             "contents": [
                                 ["role": "user", "parts": [["text": titlePrompt]]]
@@ -3922,20 +3931,18 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                                 "parts": [["text": "You are a helpful assistant that generates concise titles. Respond with ONLY the title, nothing else."]]
                             ],
                             "generationConfig": [
-                                "maxOutputTokens": 1024,  // Higher limit to account for reasoning tokens
                                 "temperature": self.temperature
                             ]
                         ]
                         requestData = try JSONSerialization.data(withJSONObject: bodyDict)
                     }
                 } else {
-                    // Local provider format (Ollama, LM Studio, vLLM)
+                    // Local provider format (Ollama, LM Studio, vLLM) - no max tokens
                     struct RequestBody: Encodable {
                         struct Message: Codable { let role: String; let content: String }
                         let model: String
                         let messages: [Message]
                         let stream: Bool
-                        let max_tokens: Int
                         let temperature: Double
                     }
                     let messages = [
@@ -3946,7 +3953,6 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                         model: self.model,
                         messages: messages,
                         stream: false,
-                        max_tokens: 256,
                         temperature: self.temperature
                     )
                     requestData = try JSONEncoder().encode(req)
@@ -4458,10 +4464,11 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             
             // Add terminal context if present
             if let ctx = msg.terminalContext, !ctx.isEmpty {
-                var header = "Terminal Context:"
+                var header = "=== TERMINAL OUTPUT (from user's terminal session) ==="
                 if let meta = msg.terminalContextMeta, let cwd = meta.cwd, !cwd.isEmpty {
-                    header += "\nCurrent Working Directory - \(cwd)"
+                    header += "\nWorking Directory: \(cwd)"
                 }
+                header += "\nThe user has shared the following terminal output for you to analyze:"
                 prefix = "\(header)\n```\n\(ctx)\n```\n\n"
             }
             
@@ -4539,8 +4546,12 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             result = "\(header)\n```\(context.language ?? "")\n\(contentToInclude)\n```\n\n"
             
         case .terminal:
-            // Format terminal context
-            let header = "Attached Terminal Output:"
+            // Format terminal context - make it clear this is actual terminal output
+            var header = "=== ATTACHED TERMINAL OUTPUT (from user's terminal session) ==="
+            if !context.path.isEmpty && context.path != "terminal" {
+                header += "\nWorking Directory: \(context.path)"
+            }
+            header += "\nThe user has shared this terminal output for you to analyze:"
             result = "\(header)\n```\n\(context.content)\n```\n\n"
             
         case .snippet:

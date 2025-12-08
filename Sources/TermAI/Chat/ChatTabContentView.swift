@@ -1460,6 +1460,7 @@ private struct ChatMessageBubble: View {
                     checkpoint: cp,
                     session: session,
                     editedMessage: editedText,
+                    originalMessage: message,
                     isPresented: $showRollbackChoice,
                     onComplete: {
                         isEditing = false
@@ -1497,6 +1498,10 @@ private struct ChatMessageBubble: View {
                 Checkpoint(messageIndex: messageIndex, messagePreview: ""),
                 newPrompt: ""
             )
+            // Preserve terminal context from the original message
+            if let ctx = message.terminalContext {
+                session.setPendingTerminalContext(ctx, meta: message.terminalContextMeta)
+            }
             Task {
                 await session.sendUserMessage(trimmedMessage)
             }
@@ -3592,6 +3597,7 @@ private struct RollbackChoicePopover: View {
     let checkpoint: Checkpoint
     @ObservedObject var session: ChatSession
     let editedMessage: String
+    let originalMessage: ChatMessage  // Original message to preserve terminal context
     @Binding var isPresented: Bool
     let onComplete: () -> Void
     
@@ -3686,6 +3692,11 @@ private struct RollbackChoicePopover: View {
         // Rollback files and remove the original user message (we're replacing it)
         _ = session.rollbackToCheckpoint(checkpoint, removeUserMessage: true)
 
+        // Preserve terminal context from the original message
+        if let ctx = originalMessage.terminalContext {
+            session.setPendingTerminalContext(ctx, meta: originalMessage.terminalContextMeta)
+        }
+        
         // Send the edited message
         Task {
             await session.sendUserMessage(trimmed)
@@ -3702,6 +3713,11 @@ private struct RollbackChoicePopover: View {
         
         // Branch without rollback
         session.branchFromCheckpoint(checkpoint, newPrompt: "")
+        
+        // Preserve terminal context from the original message
+        if let ctx = originalMessage.terminalContext {
+            session.setPendingTerminalContext(ctx, meta: originalMessage.terminalContextMeta)
+        }
         
         // Send the edited message
         Task {
