@@ -48,13 +48,13 @@ struct FavoritesToolbar: View {
             .background(
                 Rectangle()
                     .fill(colorScheme == .dark 
-                        ? Color(white: 0.08) 
-                        : Color(white: 0.95))
+                        ? Color(red: 0.13, green: 0.15, blue: 0.17)  // #21252b Atom One Dark secondary
+                        : Color(red: 0.94, green: 0.94, blue: 0.94)) // #f0f0f0 Atom One Light
             )
             .overlay(
                 Rectangle()
                     .fill(colorScheme == .dark 
-                        ? Color.white.opacity(0.06) 
+                        ? Color(red: 0.24, green: 0.27, blue: 0.32).opacity(0.5)  // #3e4451 divider
                         : Color.black.opacity(0.08))
                     .frame(width: 1),
                 alignment: .trailing
@@ -100,13 +100,13 @@ struct FavoritesToolbarWithTooltip: View {
             .background(
                 Rectangle()
                     .fill(colorScheme == .dark 
-                        ? Color(white: 0.08) 
-                        : Color(white: 0.95))
+                        ? Color(red: 0.13, green: 0.15, blue: 0.17)  // #21252b Atom One Dark secondary
+                        : Color(red: 0.94, green: 0.94, blue: 0.94)) // #f0f0f0 Atom One Light
             )
             .overlay(
                 Rectangle()
                     .fill(colorScheme == .dark 
-                        ? Color.white.opacity(0.06) 
+                        ? Color(red: 0.24, green: 0.27, blue: 0.32).opacity(0.5)  // #3e4451 divider
                         : Color.black.opacity(0.08))
                     .frame(width: 1),
                 alignment: .trailing
@@ -173,14 +173,14 @@ struct CommandTooltip: View {
         .background(
             RoundedRectangle(cornerRadius: 6)
                 .fill(colorScheme == .dark 
-                    ? Color(white: 0.18) 
-                    : Color(white: 0.98))
+                    ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a Atom One Dark elevated
+                    : Color(red: 0.98, green: 0.98, blue: 0.98)) // #fafafa Atom One Light
                 .shadow(color: .black.opacity(0.25), radius: 8, x: 2, y: 2)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6)
                 .stroke(colorScheme == .dark 
-                    ? Color.white.opacity(0.12) 
+                    ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451 divider
                     : Color.black.opacity(0.1), lineWidth: 1)
         )
         .fixedSize()

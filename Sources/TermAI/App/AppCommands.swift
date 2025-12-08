@@ -2,23 +2,29 @@ import SwiftUI
 
 @MainActor
 struct AppCommands: Commands {
-    @ObservedObject var tabsStore: TabsStore
+    @ObservedObject var focusedTracker = FocusedStoreTracker.shared
+    
+    /// Get the current focused TabsStore, or nil if none
+    private var tabsStore: TabsStore? {
+        focusedTracker.focusedStore
+    }
     
     var body: some Commands {
         CommandGroup(replacing: .textFormatting) { }
         
         CommandGroup(replacing: .newItem) {
             Button("New Tab") {
-                tabsStore.addTab(copySettingsFrom: tabsStore.selected)
+                tabsStore?.addTab(copySettingsFrom: tabsStore?.selected)
             }
             .keyboardShortcut("t", modifiers: [.command])
             
             Button("New Chat Session") {
+                guard let store = tabsStore else { return }
                 // Ensure we have a selected tab; if not, create one first
-                if tabsStore.selected == nil && !tabsStore.tabs.isEmpty {
-                    tabsStore.selectedId = tabsStore.tabs[0].id
+                if store.selected == nil && !store.tabs.isEmpty {
+                    store.selectedId = store.tabs[0].id
                 }
-                if let chatManager = tabsStore.selected?.chatTabsManager {
+                if let chatManager = store.selected?.chatTabsManager {
                     _ = chatManager.createNewSession(copySettingsFrom: chatManager.selectedSession)
                 }
             }
@@ -27,12 +33,12 @@ struct AppCommands: Commands {
             Divider()
             
             Button("Close Tab") {
-                tabsStore.closeCurrentTab()
+                tabsStore?.closeCurrentTab()
             }
             .keyboardShortcut("w", modifiers: [.command])
             
             Button("Close Chat Session") {
-                if let chatManager = tabsStore.selected?.chatTabsManager {
+                if let chatManager = tabsStore?.selected?.chatTabsManager {
                     chatManager.closeSession(at: chatManager.selectedIndex)
                 }
             }
@@ -41,12 +47,12 @@ struct AppCommands: Commands {
         
         CommandGroup(after: .windowArrangement) {
             Button("Next Tab") {
-                tabsStore.selectNextTab()
+                tabsStore?.selectNextTab()
             }
             .keyboardShortcut("]", modifiers: [.command, .shift])
             
             Button("Previous Tab") {
-                tabsStore.selectPreviousTab()
+                tabsStore?.selectPreviousTab()
             }
             .keyboardShortcut("[", modifiers: [.command, .shift])
             
@@ -55,7 +61,7 @@ struct AppCommands: Commands {
             // Quick tab access with Cmd+1-9
             ForEach(1...9, id: \.self) { num in
                 Button("Tab \(num)") {
-                    tabsStore.selectTabByNumber(num)
+                    tabsStore?.selectTabByNumber(num)
                 }
                 .keyboardShortcut(KeyEquivalent(Character("\(num)")), modifiers: [.command])
             }

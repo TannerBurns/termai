@@ -338,30 +338,32 @@ struct FileTreeTheme {
     let accent: Color
     let divider: Color
     
+    // Atom One Dark colors
     static let dark = FileTreeTheme(
-        background: Color(white: 0.11),
-        headerBackground: Color(white: 0.13),
-        searchBackground: Color(white: 0.15),
-        primaryText: Color(white: 0.9),
-        secondaryText: Color(white: 0.5),
-        selectedBackground: Color.accentColor.opacity(0.3),
+        background: Color(red: 0.13, green: 0.15, blue: 0.17),           // #21252b
+        headerBackground: Color(red: 0.16, green: 0.17, blue: 0.20),     // #282c34
+        searchBackground: Color(red: 0.24, green: 0.27, blue: 0.32),     // #3e4451
+        primaryText: Color(red: 0.67, green: 0.70, blue: 0.75),          // #abb2bf
+        secondaryText: Color(red: 0.36, green: 0.39, blue: 0.44),        // #5c6370
+        selectedBackground: Color(red: 0.38, green: 0.69, blue: 0.94).opacity(0.3), // #61afef
         selectedText: Color.white,
-        hoverBackground: Color(white: 0.16),
-        accent: Color.accentColor,
-        divider: Color(white: 0.2)
+        hoverBackground: Color(red: 0.17, green: 0.19, blue: 0.23),      // #2c313a
+        accent: Color(red: 0.38, green: 0.69, blue: 0.94),               // #61afef
+        divider: Color(red: 0.24, green: 0.27, blue: 0.32)               // #3e4451
     )
     
+    // Atom One Light colors
     static let light = FileTreeTheme(
-        background: Color(white: 0.96),
-        headerBackground: Color(white: 0.94),
-        searchBackground: Color(white: 0.92),
-        primaryText: Color(white: 0.1),
-        secondaryText: Color(white: 0.45),
-        selectedBackground: Color.accentColor.opacity(0.2),
-        selectedText: Color.accentColor,
-        hoverBackground: Color(white: 0.9),
-        accent: Color.accentColor,
-        divider: Color(white: 0.85)
+        background: Color(red: 0.94, green: 0.94, blue: 0.94),           // #f0f0f0
+        headerBackground: Color(red: 0.98, green: 0.98, blue: 0.98),     // #fafafa
+        searchBackground: Color(red: 0.90, green: 0.90, blue: 0.90),     // #e5e5e6
+        primaryText: Color(red: 0.22, green: 0.23, blue: 0.26),          // #383a42
+        secondaryText: Color(red: 0.63, green: 0.63, blue: 0.65),        // #a0a1a7
+        selectedBackground: Color(red: 0.25, green: 0.47, blue: 0.95).opacity(0.2), // #4078f2
+        selectedText: Color(red: 0.25, green: 0.47, blue: 0.95),         // #4078f2
+        hoverBackground: Color(red: 0.90, green: 0.90, blue: 0.90),      // #e5e5e6
+        accent: Color(red: 0.25, green: 0.47, blue: 0.95),               // #4078f2
+        divider: Color(red: 0.82, green: 0.82, blue: 0.82)               // #d0d0d0
     )
 }
 

@@ -132,6 +132,11 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <string>NSApplication</string>
   <key>CFBundleIconFile</key>
   <string>termAIDock</string>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsArbitraryLoads</key>
+    <true/>
+  </dict>
   <key>NSServices</key>
   <array>
     <dict>

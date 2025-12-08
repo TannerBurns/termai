@@ -11,6 +11,7 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 ### Core Experience
 - **Native macOS App** — Built with SwiftUI for a fast, responsive experience
 - **IDE-Style Layout** — File tree, terminal, editor tabs, and chat panels with resizable dividers
+- **Atom One Theme** — Cohesive color scheme across terminal, editor, and UI (dark/light modes)
 - **Multiple Windows** — Each window has independent tabs, sessions, and state
 - **Multiple Tabs** — Each tab contains its own terminal and chat sessions
 - **Multiple Chat Sessions** — Create independent chat sessions per tab with their own settings
@@ -42,7 +43,7 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 ### Editor Tabs
 - **IDE-Style Tabs** — Open files in tabs alongside the terminal
 - **Preview Mode** — Single-click opens files in preview (italic), double-click to pin
-- **Syntax Highlighting** — Multi-language support with theme-aware colors
+- **Atom One Syntax Highlighting** — Multi-language support with Atom One color scheme
 - **Line Numbers** — With diff indicators showing added/modified lines
 - **Search in File** — Regex support with case-sensitive and whole-word options
 - **Image Preview** — View PNG, JPG, GIF, WebP, and SVG with transparency support
@@ -53,7 +54,8 @@ TermAI is a native macOS application that combines a full-featured terminal emul
 
 ### Terminal
 - **SwiftTerm Powered** — Full terminal emulation with ANSI color support
-- **Multiple Themes** — System, Xterm, VGA Dark, Terminal.app, Pale
+- **Atom One Theme** — Beautiful Atom One Dark/Light themes that auto-switch with system appearance
+- **Multiple Themes** — Atom One Dark, Atom One Light, System, Xterm, VGA Dark, Terminal.app, Pale
 - **Terminal Bell** — Choose between sound, visual flash, or disabled
 - **Context Actions** — Select text or capture last output to send to chat
 - **Code Execution** — Run shell commands directly from chat code blocks
@@ -154,7 +156,7 @@ An AI-powered command suggestion system that proactively offers relevant command
 - **Providers** — Configure API keys and local provider URLs
 - **Agent** — Mode, profile, execution limits, planning, reflection, safety controls
 - **Favorites** — Manage model and command favorites
-- **Appearance** — App theme (light/dark/system), terminal color schemes, and editor preferences
+- **Appearance** — App appearance mode, Atom One color theme for terminal/editor/UI, terminal bell
 - **Usage** — Token usage dashboard with charts and breakdowns
 - **Data** — Storage location, clear history, factory reset
 
@@ -395,13 +397,24 @@ Configure in **Settings > Appearance**:
 - **Light** — Always use light mode
 - **Dark** — Always use dark mode
 
-### Terminal Theme
-Choose a color scheme for your terminal:
-- **System** — Follows macOS appearance
+### App Theme (Atom One)
+The app uses the Atom One color scheme throughout the terminal, editor, syntax highlighting, and UI components.
+
+Choose a color scheme in **Settings > Appearance**:
+- **Atom One Dark** — Modern dark theme inspired by Atom editor
+- **Atom One Light** — Clean light theme with matching colors
+- **System** — Auto-switches between Dark/Light based on macOS appearance
 - **Xterm** — Classic xterm colors
 - **VGA Dark** — VGA palette on black
 - **Terminal.app** — Matches macOS Terminal
 - **Pale** — GNOME-style muted colors
+
+The Atom One themes provide a cohesive look across:
+- Terminal colors and ANSI palette
+- Editor syntax highlighting
+- File viewer backgrounds and line numbers
+- Diff view added/removed highlighting
+- All UI panels, popovers, and cards
 
 Each theme includes a live preview and color palette display.
 

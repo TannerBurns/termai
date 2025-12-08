@@ -237,11 +237,15 @@ struct UsageSettingsView: View {
                 .padding(16)
                 .background(
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+                        .fill(colorScheme == .dark
+                            ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a Atom One Dark
+                            : Color(red: 0.96, green: 0.96, blue: 0.96)) // #f5f5f5 Atom One Light
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+                        .stroke(colorScheme == .dark
+                            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451
+                            : Color.black.opacity(0.06), lineWidth: 1)
                 )
             }
         }
@@ -385,11 +389,15 @@ struct UsageSettingsView: View {
                 .padding(16)
                 .background(
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+                        .fill(colorScheme == .dark
+                            ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a
+                            : Color(red: 0.96, green: 0.96, blue: 0.96)) // #f5f5f5
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+                        .stroke(colorScheme == .dark
+                            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451
+                            : Color.black.opacity(0.06), lineWidth: 1)
                 )
             }
         }
@@ -449,11 +457,15 @@ struct UsageSettingsView: View {
                 .padding(16)
                 .background(
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+                        .fill(colorScheme == .dark
+                            ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a
+                            : Color(red: 0.96, green: 0.96, blue: 0.96)) // #f5f5f5
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+                        .stroke(colorScheme == .dark
+                            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451
+                            : Color.black.opacity(0.06), lineWidth: 1)
                 )
             }
         }
@@ -507,11 +519,15 @@ struct UsageSettingsView: View {
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+                .fill(colorScheme == .dark
+                            ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a
+                            : Color(red: 0.96, green: 0.96, blue: 0.96)) // #f5f5f5
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+                .stroke(colorScheme == .dark
+                            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451
+                            : Color.black.opacity(0.06), lineWidth: 1)
         )
         .alert("Clear Usage Data", isPresented: $showClearConfirmation) {
             Button("Cancel", role: .cancel) { }
@@ -572,11 +588,15 @@ private struct StatCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+                .fill(colorScheme == .dark
+                            ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a
+                            : Color(red: 0.96, green: 0.96, blue: 0.96)) // #f5f5f5
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+                .stroke(colorScheme == .dark
+                            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451
+                            : Color.black.opacity(0.06), lineWidth: 1)
         )
     }
 }
@@ -616,11 +636,15 @@ private struct EmptyChartPlaceholder: View {
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+                .fill(colorScheme == .dark
+                            ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a
+                            : Color(red: 0.96, green: 0.96, blue: 0.96)) // #f5f5f5
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.06), lineWidth: 1)
+                .stroke(colorScheme == .dark
+                            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451
+                            : Color.black.opacity(0.06), lineWidth: 1)
         )
     }
 }

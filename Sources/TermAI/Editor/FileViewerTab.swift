@@ -751,30 +751,32 @@ struct FileViewerTheme {
     let gutterBackground: Color
     let accent: Color
     
+    // Atom One Dark colors
     static let dark = FileViewerTheme(
-        background: Color(white: 0.1),
-        headerBackground: Color(white: 0.12),
-        searchBarBackground: Color(white: 0.11),
-        searchFieldBackground: Color(white: 0.15),
-        searchHighlight: Color.yellow,
-        primaryText: Color(white: 0.9),
-        secondaryText: Color(white: 0.5),
-        lineNumber: Color(white: 0.4),
-        gutterBackground: Color(white: 0.08),
-        accent: Color.accentColor
+        background: Color(red: 0.16, green: 0.17, blue: 0.20),           // #282c34
+        headerBackground: Color(red: 0.13, green: 0.15, blue: 0.17),     // #21252b
+        searchBarBackground: Color(red: 0.13, green: 0.15, blue: 0.17),  // #21252b
+        searchFieldBackground: Color(red: 0.24, green: 0.27, blue: 0.32), // #3e4451
+        searchHighlight: Color(red: 0.90, green: 0.75, blue: 0.48),      // #e5c07b
+        primaryText: Color(red: 0.67, green: 0.70, blue: 0.75),          // #abb2bf
+        secondaryText: Color(red: 0.36, green: 0.39, blue: 0.44),        // #5c6370
+        lineNumber: Color(red: 0.39, green: 0.43, blue: 0.51),           // #636d83
+        gutterBackground: Color(red: 0.13, green: 0.15, blue: 0.17),     // #21252b
+        accent: Color(red: 0.38, green: 0.69, blue: 0.94)                // #61afef
     )
     
+    // Atom One Light colors
     static let light = FileViewerTheme(
-        background: Color.white,
-        headerBackground: Color(white: 0.97),
-        searchBarBackground: Color(white: 0.96),
-        searchFieldBackground: Color(white: 0.92),
-        searchHighlight: Color.yellow,
-        primaryText: Color(white: 0.1),
-        secondaryText: Color(white: 0.5),
-        lineNumber: Color(white: 0.55),
-        gutterBackground: Color(white: 0.96),
-        accent: Color.accentColor
+        background: Color(red: 0.98, green: 0.98, blue: 0.98),           // #fafafa
+        headerBackground: Color(red: 0.94, green: 0.94, blue: 0.94),     // #f0f0f0
+        searchBarBackground: Color(red: 0.94, green: 0.94, blue: 0.94),  // #f0f0f0
+        searchFieldBackground: Color(red: 0.90, green: 0.90, blue: 0.90), // #e5e5e6
+        searchHighlight: Color(red: 0.76, green: 0.52, blue: 0.00),      // #c18401
+        primaryText: Color(red: 0.22, green: 0.23, blue: 0.26),          // #383a42
+        secondaryText: Color(red: 0.63, green: 0.63, blue: 0.65),        // #a0a1a7
+        lineNumber: Color(red: 0.62, green: 0.62, blue: 0.62),           // #9d9d9f
+        gutterBackground: Color(red: 0.94, green: 0.94, blue: 0.94),     // #f0f0f0
+        accent: Color(red: 0.25, green: 0.47, blue: 0.95)                // #4078f2
     )
 }
 

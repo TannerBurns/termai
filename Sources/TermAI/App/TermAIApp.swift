@@ -243,8 +243,8 @@ struct TermAIApp: App {
         }
         .windowStyle(.titleBar)
         .commands {
-            // Commands need a TabsStore - we'll get it from the focused window
-            AppCommands(tabsStore: AppDelegate.focusedTabsStore ?? TabsStore())
+            // AppCommands observes FocusedStoreTracker directly
+            AppCommands()
         }
 
         Settings {
@@ -272,6 +272,7 @@ struct SettingsSceneContent: View {
         }
     }
 }
+
 
 // MARK: - Window Content Wrapper
 /// Each window gets its own TabsStore for independent tab management
@@ -336,13 +337,23 @@ struct WindowContentWrapper: View {
 // MARK: - Main Content View
 struct MainContentView: View {
     @EnvironmentObject var tabsStore: TabsStore
+    @Environment(\.colorScheme) var colorScheme
+    
+    private var dividerColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451 - Atom One Dark divider
+            : Color(red: 0.82, green: 0.82, blue: 0.82)  // #d1d1d1 - Atom One Light divider
+    }
     
     var body: some View {
         VStack(spacing: 0) {
             // Top-level app tab bar
             AppTabBar()
             
-            Divider()
+            // Themed divider
+            Rectangle()
+                .fill(dividerColor)
+                .frame(height: 1)
             
             // Keep ALL tab content views alive, only show selected one
             // This preserves terminal state (running processes) when switching tabs
@@ -354,7 +365,7 @@ struct MainContentView: View {
                 }
             }
         }
-        .frame(minWidth: 1024, minHeight: 680)
+        .frame(minWidth: 1100, minHeight: 680)
     }
 }
 
@@ -362,6 +373,20 @@ struct MainContentView: View {
 struct AppTabBar: View {
     @EnvironmentObject var tabsStore: TabsStore
     @State private var hoveredTabId: UUID?
+    @Environment(\.colorScheme) var colorScheme
+    
+    // Atom One themed colors
+    private var barBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.13, green: 0.14, blue: 0.17)  // #21252b - Atom One Dark header
+            : Color(red: 0.91, green: 0.91, blue: 0.91)  // #e8e8e8 - Atom One Light header
+    }
+    
+    private var buttonBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451 - Atom One Dark accent
+            : Color(red: 0.82, green: 0.82, blue: 0.82)  // #d1d1d1 - Atom One Light accent
+    }
     
     var body: some View {
         HStack(spacing: 0) {
@@ -395,7 +420,7 @@ struct AppTabBar: View {
                     .frame(width: 24, height: 24)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.primary.opacity(0.05))
+                            .fill(buttonBackground.opacity(0.5))
                     )
             }
             .buttonStyle(.plain)
@@ -403,7 +428,7 @@ struct AppTabBar: View {
             .padding(.trailing, 8)
         }
         .frame(height: 36)
-        .background(.bar)
+        .background(barBackground)
     }
 }
 
@@ -416,13 +441,33 @@ struct AppTabPill: View {
     let onClose: () -> Void
     
     @State private var closeHovered: Bool = false
+    @Environment(\.colorScheme) var colorScheme
+    
+    // Atom One themed colors
+    private var accentColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.38, green: 0.65, blue: 0.93)  // #61afef - Atom One Dark blue
+            : Color(red: 0.30, green: 0.52, blue: 0.79)  // #4d84c9 - Atom One Light blue
+    }
+    
+    private var selectedBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a - Atom One Dark elevated
+            : Color(red: 0.98, green: 0.98, blue: 0.98)  // #fafafa - Atom One Light elevated
+    }
+    
+    private var hoverBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.24, green: 0.27, blue: 0.32).opacity(0.5)  // #3e4451
+            : Color(red: 0.85, green: 0.85, blue: 0.85).opacity(0.5)  // Light hover
+    }
     
     var body: some View {
         HStack(spacing: 4) {
             // Tab icon
             Image(systemName: "terminal")
                 .font(.system(size: 10))
-                .foregroundColor(isSelected ? .accentColor : .secondary)
+                .foregroundColor(isSelected ? accentColor : .secondary)
             
             // Tab title
             Text(displayTitle)
@@ -450,11 +495,11 @@ struct AppTabPill: View {
         .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? Color.accentColor.opacity(0.15) : (isHovered ? Color.primary.opacity(0.05) : Color.clear))
+                .fill(isSelected ? selectedBackground : (isHovered ? hoverBackground : Color.clear))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isSelected ? Color.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+                .stroke(isSelected ? accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
@@ -481,7 +526,7 @@ struct AppTabContentView: View {
     @State private var isDraggingFileTree: Bool = false
     @State private var dragStartWidth: CGFloat = 0
     
-    private let minChatWidth: CGFloat = 380
+    private let minChatWidth: CGFloat = 450
     private let minEditorWidth: CGFloat = 400
     private let minFileTreeWidth: CGFloat = 150
     private let maxFileTreeWidth: CGFloat = 400
@@ -695,11 +740,25 @@ struct AppTabContentView: View {
 struct ResizableDivider: View {
     @Binding var isDragging: Bool
     @State private var isHovered: Bool = false
+    @Environment(\.colorScheme) var colorScheme
     
     // Wide hit area for easy grabbing
     private let hitAreaWidth: CGFloat = 16
     
     private var isActive: Bool { isDragging || isHovered }
+    
+    // Atom One themed colors
+    private var accentColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.38, green: 0.65, blue: 0.93)  // #61afef - Atom One Dark blue
+            : Color(red: 0.30, green: 0.52, blue: 0.79)  // #4d84c9 - Atom One Light blue
+    }
+    
+    private var dividerColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451 - Atom One Dark divider
+            : Color(red: 0.82, green: 0.82, blue: 0.82)  // #d1d1d1 - Atom One Light divider
+    }
     
     var body: some View {
         ZStack {
@@ -710,14 +769,14 @@ struct ResizableDivider: View {
             
             // Visible divider line
             Rectangle()
-                .fill(isActive ? Color.accentColor : Color.primary.opacity(0.15))
+                .fill(isActive ? accentColor : dividerColor)
                 .frame(width: isActive ? 3 : 1)
             
             // Drag handle indicator (dots)
             VStack(spacing: 3) {
                 ForEach(0..<3, id: \.self) { _ in
                     Circle()
-                        .fill(isActive ? Color.accentColor : Color.secondary.opacity(0.4))
+                        .fill(isActive ? accentColor : Color.secondary.opacity(0.4))
                         .frame(width: 5, height: 5)
                 }
             }
@@ -792,7 +851,11 @@ struct SettingsEmptyStateView: View {
             }
         }
         .frame(width: 500, height: 400)
-        .background(colorScheme == .dark ? Color(white: 0.1) : Color(white: 0.98))
+        .background(
+            colorScheme == .dark
+                ? Color(red: 0.16, green: 0.17, blue: 0.20)  // #282c34 - Atom One Dark background
+                : Color(red: 0.98, green: 0.98, blue: 0.98)  // #fafafa - Atom One Light background
+        )
     }
 }
 

@@ -1,11 +1,33 @@
 import SwiftUI
 
+// MARK: - Atom One Theme Colors
+private extension Color {
+    static func atomHeaderBackground(_ colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color(red: 0.16, green: 0.17, blue: 0.20)  // #282c34
+            : Color(red: 0.98, green: 0.98, blue: 0.98)  // #fafafa
+    }
+    
+    static func atomBackground(_ colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color(red: 0.13, green: 0.15, blue: 0.17)  // #21252b
+            : Color(red: 0.94, green: 0.94, blue: 0.94)  // #f0f0f0
+    }
+    
+    static func atomDivider(_ colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark
+            ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451
+            : Color(red: 0.82, green: 0.82, blue: 0.82)  // #d0d0d0
+    }
+}
+
 /// Container view that manages multiple chat tabs
 struct ChatContainerView: View {
     @EnvironmentObject var tabsManager: ChatTabsManager
     @StateObject private var historyManager = ChatHistoryManager.shared
     @ObservedObject private var processManager = ProcessManager.shared
     @ObservedObject var ptyModel: PTYModel
+    @Environment(\.colorScheme) private var colorScheme
     
     // Command approval state
     // Command approval is now inline (no longer using sheet)
@@ -35,7 +57,7 @@ struct ChatContainerView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(.ultraThinMaterial)
+            .background(Color.atomHeaderBackground(colorScheme))
             
             // Tab bar below header
             ScrollView(.horizontal, showsIndicators: false) {
@@ -132,7 +154,7 @@ struct ChatContainerView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
             }
-            .background(.ultraThinMaterial.opacity(0.5))
+            .background(Color.atomHeaderBackground(colorScheme))
             
             Divider()
             
@@ -613,7 +635,9 @@ private struct ChatHistoryPopover: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
+            .background(colorScheme == .dark
+                ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a Atom One Dark elevated
+                : Color(red: 0.94, green: 0.94, blue: 0.94)) // #f0f0f0 Atom One Light
             
             Divider()
             
@@ -654,7 +678,9 @@ private struct ChatHistoryPopover: View {
             }
         }
         .frame(width: 320)
-        .background(colorScheme == .dark ? Color(white: 0.1) : Color.white)
+        .background(colorScheme == .dark
+            ? Color(red: 0.16, green: 0.17, blue: 0.20)  // #282c34 Atom One Dark
+            : Color(red: 0.98, green: 0.98, blue: 0.98)) // #fafafa Atom One Light
         .alert("Clear All History?", isPresented: $showingClearConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("Clear All", role: .destructive) {
@@ -869,7 +895,7 @@ struct ProcessMonitorPopover: View {
             }
         }
         .frame(width: 360)
-        .background(.ultraThinMaterial)
+        .background(Color.atomHeaderBackground(colorScheme))
     }
 }
 
@@ -1106,11 +1132,13 @@ struct AgentChecklistPopover: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(colorScheme == .dark ? Color.black.opacity(0.15) : Color.gray.opacity(0.05))
+                .background(colorScheme == .dark
+                    ? Color(red: 0.13, green: 0.15, blue: 0.17)  // #21252b
+                    : Color(red: 0.94, green: 0.94, blue: 0.94)) // #f0f0f0
             }
         }
         .frame(width: 340)
-        .background(.ultraThinMaterial)
+        .background(Color.atomHeaderBackground(colorScheme))
     }
 }
 
@@ -1445,7 +1473,7 @@ struct ContextUsagePopover: View {
             .padding(.bottom, 12)
         }
         .frame(width: 280)
-        .background(.ultraThinMaterial)
+        .background(Color.atomHeaderBackground(colorScheme))
     }
     
     private func formatTokens(_ count: Int) -> String {
@@ -1579,8 +1607,8 @@ private struct SessionSetupPromptView: View {
         }
         .background(
             colorScheme == .dark
-                ? Color(white: 0.08)
-                : Color(white: 0.96)
+                ? Color(red: 0.13, green: 0.15, blue: 0.17)  // #21252b Atom One Dark secondary
+                : Color(red: 0.96, green: 0.96, blue: 0.96)  // #f5f5f5 Atom One Light elevated
         )
         .onAppear {
             // Only fetch models after user has explicitly chosen a provider
@@ -1647,7 +1675,9 @@ private struct SessionSetupPromptView: View {
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(colorScheme == .dark ? Color(white: 0.12) : Color.white)
+                .fill(colorScheme == .dark
+                    ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a Atom One Dark elevated
+                    : Color(red: 0.98, green: 0.98, blue: 0.98)) // #fafafa Atom One Light
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)

@@ -77,6 +77,7 @@ struct EditorPaneView: View {
 struct TerminalPaneContent: View {
     @EnvironmentObject private var ptyModel: PTYModel
     @EnvironmentObject private var suggestionService: TerminalSuggestionService
+    @Environment(\.colorScheme) private var colorScheme
     
     @State private var hasSelection: Bool = false
     @State private var hovering: Bool = false
@@ -90,6 +91,13 @@ struct TerminalPaneContent: View {
     let onOpenSettings: () -> Void
     let isFileTreeVisible: Bool
     let isChatVisible: Bool
+    
+    // Atom One header background
+    private var headerBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.16, green: 0.17, blue: 0.20)  // #282c34
+            : Color(red: 0.98, green: 0.98, blue: 0.98)  // #fafafa
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -222,7 +230,7 @@ struct TerminalPaneContent: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.ultraThinMaterial)
+        .background(headerBackground)
     }
     
     // MARK: - Actions

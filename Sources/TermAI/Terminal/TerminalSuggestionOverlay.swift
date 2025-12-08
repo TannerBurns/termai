@@ -68,10 +68,16 @@ struct TerminalSuggestionsBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
+        .background(
+            colorScheme == .dark
+                ? Color(red: 0.13, green: 0.14, blue: 0.17)  // #21252b - Atom One Dark header
+                : Color(red: 0.91, green: 0.91, blue: 0.91)  // #e8e8e8 - Atom One Light header
+        )
         .overlay(
             Rectangle()
-                .fill(Color.primary.opacity(0.08))
+                .fill(colorScheme == .dark
+                    ? Color(red: 0.24, green: 0.27, blue: 0.32)  // #3e4451 - Atom One Dark divider
+                    : Color(red: 0.82, green: 0.82, blue: 0.82)) // #d1d1d1 - Atom One Light divider
                 .frame(height: 1),
             alignment: .top
         )
@@ -348,7 +354,9 @@ private struct SuggestionTooltip: View {
         .frame(minWidth: 150, maxWidth: 350)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.97))
+                .fill(colorScheme == .dark
+                    ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a Atom One Dark elevated
+                    : Color(red: 0.96, green: 0.96, blue: 0.96)) // #f5f5f5 Atom One Light
                 .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
         )
         .overlay(

@@ -8,6 +8,7 @@ struct TerminalPane: View {
     @EnvironmentObject private var ptyModel: PTYModel
     /// Per-tab suggestion service passed from AppTab via environment
     @EnvironmentObject private var suggestionService: TerminalSuggestionService
+    @Environment(\.colorScheme) private var colorScheme
     @State private var hasSelection: Bool = false
     @State private var hovering: Bool = false
     @State private var buttonHovering: Bool = false
@@ -21,10 +22,17 @@ struct TerminalPane: View {
     let onAddToChat: (String, TerminalContextMeta?) -> Void
     let onToggleChat: () -> Void
     let onOpenSettings: () -> Void
+    
+    // Atom One header background
+    private var headerBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.16, green: 0.17, blue: 0.20)  // #282c34
+            : Color(red: 0.98, green: 0.98, blue: 0.98)  // #fafafa
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header with glass material
+            // Header with Atom One colors
             HStack(spacing: 8) {
                 Image(systemName: "terminal")
                     .font(.system(size: 12, weight: .medium))
@@ -64,7 +72,7 @@ struct TerminalPane: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(.ultraThinMaterial)
+            .background(headerBackground)
 
             // Terminal view with favorites toolbar and contextual action overlay
             HStack(spacing: 0) {

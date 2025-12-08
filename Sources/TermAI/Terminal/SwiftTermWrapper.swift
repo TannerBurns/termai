@@ -30,6 +30,7 @@ final class PTYModel: ObservableObject {
     // Controls whether to perform heavy buffer processing on terminal updates
     @Published var captureActive: Bool = false
     // Theme selection id, used to apply a preset theme to the terminal view
+    // "system" auto-switches between Atom One Dark/Light based on system appearance
     @Published var themeId: String = "system"
     // Agent helpers
     var markNextOutputStart: (() -> Void)?
@@ -636,6 +637,7 @@ private final class BridgedLocalProcessTerminalView: LocalProcessTerminalView {
 
 struct SwiftTermView: NSViewRepresentable {
     @ObservedObject var model: PTYModel
+    @Environment(\.colorScheme) var colorScheme
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let term = BridgedLocalProcessTerminalView(frame: .zero)
@@ -773,12 +775,24 @@ struct SwiftTermView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
-        // Only apply theme when it has changed
+        // Determine the effective theme based on selection and system appearance
+        let effectiveThemeId: String
         let currentThemeId = model.themeId
-        if context.coordinator.lastAppliedThemeId != currentThemeId {
-            if let theme = TerminalTheme.presets.first(where: { $0.id == currentThemeId }) ?? TerminalTheme.presets.first {
+        
+        // Only "system" auto-switches based on color scheme
+        // Explicit theme selections (atom-one-dark, atom-one-light, etc.) are respected as-is
+        if currentThemeId == "system" {
+            effectiveThemeId = colorScheme == .dark ? "atom-one-dark" : "atom-one-light"
+        } else {
+            effectiveThemeId = currentThemeId
+        }
+        
+        // Apply theme when effective theme or color scheme has changed
+        if context.coordinator.lastAppliedThemeId != effectiveThemeId || context.coordinator.lastColorScheme != colorScheme {
+            if let theme = TerminalTheme.presets.first(where: { $0.id == effectiveThemeId }) ?? TerminalTheme.presets.first {
                 nsView.apply(theme: theme)
-                context.coordinator.lastAppliedThemeId = currentThemeId
+                context.coordinator.lastAppliedThemeId = effectiveThemeId
+                context.coordinator.lastColorScheme = colorScheme
             }
         }
     }
@@ -788,6 +802,7 @@ struct SwiftTermView: NSViewRepresentable {
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate, TerminalViewDelegate {
         let model: PTYModel
         var lastAppliedThemeId: String? = nil
+        var lastColorScheme: ColorScheme? = nil
         
         init(model: PTYModel) { self.model = model }
 

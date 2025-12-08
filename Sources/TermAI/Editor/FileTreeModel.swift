@@ -336,14 +336,6 @@ final class FileTreeModel: ObservableObject {
                 // Skip ignored files
                 if ignoredFiles.contains(item) { continue }
                 
-                // Skip most hidden files (but allow some dotfiles)
-                if item.hasPrefix(".") {
-                    let allowedDotfiles = ["gitignore", "env", "dockerignore", "prettierrc", "eslintrc", "babelrc", "editorconfig"]
-                    if !allowedDotfiles.contains(where: { item.contains($0) }) {
-                        continue
-                    }
-                }
-                
                 let fullPath = (path as NSString).appendingPathComponent(item)
                 
                 var isDir: ObjCBool = false
