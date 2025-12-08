@@ -206,32 +206,34 @@ struct EditorTabTheme {
     let closeHoverBackground: Color
     let divider: Color
     
+    // Atom One Dark colors
     static let dark = EditorTabTheme(
-        barBackground: Color(white: 0.12),
-        activeBackground: Color(white: 0.16),
+        barBackground: Color(red: 0.13, green: 0.15, blue: 0.17),       // #21252b
+        activeBackground: Color(red: 0.16, green: 0.17, blue: 0.20),    // #282c34
         inactiveBackground: Color.clear,
-        hoverBackground: Color(white: 0.14),
-        activeText: Color(white: 0.95),
-        inactiveText: Color(white: 0.55),
-        activeIcon: Color.accentColor,
-        inactiveIcon: Color(white: 0.45),
-        activeIndicator: Color.accentColor,
-        closeHoverBackground: Color(white: 0.25),
-        divider: Color(white: 0.2)
+        hoverBackground: Color(red: 0.17, green: 0.19, blue: 0.23),     // #2c313a
+        activeText: Color(red: 0.67, green: 0.70, blue: 0.75),          // #abb2bf
+        inactiveText: Color(red: 0.36, green: 0.39, blue: 0.44),        // #5c6370
+        activeIcon: Color(red: 0.38, green: 0.69, blue: 0.94),          // #61afef
+        inactiveIcon: Color(red: 0.36, green: 0.39, blue: 0.44),        // #5c6370
+        activeIndicator: Color(red: 0.38, green: 0.69, blue: 0.94),     // #61afef
+        closeHoverBackground: Color(red: 0.24, green: 0.27, blue: 0.32), // #3e4451
+        divider: Color(red: 0.24, green: 0.27, blue: 0.32)              // #3e4451
     )
     
+    // Atom One Light colors
     static let light = EditorTabTheme(
-        barBackground: Color(white: 0.94),
-        activeBackground: Color.white,
+        barBackground: Color(red: 0.94, green: 0.94, blue: 0.94),       // #f0f0f0
+        activeBackground: Color(red: 0.98, green: 0.98, blue: 0.98),    // #fafafa
         inactiveBackground: Color.clear,
-        hoverBackground: Color(white: 0.96),
-        activeText: Color(white: 0.1),
-        inactiveText: Color(white: 0.45),
-        activeIcon: Color.accentColor,
-        inactiveIcon: Color(white: 0.5),
-        activeIndicator: Color.accentColor,
-        closeHoverBackground: Color(white: 0.85),
-        divider: Color(white: 0.85)
+        hoverBackground: Color(red: 0.96, green: 0.96, blue: 0.96),     // #f5f5f5
+        activeText: Color(red: 0.22, green: 0.23, blue: 0.26),          // #383a42
+        inactiveText: Color(red: 0.63, green: 0.63, blue: 0.65),        // #a0a1a7
+        activeIcon: Color(red: 0.25, green: 0.47, blue: 0.95),          // #4078f2
+        inactiveIcon: Color(red: 0.63, green: 0.63, blue: 0.65),        // #a0a1a7
+        activeIndicator: Color(red: 0.25, green: 0.47, blue: 0.95),     // #4078f2
+        closeHoverBackground: Color(red: 0.90, green: 0.90, blue: 0.90), // #e5e5e6
+        divider: Color(red: 0.82, green: 0.82, blue: 0.82)              // #d0d0d0
     )
 }
 

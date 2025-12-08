@@ -555,6 +555,7 @@ private struct ChatInputArea: View {
     let onSend: () -> Void
     let onStop: () -> Void
     
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isFocused: Bool = false
     @State private var showFilePicker: Bool = false
     @State private var fileQuery: String = ""
@@ -729,7 +730,9 @@ private struct ChatInputArea: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(.ultraThinMaterial)
+        .background(colorScheme == .dark
+            ? Color(red: 0.16, green: 0.17, blue: 0.20)  // #282c34
+            : Color(red: 0.98, green: 0.98, blue: 0.98)) // #fafafa
     }
     
     /// Attach a file to the pending context
@@ -2012,7 +2015,9 @@ struct PlanReadyView: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.97))
+                .fill(colorScheme == .dark
+                    ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a Atom One Dark elevated
+                    : Color(red: 0.96, green: 0.96, blue: 0.96)) // #f5f5f5 Atom One Light
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
@@ -2794,6 +2799,7 @@ private struct AgentSummaryBadge: View {
 
 struct AgentControlsBar: View {
     @ObservedObject var session: ChatSession
+    @Environment(\.colorScheme) private var colorScheme
     @State private var showingChecklistPopover: Bool = false
     @State private var isHoveringProgress: Bool = false
     
@@ -2923,7 +2929,9 @@ struct AgentControlsBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.ultraThinMaterial.opacity(0.5))
+        .background(colorScheme == .dark
+            ? Color(red: 0.16, green: 0.17, blue: 0.20)  // #282c34
+            : Color(red: 0.98, green: 0.98, blue: 0.98)) // #fafafa
     }
 }
 
@@ -2965,7 +2973,9 @@ private struct FileMentionPopover: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(colorScheme == .dark ? Color(white: 0.15) : Color(white: 0.95))
+            .background(colorScheme == .dark
+                ? Color(red: 0.17, green: 0.19, blue: 0.23)  // #2c313a Atom One Dark elevated
+                : Color(red: 0.94, green: 0.94, blue: 0.94)) // #f0f0f0 Atom One Light
             
             Divider()
             
@@ -3045,10 +3055,14 @@ private struct FileMentionPopover: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(colorScheme == .dark ? Color(white: 0.12) : Color(white: 0.92))
+            .background(colorScheme == .dark
+                ? Color(red: 0.13, green: 0.15, blue: 0.17)  // #21252b Atom One Dark secondary
+                : Color(red: 0.90, green: 0.90, blue: 0.90)) // #e5e5e6 Atom One Light
         }
         .frame(width: 320)
-        .background(colorScheme == .dark ? Color(white: 0.1) : Color.white)
+        .background(colorScheme == .dark
+            ? Color(red: 0.16, green: 0.17, blue: 0.20)  // #282c34 Atom One Dark
+            : Color(red: 0.98, green: 0.98, blue: 0.98)) // #fafafa Atom One Light
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .shadow(color: .black.opacity(0.2), radius: 8, y: 4)
     }

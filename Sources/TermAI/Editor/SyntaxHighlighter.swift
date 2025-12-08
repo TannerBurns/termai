@@ -17,36 +17,36 @@ struct SyntaxTheme {
     let plain: Color
     let background: Color
     
-    /// Dark theme - vibrant colors on dark background
+    /// Dark theme - Atom One Dark colors
     static let dark = SyntaxTheme(
-        keyword: Color(red: 0.99, green: 0.42, blue: 0.52),      // Pink/red
-        string: Color(red: 0.64, green: 0.83, blue: 0.45),       // Green
-        comment: Color(red: 0.45, green: 0.50, blue: 0.55),      // Gray
-        number: Color(red: 0.82, green: 0.68, blue: 1.0),        // Purple
-        function: Color(red: 0.40, green: 0.72, blue: 0.93),     // Blue
-        type: Color(red: 0.55, green: 0.86, blue: 0.76),         // Teal
-        variable: Color(red: 0.93, green: 0.73, blue: 0.48),     // Orange
-        property: Color(red: 0.79, green: 0.76, blue: 0.90),     // Lavender
-        operator: Color(red: 0.89, green: 0.89, blue: 0.89),     // Light gray
-        punctuation: Color(red: 0.70, green: 0.70, blue: 0.70),  // Gray
-        plain: Color(red: 0.92, green: 0.92, blue: 0.92),        // Off-white
-        background: Color(red: 0.12, green: 0.12, blue: 0.14)    // Dark
+        keyword: Color(red: 0.78, green: 0.47, blue: 0.87),      // #c678dd - Magenta
+        string: Color(red: 0.60, green: 0.76, blue: 0.47),       // #98c379 - Green
+        comment: Color(red: 0.36, green: 0.39, blue: 0.44),      // #5c6370 - Gray
+        number: Color(red: 0.82, green: 0.60, blue: 0.40),       // #d19a66 - Orange
+        function: Color(red: 0.38, green: 0.69, blue: 0.94),     // #61afef - Blue
+        type: Color(red: 0.90, green: 0.75, blue: 0.48),         // #e5c07b - Yellow
+        variable: Color(red: 0.88, green: 0.42, blue: 0.46),     // #e06c75 - Red
+        property: Color(red: 0.88, green: 0.42, blue: 0.46),     // #e06c75 - Red
+        operator: Color(red: 0.34, green: 0.71, blue: 0.76),     // #56b6c2 - Cyan
+        punctuation: Color(red: 0.67, green: 0.70, blue: 0.75),  // #abb2bf - Foreground
+        plain: Color(red: 0.67, green: 0.70, blue: 0.75),        // #abb2bf - Foreground
+        background: Color(red: 0.16, green: 0.17, blue: 0.20)    // #282c34 - Background
     )
     
-    /// Light theme - muted colors on light background
+    /// Light theme - Atom One Light colors
     static let light = SyntaxTheme(
-        keyword: Color(red: 0.65, green: 0.05, blue: 0.31),      // Magenta
-        string: Color(red: 0.12, green: 0.47, blue: 0.20),       // Dark green
-        comment: Color(red: 0.45, green: 0.48, blue: 0.50),      // Gray
-        number: Color(red: 0.41, green: 0.22, blue: 0.60),       // Purple
-        function: Color(red: 0.00, green: 0.35, blue: 0.65),     // Blue
-        type: Color(red: 0.11, green: 0.50, blue: 0.45),         // Teal
-        variable: Color(red: 0.65, green: 0.38, blue: 0.10),     // Orange
-        property: Color(red: 0.40, green: 0.32, blue: 0.55),     // Lavender
-        operator: Color(red: 0.20, green: 0.20, blue: 0.20),     // Dark gray
-        punctuation: Color(red: 0.35, green: 0.35, blue: 0.35),  // Gray
-        plain: Color(red: 0.15, green: 0.15, blue: 0.15),        // Near-black
-        background: Color(red: 0.97, green: 0.97, blue: 0.98)    // Light
+        keyword: Color(red: 0.65, green: 0.15, blue: 0.64),      // #a626a4 - Magenta
+        string: Color(red: 0.31, green: 0.63, blue: 0.31),       // #50a14f - Green
+        comment: Color(red: 0.63, green: 0.63, blue: 0.65),      // #a0a1a7 - Gray
+        number: Color(red: 0.60, green: 0.41, blue: 0.00),       // #986801 - Orange
+        function: Color(red: 0.25, green: 0.47, blue: 0.95),     // #4078f2 - Blue
+        type: Color(red: 0.76, green: 0.52, blue: 0.00),         // #c18401 - Yellow
+        variable: Color(red: 0.89, green: 0.34, blue: 0.29),     // #e45649 - Red
+        property: Color(red: 0.89, green: 0.34, blue: 0.29),     // #e45649 - Red
+        operator: Color(red: 0.00, green: 0.52, blue: 0.74),     // #0184bc - Cyan
+        punctuation: Color(red: 0.22, green: 0.23, blue: 0.26),  // #383a42 - Foreground
+        plain: Color(red: 0.22, green: 0.23, blue: 0.26),        // #383a42 - Foreground
+        background: Color(red: 0.98, green: 0.98, blue: 0.98)    // #fafafa - Background
     )
 }
 

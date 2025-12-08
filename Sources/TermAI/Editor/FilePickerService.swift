@@ -331,14 +331,6 @@ final class FilePickerService: ObservableObject {
                 // Check for cancellation
                 if Task.isCancelled { return results }
                 
-                // Skip hidden files/directories
-                if item.hasPrefix(".") && ![".", ".."].contains(item) {
-                    // Allow certain dotfiles
-                    if !["gitignore", "env", "dockerignore", "prettierrc", "eslintrc", "babelrc"].contains(where: { item.contains($0) }) {
-                        continue
-                    }
-                }
-                
                 let fullPath = (path as NSString).appendingPathComponent(item)
                 
                 var isDir: ObjCBool = false

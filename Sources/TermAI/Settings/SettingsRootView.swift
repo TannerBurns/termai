@@ -4,6 +4,14 @@ struct SettingsRootView: View {
     var selectedSession: ChatSession?
     @ObservedObject var ptyModel: PTYModel
     @State private var selectedTab: SettingsTab = .chatModel
+    @Environment(\.colorScheme) var colorScheme
+    
+    // Atom One themed sidebar background
+    private var sidebarBackground: Color {
+        colorScheme == .dark
+            ? Color(red: 0.13, green: 0.14, blue: 0.17)  // #21252b - Atom One Dark header
+            : Color(red: 0.91, green: 0.91, blue: 0.91)  // #e8e8e8 - Atom One Light header
+    }
     
     enum SettingsTab: String, CaseIterable {
         case chatModel = "Chat & Model"
@@ -46,7 +54,7 @@ struct SettingsRootView: View {
             }
             .padding(12)
             .frame(width: 180)
-            .background(Color.primary.opacity(0.02))
+            .background(sidebarBackground)
             
             // Content
             Group {
@@ -145,7 +153,7 @@ struct AppearanceSettingsView: View {
                 // App Appearance Mode Section
                 appAppearanceSection
                 
-                // Terminal Theme Selection Grid
+                // App Theme Selection Grid
                 themeSelectionSection
                 
                 // Terminal Bell Settings
@@ -209,10 +217,10 @@ struct AppearanceSettingsView: View {
         }
     }
     
-    // MARK: - Terminal Theme Selection Grid
+    // MARK: - App Theme Selection Grid
     private var themeSelectionSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SettingsSectionHeader("Terminal Theme", subtitle: "Choose a color scheme for your terminal")
+            SettingsSectionHeader("App Theme", subtitle: "Choose a color scheme for terminal, editor, and UI")
             
             LazyVGrid(columns: [
                 GridItem(.flexible(), spacing: 12),

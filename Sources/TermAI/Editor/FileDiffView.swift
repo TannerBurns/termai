@@ -650,36 +650,38 @@ struct DiffTheme {
     let addedText: Color
     let removedText: Color
     
+    // Atom One Dark colors
     static let dark = DiffTheme(
-        background: Color(white: 0.1),
-        foreground: Color(white: 0.9),
-        secondaryText: Color(white: 0.5),
-        lineNumber: Color(white: 0.4),
-        divider: Color(white: 0.2),
-        headerBackground: Color(white: 0.12),
-        panelHeader: Color(white: 0.14),
-        gutterBackground: Color(white: 0.08),
-        addedBackground: Color(red: 0.1, green: 0.3, blue: 0.15).opacity(0.5),
-        removedBackground: Color(red: 0.35, green: 0.12, blue: 0.12).opacity(0.5),
-        contextBackground: Color(white: 0.08).opacity(0.3),
-        addedText: Color(red: 0.4, green: 0.85, blue: 0.5),
-        removedText: Color(red: 0.95, green: 0.4, blue: 0.4)
+        background: Color(red: 0.16, green: 0.17, blue: 0.20),           // #282c34
+        foreground: Color(red: 0.67, green: 0.70, blue: 0.75),           // #abb2bf
+        secondaryText: Color(red: 0.36, green: 0.39, blue: 0.44),        // #5c6370
+        lineNumber: Color(red: 0.39, green: 0.43, blue: 0.51),           // #636d83
+        divider: Color(red: 0.24, green: 0.27, blue: 0.32),              // #3e4451
+        headerBackground: Color(red: 0.13, green: 0.15, blue: 0.17),     // #21252b
+        panelHeader: Color(red: 0.17, green: 0.19, blue: 0.23),          // #2c313a
+        gutterBackground: Color(red: 0.13, green: 0.15, blue: 0.17),     // #21252b
+        addedBackground: Color(red: 0.60, green: 0.76, blue: 0.47).opacity(0.2),  // #98c379
+        removedBackground: Color(red: 0.88, green: 0.42, blue: 0.46).opacity(0.2), // #e06c75
+        contextBackground: Color(red: 0.16, green: 0.17, blue: 0.20).opacity(0.5), // #282c34
+        addedText: Color(red: 0.60, green: 0.76, blue: 0.47),            // #98c379
+        removedText: Color(red: 0.88, green: 0.42, blue: 0.46)           // #e06c75
     )
     
+    // Atom One Light colors
     static let light = DiffTheme(
-        background: Color(white: 0.98),
-        foreground: Color(white: 0.1),
-        secondaryText: Color(white: 0.5),
-        lineNumber: Color(white: 0.55),
-        divider: Color(white: 0.85),
-        headerBackground: Color(white: 0.95),
-        panelHeader: Color(white: 0.93),
-        gutterBackground: Color(white: 0.96),
-        addedBackground: Color(red: 0.85, green: 0.95, blue: 0.87),
-        removedBackground: Color(red: 0.98, green: 0.88, blue: 0.88),
-        contextBackground: Color(white: 0.97),
-        addedText: Color(red: 0.15, green: 0.55, blue: 0.25),
-        removedText: Color(red: 0.7, green: 0.2, blue: 0.2)
+        background: Color(red: 0.98, green: 0.98, blue: 0.98),           // #fafafa
+        foreground: Color(red: 0.22, green: 0.23, blue: 0.26),           // #383a42
+        secondaryText: Color(red: 0.63, green: 0.63, blue: 0.65),        // #a0a1a7
+        lineNumber: Color(red: 0.62, green: 0.62, blue: 0.62),           // #9d9d9f
+        divider: Color(red: 0.82, green: 0.82, blue: 0.82),              // #d0d0d0
+        headerBackground: Color(red: 0.94, green: 0.94, blue: 0.94),     // #f0f0f0
+        panelHeader: Color(red: 0.90, green: 0.90, blue: 0.90),          // #e5e5e6
+        gutterBackground: Color(red: 0.94, green: 0.94, blue: 0.94),     // #f0f0f0
+        addedBackground: Color(red: 0.31, green: 0.63, blue: 0.31).opacity(0.15), // #50a14f
+        removedBackground: Color(red: 0.89, green: 0.34, blue: 0.29).opacity(0.15), // #e45649
+        contextBackground: Color(red: 0.98, green: 0.98, blue: 0.98).opacity(0.5), // #fafafa
+        addedText: Color(red: 0.31, green: 0.63, blue: 0.31),            // #50a14f
+        removedText: Color(red: 0.89, green: 0.34, blue: 0.29)           // #e45649
     )
 }
 
