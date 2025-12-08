@@ -14,7 +14,8 @@ struct AppCommands: Commands {
         
         CommandGroup(replacing: .newItem) {
             Button("New Tab") {
-                tabsStore?.addTab(copySettingsFrom: tabsStore?.selected)
+                guard let store = tabsStore else { return }
+                store.addTab(copySettingsFrom: store.selected)
             }
             .keyboardShortcut("t", modifiers: [.command])
             
