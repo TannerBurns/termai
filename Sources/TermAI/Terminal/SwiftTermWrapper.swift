@@ -765,9 +765,18 @@ struct SwiftTermView: NSViewRepresentable {
             // Set CWD so file tree shows correct directory
             model.currentWorkingDirectory = startDir
         }
-        // Apply initial theme
-        if let theme = TerminalTheme.presets.first(where: { $0.id == model.themeId }) ?? TerminalTheme.presets.first {
+        // Apply initial theme - resolve "system" to Atom One variant based on color scheme
+        let initialEffectiveThemeId: String
+        if model.themeId == "system" {
+            initialEffectiveThemeId = colorScheme == .dark ? "atom-one-dark" : "atom-one-light"
+        } else {
+            initialEffectiveThemeId = model.themeId
+        }
+        if let theme = TerminalTheme.presets.first(where: { $0.id == initialEffectiveThemeId }) ?? TerminalTheme.presets.first {
             term.apply(theme: theme)
+            // Store the effective theme ID so updateNSView doesn't immediately re-apply
+            context.coordinator.lastAppliedThemeId = initialEffectiveThemeId
+            context.coordinator.lastColorScheme = colorScheme
         }
         // Fetch initial Git info for home directory
         model.refreshGitInfo()
