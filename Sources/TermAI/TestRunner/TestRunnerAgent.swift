@@ -186,7 +186,11 @@ final class TestRunnerAgent: ObservableObject {
         for step in 1...maxToolSteps {
             guard !Task.isCancelled else { throw CancellationError() }
             
-            let result = try await LLMClient.shared.completeWithTools(
+            // Use streaming and collect results
+            var accumulatedContent = ""
+            var toolCalls: [ParsedToolCall] = []
+            
+            let stream = LLMClient.shared.completeWithToolsStream(
                 systemPrompt: systemPrompt,
                 messages: messages,
                 tools: toolSchemas,
@@ -196,17 +200,28 @@ final class TestRunnerAgent: ObservableObject {
                 timeout: 60
             )
             
+            for try await event in stream {
+                switch event {
+                case .textDelta(let text):
+                    accumulatedContent += text
+                case .toolCallComplete(let toolCall):
+                    toolCalls.append(toolCall)
+                default:
+                    break
+                }
+            }
+            
             // Check if model returned final response (no tool calls)
-            if !result.hasToolCalls {
-                if let content = result.content {
+            if toolCalls.isEmpty {
+                if !accumulatedContent.isEmpty {
                     testRunnerLogger.info("Analysis complete after \(step) steps")
-                    return try parseAnalysisResponse(content, projectInfo: projectInfo)
+                    return try parseAnalysisResponse(accumulatedContent, projectInfo: projectInfo)
                 }
                 throw TestRunnerError.analysisError("Empty response from model")
             }
             
             // Execute tool calls
-            for toolCall in result.toolCalls {
+            for toolCall in toolCalls {
                 guard analysisToolNames.contains(toolCall.name) else { continue }
                 guard let tool = AgentToolRegistry.shared.get(toolCall.name) else { continue }
                 
@@ -224,22 +239,22 @@ final class TestRunnerAgent: ObservableObject {
             
             // Add assistant message with tool calls
             let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsOpenAI(
-                content: result.content,
-                toolCalls: result.toolCalls
+                content: accumulatedContent.isEmpty ? nil : accumulatedContent,
+                toolCalls: toolCalls
             )
             messages.append(assistantMsg)
             
             // Add tool results based on provider
             switch provider {
             case .cloud(.anthropic):
-                let results = result.toolCalls.enumerated().map { (idx, call) -> (toolUseId: String, result: String, isError: Bool) in
-                    let context = additionalContext.count > idx ? additionalContext[additionalContext.count - result.toolCalls.count + idx] : "No result"
+                let results = toolCalls.enumerated().map { (idx, call) -> (toolUseId: String, result: String, isError: Bool) in
+                    let context = additionalContext.count > idx ? additionalContext[additionalContext.count - toolCalls.count + idx] : "No result"
                     return (toolUseId: call.id, result: context, isError: context.contains("ERROR"))
                 }
                 messages.append(ToolResultFormatter.userMessageWithToolResultsAnthropic(results: results))
             default:
-                for (idx, call) in result.toolCalls.enumerated() {
-                    let context = additionalContext.count > idx ? additionalContext[additionalContext.count - result.toolCalls.count + idx] : "No result"
+                for (idx, call) in toolCalls.enumerated() {
+                    let context = additionalContext.count > idx ? additionalContext[additionalContext.count - toolCalls.count + idx] : "No result"
                     messages.append(ToolResultFormatter.formatForOpenAI(toolCallId: call.id, result: context))
                 }
             }

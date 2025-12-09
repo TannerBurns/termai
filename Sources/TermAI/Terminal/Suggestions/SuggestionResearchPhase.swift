@@ -160,7 +160,11 @@ class SuggestionResearchPhase {
                     messages.insert(["role": "assistant", "content": "Previous findings: \(contextAccumulator.joined(separator: "; "))"], at: 0)
                 }
                 
-                let result = try await LLMClient.shared.completeWithTools(
+                // Use streaming and collect results
+                var accumulatedContent = ""
+                var toolCalls: [ParsedToolCall] = []
+                
+                let stream = LLMClient.shared.completeWithToolsStream(
                     systemPrompt: systemPrompt,
                     messages: messages,
                     tools: researchToolSchemas,
@@ -170,18 +174,29 @@ class SuggestionResearchPhase {
                     timeout: 20
                 )
                 
+                for try await event in stream {
+                    switch event {
+                    case .textDelta(let text):
+                        accumulatedContent += text
+                    case .toolCallComplete(let toolCall):
+                        toolCalls.append(toolCall)
+                    default:
+                        break
+                    }
+                }
+                
                 // Check if model returned text without tool calls (done researching)
-                if !result.hasToolCalls {
-                    if let content = result.content, !content.isEmpty {
-                        researchLogger.info("Research phase complete at step \(step) via native tools: \(content.prefix(100))")
-                        findings.discoveries.append(content)
+                if toolCalls.isEmpty {
+                    if !accumulatedContent.isEmpty {
+                        researchLogger.info("Research phase complete at step \(step) via native tools: \(accumulatedContent.prefix(100))")
+                        findings.discoveries.append(accumulatedContent)
                     }
                     findings.completed = true
                     break
                 }
                 
                 // Execute tool calls
-                for toolCall in result.toolCalls {
+                for toolCall in toolCalls {
                     guard Self.researchToolNames.contains(toolCall.name) else {
                         researchLogger.warning("Research step \(step): Tool '\(toolCall.name)' not in allowed list")
                         continue

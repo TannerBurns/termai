@@ -1,7 +1,7 @@
 import Foundation
 import TermAIModels
 
-// MARK: - Native Tool Calling
+// MARK: - Native Tool Calling with Streaming
 
 extension ChatSession {
     
@@ -13,7 +13,7 @@ extension ChatSession {
         let error: String?
     }
     
-    /// Execute a step using native tool calling APIs
+    /// Execute a step using native tool calling APIs with streaming
     /// Returns when the model either responds with text (no tool calls) or signals completion
     func executeStepWithNativeTools(
         userRequest: String,
@@ -197,24 +197,21 @@ extension ChatSession {
             loopCount += 1
             
             do {
-                let result = try await LLMClient.shared.completeWithTools(
+                // Use streaming for tool calls
+                let streamResult = try await executeStreamingToolCall(
                     systemPrompt: systemPrompt,
-                    messages: conversationMessages,
-                    tools: toolSchemas,
-                    provider: providerType,
-                    modelId: model,
-                    maxTokens: 64000,
-                    timeout: 120
+                    conversationMessages: conversationMessages,
+                    tools: toolSchemas
                 )
                 
-                agentSessionTokensUsed += result.totalTokens
-                if result.promptTokens > accumulatedContextTokens {
-                    accumulatedContextTokens = result.promptTokens
+                agentSessionTokensUsed += streamResult.totalTokens
+                if streamResult.promptTokens > accumulatedContextTokens {
+                    accumulatedContextTokens = streamResult.promptTokens
                 }
                 currentContextTokens = accumulatedContextTokens
                 
-                if !result.hasToolCalls {
-                    lastTextResponse = result.content
+                if !streamResult.hasToolCalls {
+                    lastTextResponse = streamResult.content
                     return NativeToolStepResult(
                         textResponse: lastTextResponse,
                         toolsExecuted: allToolsExecuted,
@@ -225,30 +222,24 @@ extension ChatSession {
                 
                 var toolResults: [(id: String, name: String, result: String, isError: Bool)] = []
                 
-                for toolCall in result.toolCalls {
+                for toolCall in streamResult.toolCalls {
                     AgentDebugConfig.log("[NativeTools] Executing tool: \(toolCall.name) with args: \(toolCall.arguments)")
                     
                     let isTaskStatusUpdate = toolCall.name == "plan_and_track" &&
                         (toolCall.stringArguments["complete_task"] != nil || toolCall.stringArguments["start_task"] != nil)
                     
+                    // Tool event message was already added during streaming, update it now
                     if !isTaskStatusUpdate {
-                        messages.append(ChatMessage(
-                            role: "assistant",
-                            content: "",
-                            agentEvent: AgentEvent(
-                                kind: "step",
-                                title: toolCall.name,
-                                details: nil,
-                                command: nil,
-                                output: nil,
-                                collapsed: true,
-                                toolCallId: toolCall.id,
-                                toolStatus: "running",
-                                eventCategory: "tool"
-                            )
-                        ))
-                        messages = messages
+                        // Find the existing tool event message (added during streaming)
+                        if let idx = self.messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCall.id }) {
+                            var msg = self.messages[idx]
+                            var evt = msg.agentEvent!
+                            evt.toolStatus = "running"
+                            msg.agentEvent = evt
+                            self.messages[idx] = msg
+                            self.messages = self.messages
                         persistMessages()
+                        }
                     }
                     
                     if let tool = AgentToolRegistry.shared.get(toolCall.name) {
@@ -257,14 +248,14 @@ extension ChatSession {
                             toolResults.append((id: toolCall.id, name: toolCall.name, result: errorMsg, isError: true))
                             agentContextLog.append("TOOL ERROR: \(errorMsg)")
                             
-                            if let idx = messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCall.id }) {
-                                var msg = messages[idx]
+                            if let idx = self.messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCall.id }) {
+                                var msg = self.messages[idx]
                                 var evt = msg.agentEvent!
                                 evt.toolStatus = "failed"
                                 evt.output = errorMsg
                                 msg.agentEvent = evt
-                                messages[idx] = msg
-                                messages = messages
+                                self.messages[idx] = msg
+                                self.messages = self.messages
                                 persistMessages()
                             }
                             continue
@@ -320,17 +311,17 @@ extension ChatSession {
                         }
                         
                         if !isTaskStatusUpdate {
-                            if let idx = messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCall.id }) {
-                                var msg = messages[idx]
+                            if let idx = self.messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCall.id }) {
+                                var msg = self.messages[idx]
                                 var evt = msg.agentEvent!
                                 evt.toolStatus = toolResult.success ? "succeeded" : "failed"
                                 evt.output = resultString
                                 evt.fileChange = toolResult.fileChange
                                 evt.details = "Args: \(toolCall.stringArguments)"
                                 msg.agentEvent = evt
-                                messages[idx] = msg
+                                self.messages[idx] = msg
                             }
-                            messages = messages
+                            self.messages = self.messages
                             persistMessages()
                         }
                     } else {
@@ -353,8 +344,8 @@ extension ChatSession {
                 switch providerType {
                 case .cloud(.anthropic):
                     let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsAnthropic(
-                        content: result.content,
-                        toolCalls: result.toolCalls
+                        content: streamResult.content,
+                        toolCalls: streamResult.toolCalls
                     )
                     conversationMessages.append(assistantMsg)
                     let anthropicResults = toolResults.map { (toolUseId: $0.id, result: $0.result, isError: $0.isError) }
@@ -362,8 +353,8 @@ extension ChatSession {
                     
                 case .cloud(.google):
                     let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsOpenAI(
-                        content: result.content,
-                        toolCalls: result.toolCalls
+                        content: streamResult.content,
+                        toolCalls: streamResult.toolCalls
                     )
                     conversationMessages.append(assistantMsg)
                     let googleResults = toolResults.map { (name: $0.name, result: ["output": $0.result] as [String: Any]) }
@@ -371,8 +362,8 @@ extension ChatSession {
                     
                 default:
                     let assistantMsg = ToolResultFormatter.assistantMessageWithToolCallsOpenAI(
-                        content: result.content,
-                        toolCalls: result.toolCalls
+                        content: streamResult.content,
+                        toolCalls: streamResult.toolCalls
                     )
                     conversationMessages.append(assistantMsg)
                     for tr in toolResults {
@@ -410,6 +401,246 @@ extension ChatSession {
             toolsExecuted: allToolsExecuted,
             isDone: true,
             error: nil
+        )
+    }
+    
+    // MARK: - Streaming Tool Call Execution
+    
+    /// Result of a streaming tool call
+    private struct StreamingToolResult {
+        let content: String?
+        let toolCalls: [ParsedToolCall]
+        let promptTokens: Int
+        let completionTokens: Int
+        let stopReason: String?
+        
+        var totalTokens: Int { promptTokens + completionTokens }
+        var hasToolCalls: Bool { !toolCalls.isEmpty }
+    }
+    
+    /// Execute a streaming LLM call with tools and update UI in real-time
+    private func executeStreamingToolCall(
+        systemPrompt: String,
+        conversationMessages: [[String: Any]],
+        tools: [[String: Any]]
+    ) async throws -> StreamingToolResult {
+        var accumulatedText = ""
+        var completedToolCalls: [ParsedToolCall] = []
+        var promptTokens = 0
+        var completionTokens = 0
+        var stopReason: String? = nil
+        
+        // Track "thinking" indicator and streaming text
+        var thinkingMessageIndex: Int? = nil
+        var pendingToolCalls: [String: (name: String, args: String)] = [:]
+        var hasStartedToolCalls = false  // Once true, we don't show text messages
+        
+        // Throttle UI updates
+        let updateInterval: TimeInterval = 0.05
+        var lastUpdateTime = Date.distantPast
+        
+        // Create thinking indicator message
+        let thinkingMessage = ChatMessage(
+            role: "assistant",
+            content: "",
+            agentEvent: AgentEvent(
+                kind: "thinking",
+                title: "Thinking...",
+                details: nil,
+                command: nil,
+                output: nil,
+                collapsed: true,
+                isInternal: true,
+                isStreaming: true
+            )
+        )
+        self.messages.append(thinkingMessage)
+        thinkingMessageIndex = self.messages.count - 1
+        self.messages = self.messages
+        
+        let stream = LLMClient.shared.completeWithToolsStream(
+            systemPrompt: systemPrompt,
+            messages: conversationMessages,
+            tools: tools,
+            provider: providerType,
+            modelId: model,
+            maxTokens: 64000,
+            timeout: 120
+        )
+        
+        do {
+            for try await event in stream {
+                if agentCancelled {
+                    break
+                }
+                
+                switch event {
+                case .textDelta(let text):
+                    accumulatedText += text
+                    
+                    // Only stream text if no tool calls have started yet
+                    // If tool calls start, we'll remove any text message
+                    if !hasStartedToolCalls {
+                        // Remove thinking indicator once we have text content
+                        if let idx = thinkingMessageIndex {
+                            self.messages.remove(at: idx)
+                            thinkingMessageIndex = nil
+                            self.messages = self.messages
+                        }
+                        
+                        // Throttle UI updates for text streaming
+                        let now = Date()
+                        if now.timeIntervalSince(lastUpdateTime) >= updateInterval {
+                            if let lastIdx = self.messages.lastIndex(where: { $0.role == "assistant" && $0.agentEvent == nil }) {
+                                var msg = self.messages[lastIdx]
+                                msg.content = accumulatedText
+                                self.messages[lastIdx] = msg
+                            } else {
+                                self.messages.append(ChatMessage(role: "assistant", content: accumulatedText))
+                            }
+                            self.messages = self.messages
+                            lastUpdateTime = now
+                        }
+                    }
+                    
+                case .toolCallStart(let id, let name):
+                    pendingToolCalls[id] = (name: name, args: "")
+                    
+                    // Mark that tool calls have started - we won't show text anymore
+                    if !hasStartedToolCalls {
+                        hasStartedToolCalls = true
+                        
+                        // Remove any text message that was created before tool calls started
+                        // (text before tool calls is just "thinking", shouldn't appear above actions)
+                        if let lastIdx = self.messages.lastIndex(where: { $0.role == "assistant" && $0.agentEvent == nil }) {
+                            self.messages.remove(at: lastIdx)
+                        }
+                    }
+                    
+                    // Remove thinking indicator
+                    if let idx = thinkingMessageIndex {
+                        self.messages.remove(at: idx)
+                        thinkingMessageIndex = nil
+                    }
+                    
+                    // Check if this is a task status update (don't show UI for these)
+                    let isTaskStatusUpdate = name == "plan_and_track"
+                    
+                    if !isTaskStatusUpdate {
+                        // Add tool event bubble showing tool is being prepared
+                        self.messages.append(ChatMessage(
+                            role: "assistant",
+                            content: "",
+                            agentEvent: AgentEvent(
+                                kind: "step",
+                                title: name,
+                                details: "Preparing arguments...",
+                                command: nil,
+                                output: nil,
+                                collapsed: true,
+                                toolCallId: id,
+                                toolStatus: "streaming",
+                                eventCategory: "tool",
+                                isStreaming: true
+                            )
+                        ))
+                    }
+                    self.messages = self.messages
+                    persistMessages()
+                    
+                case .toolCallArgumentDelta(let id, let delta):
+                    if var pending = pendingToolCalls[id] {
+                        pending.args += delta
+                        pendingToolCalls[id] = pending
+                        
+                        // Throttle UI updates for tool args
+                        let now = Date()
+                        if now.timeIntervalSince(lastUpdateTime) >= updateInterval {
+                            // Update the tool event to show args being streamed
+                            if let idx = self.messages.lastIndex(where: { $0.agentEvent?.toolCallId == id }) {
+                                var msg = self.messages[idx]
+                                var evt = msg.agentEvent!
+                                // Show a preview of the arguments (truncated)
+                                let argsPreview = String(pending.args.prefix(200))
+                                evt.details = "Args: \(argsPreview)\(pending.args.count > 200 ? "..." : "")"
+                                msg.agentEvent = evt
+                                self.messages[idx] = msg
+                                self.messages = self.messages
+                            }
+                            lastUpdateTime = now
+                        }
+                    }
+                    
+                case .toolCallComplete(let toolCall):
+                    completedToolCalls.append(toolCall)
+                    pendingToolCalls.removeValue(forKey: toolCall.id)
+                    
+                    // Update tool event to show it's ready to execute
+                    if let idx = self.messages.lastIndex(where: { $0.agentEvent?.toolCallId == toolCall.id }) {
+                        var msg = self.messages[idx]
+                        var evt = msg.agentEvent!
+                        evt.toolStatus = "pending"  // Ready to execute
+                        evt.details = "Args: \(toolCall.stringArguments)"
+                        evt.isStreaming = false
+                        msg.agentEvent = evt
+                        self.messages[idx] = msg
+                        self.messages = self.messages
+                        persistMessages()
+                    }
+                    
+                case .usage(let prompt, let completion):
+                    if prompt > 0 { promptTokens = prompt }
+                    if completion > 0 { completionTokens = completion }
+                    
+                case .stopReason(let reason):
+                    stopReason = reason
+                    
+                case .done:
+                    break
+                }
+            }
+        } catch {
+            // Remove thinking indicator on error
+            if let idx = thinkingMessageIndex, idx < self.messages.count {
+                self.messages.remove(at: idx)
+                self.messages = self.messages
+            }
+            throw error
+        }
+        
+        // Remove thinking indicator if still present
+        if let idx = thinkingMessageIndex, idx < self.messages.count {
+            self.messages.remove(at: idx)
+            self.messages = self.messages
+        }
+        
+        // Handle text content based on whether there are tool calls
+        let trimmedText = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if !hasStartedToolCalls && !trimmedText.isEmpty {
+            // NO tool calls and we have text content → this is the final response
+            // Update the existing streamed message with final content
+            if let lastIdx = self.messages.lastIndex(where: { $0.role == "assistant" && $0.agentEvent == nil }) {
+                var msg = self.messages[lastIdx]
+                msg.content = accumulatedText
+                self.messages[lastIdx] = msg
+            } else {
+                // Create new message if somehow none exists
+                self.messages.append(ChatMessage(role: "assistant", content: accumulatedText))
+            }
+            self.messages = self.messages
+            persistMessages()
+        }
+        // If there were tool calls, we already removed any text message when tool calls started.
+        // Any text was just "thinking" context. The final response will come in a later
+        // streaming call after the tools are executed.
+        
+        return StreamingToolResult(
+            content: accumulatedText.isEmpty ? nil : accumulatedText,
+            toolCalls: completedToolCalls,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            stopReason: stopReason
         )
     }
 }

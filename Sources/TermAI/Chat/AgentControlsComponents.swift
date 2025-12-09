@@ -352,15 +352,14 @@ struct AgentControlsBar: View {
             if session.isAgentRunning {
                 // Show progress and stop button when agent is running
                 HStack(spacing: 8) {
-                    // Progress indicator - clickable to show checklist popover
-                    Button(action: { showingChecklistPopover.toggle() }) {
-                        HStack(spacing: 6) {
-                            // Use unified step tracking from session (checklist when available, phase otherwise)
-                            let totalSteps = session.agentEstimatedSteps
-                            let completedSteps = session.agentChecklist?.completedCount ?? 0
-                            
-                            // Show donut chart when we have step info, otherwise show spinner
-                            if totalSteps > 0 {
+                    // Progress indicator - shows checklist progress when available, otherwise simple generating state
+                    if let checklist = session.agentChecklist {
+                        // Has checklist - show progress with clickable popover
+                        Button(action: { showingChecklistPopover.toggle() }) {
+                            HStack(spacing: 6) {
+                                let completedSteps = checklist.completedCount
+                                let totalSteps = checklist.items.count
+                                
                                 ProgressDonut(
                                     completed: completedSteps,
                                     total: totalSteps,
@@ -371,53 +370,58 @@ struct AgentControlsBar: View {
                                 Text("\(completedSteps)/\(totalSteps)")
                                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                                     .foregroundColor(.secondary)
-                            } else {
-                                ProgressView()
-                                    .scaleEffect(0.5)
-                                    .frame(width: 10, height: 10)
                                 
-                                if session.agentCurrentStep > 0 {
-                                    Text("Step \(session.agentCurrentStep)")
-                                        .font(.system(size: 10, design: .monospaced))
-                                        .foregroundColor(.secondary)
+                                if !session.agentPhase.isEmpty {
+                                    Text("·")
+                                        .foregroundColor(.secondary.opacity(0.5))
+                                    Text(session.agentPhase)
+                                        .font(.caption2)
+                                        .foregroundColor(.blue)
                                 }
-                            }
-                            
-                            if !session.agentPhase.isEmpty {
-                                Text("·")
-                                    .foregroundColor(.secondary.opacity(0.5))
-                                Text(session.agentPhase)
-                                    .font(.caption2)
-                                    .foregroundColor(.blue)
-                            }
-                            
-                            // Chevron indicator for popover
-                            if session.agentChecklist != nil {
+                                
+                                // Chevron indicator for popover
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 8, weight: .medium))
                                     .foregroundColor(.secondary.opacity(0.6))
                             }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .fill(isHoveringProgress ? Color.blue.opacity(0.18) : Color.blue.opacity(0.1))
+                            )
+                            .overlay(
+                                Capsule()
+                                    .stroke(isHoveringProgress ? Color.blue.opacity(0.3) : Color.clear, lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { isHoveringProgress = $0 }
+                        .help("Click to view task checklist")
+                        .popover(isPresented: $showingChecklistPopover, arrowEdge: .bottom) {
+                            AgentChecklistPopover(
+                                checklist: session.agentChecklist,
+                                currentStep: session.agentCurrentStep,
+                                estimatedSteps: session.agentEstimatedSteps,
+                                phase: session.agentPhase
+                            )
+                        }
+                    } else {
+                        // No checklist yet - show simple generating state
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .scaleEffect(0.5)
+                                .frame(width: 10, height: 10)
+                            
+                            Text("Generating")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(
                             Capsule()
-                                .fill(isHoveringProgress ? Color.blue.opacity(0.18) : Color.blue.opacity(0.1))
-                        )
-                        .overlay(
-                            Capsule()
-                                .stroke(isHoveringProgress ? Color.blue.opacity(0.3) : Color.clear, lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .onHover { isHoveringProgress = $0 }
-                    .help("Click to view task checklist")
-                    .popover(isPresented: $showingChecklistPopover, arrowEdge: .bottom) {
-                        AgentChecklistPopover(
-                            checklist: session.agentChecklist,
-                            currentStep: session.agentCurrentStep,
-                            estimatedSteps: session.agentEstimatedSteps,
-                            phase: session.agentPhase
+                                .fill(Color.blue.opacity(0.1))
                         )
                     }
                     

@@ -24,8 +24,14 @@ struct AgentEventView: View {
     
     /// Get the effective color based on tool status
     private var effectiveColor: Color {
+        // Handle "thinking" kind
+        if event.kind == "thinking" {
+            return .purple
+        }
         if let status = event.toolStatus {
             switch status {
+            case "streaming": return .purple
+            case "pending": return .orange
             case "running": return .blue
             case "succeeded": return .green
             case "failed": return .red
@@ -37,8 +43,14 @@ struct AgentEventView: View {
     
     /// Get the icon for tool status
     private var toolStatusIcon: String {
+        // Handle "thinking" kind
+        if event.kind == "thinking" {
+            return "brain"
+        }
         if let status = event.toolStatus {
             switch status {
+            case "streaming": return "ellipsis"
+            case "pending": return "clock"
             case "running": return "arrow.triangle.2.circlepath"
             case "succeeded": return "checkmark"
             case "failed": return "xmark"
@@ -48,20 +60,44 @@ struct AgentEventView: View {
         return symbol(for: event.kind)
     }
     
+    /// Check if this event is actively streaming
+    private var isActivelyStreaming: Bool {
+        event.isStreaming == true || event.toolStatus == "streaming" || event.kind == "thinking"
+    }
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                // Icon - shows spinner for running tools, checkmark/X for completed
+                // Icon - shows spinner for running/streaming tools, checkmark/X for completed
                 ZStack {
                     Circle()
                         .fill(effectiveColor.opacity(0.15))
                         .frame(width: 24, height: 24)
+                        .overlay(
+                            // Pulsing ring for streaming events
+                            Circle()
+                                .stroke(effectiveColor.opacity(isActivelyStreaming ? 0.6 : 0), lineWidth: 2)
+                                .scaleEffect(isActivelyStreaming ? 1.3 : 1.0)
+                                .opacity(isActivelyStreaming ? 0 : 1)
+                                .animation(
+                                    isActivelyStreaming 
+                                        ? Animation.easeOut(duration: 1.0).repeatForever(autoreverses: false)
+                                        : .default,
+                                    value: isActivelyStreaming
+                                )
+                        )
                     
-                    if isToolEvent && event.toolStatus == "running" {
-                        // Spinning indicator for running tools
+                    if isToolEvent && (event.toolStatus == "running" || event.toolStatus == "streaming") {
+                        // Spinning indicator for running/streaming tools
                         ProgressView()
                             .scaleEffect(0.5)
                             .frame(width: 10, height: 10)
+                    } else if event.kind == "thinking" {
+                        // Brain icon with pulse for thinking
+                        Image(systemName: "brain")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(effectiveColor)
+                            .opacity(0.8)
                     } else {
                         Image(systemName: isToolEvent ? toolStatusIcon : symbol(for: event.kind))
                             .font(.system(size: 10, weight: isToolEvent ? .bold : .regular))
@@ -603,7 +639,7 @@ struct AgentEventGroupView: View {
     }
     
     private var runningCount: Int {
-        toolEvents.filter { $0.toolStatus == "running" }.count
+        toolEvents.filter { $0.toolStatus == "running" || $0.toolStatus == "streaming" }.count
     }
     
     // Command counts (shell commands that needed approval)
@@ -631,6 +667,10 @@ struct AgentEventGroupView: View {
         }.count
     }
     
+    private var streamingCount: Int {
+        toolEvents.filter { $0.toolStatus == "streaming" || $0.isStreaming == true }.count
+    }
+    
     private var summaryParts: [(text: String, color: Color)] {
         var parts: [(text: String, color: Color)] = []
         
@@ -640,6 +680,8 @@ struct AgentEventGroupView: View {
             parts.append(("\(toolCount) tool\(toolCount == 1 ? "" : "s")", .secondary))
             if failedCount > 0 {
                 parts.append(("(\(failedCount) failed)", .red))
+            } else if streamingCount > 0 {
+                parts.append(("(\(streamingCount) streaming)", .purple))
             } else if runningCount > 0 {
                 parts.append(("(\(runningCount) running)", .blue))
             }
@@ -786,6 +828,8 @@ struct CompactToolRow: View {
             }
         }
         switch event.toolStatus {
+        case "streaming": return .purple
+        case "pending": return .orange
         case "running": return .blue
         case "succeeded": return .green
         case "failed": return .red
@@ -806,6 +850,8 @@ struct CompactToolRow: View {
             }
         }
         switch event.toolStatus {
+        case "streaming": return "ellipsis"
+        case "pending": return "clock"
         case "running": return "arrow.triangle.2.circlepath"
         case "succeeded": return "checkmark"
         case "failed": return "xmark"
@@ -813,12 +859,17 @@ struct CompactToolRow: View {
         }
     }
     
+    /// Check if this event is actively streaming
+    private var isActivelyStreaming: Bool {
+        event.isStreaming == true || event.toolStatus == "streaming"
+    }
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Button(action: { withAnimation(.spring(response: 0.25)) { showDetails.toggle() } }) {
                 HStack(spacing: 6) {
                     // Status indicator
-                    if isToolEvent && event.toolStatus == "running" {
+                    if isToolEvent && (event.toolStatus == "running" || event.toolStatus == "streaming") {
                         ProgressView()
                             .scaleEffect(0.4)
                             .frame(width: 12, height: 12)

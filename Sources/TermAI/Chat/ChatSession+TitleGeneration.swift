@@ -1,11 +1,16 @@
 import Foundation
 import TermAIModels
+import os.log
+
+private let titleLogger = Logger(subsystem: "com.termai.app", category: "TitleGeneration")
 
 // MARK: - Title Generation
 
 extension ChatSession {
     
     func generateTitle(from userMessage: String) async {
+        titleLogger.info("Starting title generation for message: \(userMessage.prefix(50))...")
+        
         // Clear any previous error
         await MainActor.run { [weak self] in
             self?.titleGenerationError = nil
@@ -13,6 +18,7 @@ extension ChatSession {
         
         // Skip if model is not set
         guard !model.isEmpty else {
+            titleLogger.error("Title generation skipped: model is empty")
             await MainActor.run { [weak self] in
                 self?.titleGenerationError = ChatAPIError(
                     friendlyMessage: "Cannot generate title: No model selected",
@@ -22,9 +28,13 @@ extension ChatSession {
             return
         }
         
-        // Run title generation in a separate task
-        let titleTask = Task { [weak self] in
-            guard let self = self else { return }
+        // Run title generation in a separate task on MainActor to access ChatSession properties
+        let titleTask = Task { @MainActor [weak self] in
+            guard let self = self else {
+                titleLogger.error("Title generation: self is nil, aborting")
+                return
+            }
+            titleLogger.info("Title generation task started for provider: \(self.providerName), model: \(self.model)")
             
             let titlePrompt = """
             Generate a concise 2-5 word title for a chat conversation that starts with this user message. \
@@ -141,7 +151,9 @@ extension ChatSession {
                 config.timeoutIntervalForResource = 60.0
                 let session = URLSession(configuration: config)
                 
+                titleLogger.info("Title generation: making HTTP request...")
                 let (data, response) = try await session.data(for: request)
+                titleLogger.info("Title generation: received response")
                 
                 guard !Task.isCancelled else {
                     await MainActor.run { [weak self] in
@@ -164,6 +176,7 @@ extension ChatSession {
                 }
                 
                 guard (200..<300).contains(http.statusCode) else {
+                    titleLogger.error("Title generation HTTP error: \(http.statusCode)")
                     let errorBody = String(data: data, encoding: .utf8) ?? "No error details"
                     let apiError: ChatAPIError
                     if case .cloud(let cloudProvider) = self.providerType {
@@ -215,7 +228,10 @@ extension ChatSession {
                 let systemPromptForTitle = "You are a helpful assistant that generates concise titles."
                 let estimatedPromptTokens = TokenEstimator.estimateTokens(systemPromptForTitle + titlePrompt)
                 
+                titleLogger.info("Title generation: parsing response for provider type")
+                
                 if case .cloud(let cloudProvider) = self.providerType, cloudProvider == .anthropic {
+                    titleLogger.info("Title generation: parsing as Anthropic response")
                     if let decoded = try? JSONDecoder().decode(AnthropicResponse.self, from: data),
                        let textBlock = decoded.content.first(where: { $0.type == "text" }),
                        let text = textBlock.text {
@@ -264,11 +280,17 @@ extension ChatSession {
                             completionTokens = decoded.eval_count
                         } catch {
                             // Failed to decode both formats
+                            titleLogger.error("Title generation: failed to decode response as OpenAI or Ollama format")
+                            let responsePreview = String(data: data, encoding: .utf8)?.prefix(500) ?? "unable to decode"
+                            titleLogger.error("Response preview: \(responsePreview)")
                         }
                     }
                 }
                 
+                titleLogger.info("Title generation: parsed title = \(generatedTitle ?? "nil")")
+                
                 if let title = generatedTitle {
+                    titleLogger.info("Title generation: success! Setting title: \(title)")
                     let finalPromptTokens = promptTokens ?? estimatedPromptTokens
                     let finalCompletionTokens = completionTokens ?? TokenEstimator.estimateTokens(title)
                     let isEstimated = promptTokens == nil || completionTokens == nil
@@ -317,6 +339,7 @@ extension ChatSession {
                     }
                 }
             } catch {
+                titleLogger.error("Title generation exception: \(error.localizedDescription)")
                 let apiError: ChatAPIError
                 if let urlError = error as? URLError {
                     let friendlyMessage: String
