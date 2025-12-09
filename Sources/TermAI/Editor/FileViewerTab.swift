@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import TermAIModels
 
 // MARK: - Native Tooltip Modifier
 

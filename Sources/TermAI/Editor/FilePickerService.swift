@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import os.log
+import TermAIModels
 
 private let filePickerLogger = Logger(subsystem: "com.termai", category: "FilePickerService")
 

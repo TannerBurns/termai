@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import TermAIModels
 
 // MARK: - File Diff Approval Sheet
 

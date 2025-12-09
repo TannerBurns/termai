@@ -1,5 +1,6 @@
 import Foundation
 import os.log
+import TermAIModels
 
 private let llmLogger = Logger(subsystem: "com.termai.app", category: "LLMClient")
 
