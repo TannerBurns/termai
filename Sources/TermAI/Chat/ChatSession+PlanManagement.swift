@@ -224,41 +224,9 @@ extension ChatSession {
     }
     
     /// Extract checklist items from plan markdown content
-    /// Looks for lines starting with "- [ ]" in the Checklist section
+    /// Delegates to PlanChecklistParser in TermAIModels
     func extractChecklistFromPlan(_ content: String) -> [String] {
-        var items: [String] = []
-        var inChecklistSection = false
-        
-        for line in content.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            
-            // Look for Checklist header
-            if trimmed.lowercased().contains("## checklist") || trimmed.lowercased() == "checklist" {
-                inChecklistSection = true
-                continue
-            }
-            
-            // Stop at next section
-            if inChecklistSection && trimmed.hasPrefix("##") && !trimmed.lowercased().contains("checklist") {
-                break
-            }
-            
-            // Extract checklist items (- [ ] format)
-            if inChecklistSection && (trimmed.hasPrefix("- [ ]") || trimmed.hasPrefix("- [x]") || trimmed.hasPrefix("- [X]")) {
-                // Remove the checkbox prefix and get the task description
-                let item = trimmed
-                    .replacingOccurrences(of: "- [ ] ", with: "")
-                    .replacingOccurrences(of: "- [x] ", with: "")
-                    .replacingOccurrences(of: "- [X] ", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                
-                if !item.isEmpty {
-                    items.append(item)
-                }
-            }
-        }
-        
-        return items
+        return PlanChecklistParser.extractItems(from: content)
     }
 }
 
