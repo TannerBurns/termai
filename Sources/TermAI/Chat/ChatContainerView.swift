@@ -1,4 +1,5 @@
 import SwiftUI
+import TermAIModels
 
 // MARK: - Atom One Theme Colors
 private extension Color {

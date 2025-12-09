@@ -1,4 +1,5 @@
 import SwiftUI
+import TermAIModels
 
 // MARK: - Editor Pane View
 
