@@ -11,7 +11,7 @@ import TermAIModels
 // MARK: - Chat Message Types (types with dependencies on other app modules)
 
 struct AgentEvent: Codable, Equatable {
-    var kind: String // "status", "step", "summary", "checklist", "file_change", "plan_created"
+    var kind: String // "status", "step", "summary", "checklist", "file_change", "plan_created", "thinking"
     var title: String
     var details: String? = nil
     var command: String? = nil
@@ -25,7 +25,7 @@ struct AgentEvent: Codable, Equatable {
     var pendingToolName: String? = nil
     /// For tool calls - track the tool call ID to update this event later
     var toolCallId: String? = nil
-    /// Tool execution status: "running", "succeeded", "failed"
+    /// Tool execution status: "running", "streaming", "pending", "succeeded", "failed"
     var toolStatus: String? = nil
     /// Whether this is an internal/low-value event (hidden unless verbose mode)
     var isInternal: Bool? = nil
@@ -33,6 +33,8 @@ struct AgentEvent: Codable, Equatable {
     var eventCategory: String? = nil
     /// For plan_created events - the ID of the created plan
     var planId: UUID? = nil
+    /// Whether this event is currently streaming (receiving data)
+    var isStreaming: Bool? = nil
 }
 
 // MARK: - Pinned Context (File Attachments)

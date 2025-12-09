@@ -96,8 +96,14 @@ enum AgentProfilePrompts {
         Rules:
         - Only suggest switching if the work clearly fits a different profile
         - Prefer keeping current profile if work is ambiguous or mixed
-        - "coding" for implementation, architecture work, writing new code
-        - "codeReview" for reviewing PRs, providing feedback on existing code, style checking
+        
+        IMPORTANT DISTINCTION - coding vs codeReview:
+        - "coding" = WRITING/IMPLEMENTING new code, creating features, building architecture
+        - "codeReview" = READING/REVIEWING/ASSESSING existing code, evaluating quality, giving feedback
+        - If the user asks to "review", "assess", "evaluate", "analyze quality of" code → codeReview
+        - If the user asks to "build", "implement", "create", "write" code → coding
+        
+        Other profiles:
         - "testing" for writing tests, test coverage, TDD
         - "debugging" for bug hunting, root cause analysis, investigating issues
         - "security" for vulnerability analysis, security audits, secure coding

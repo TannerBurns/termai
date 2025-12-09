@@ -678,13 +678,25 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
             AgentDebugConfig.log("[Agent] Using pre-set checklist with \(agentChecklist!.items.count) items")
         }
         
-        // Reset activeProfile for Auto mode (starts with general, will analyze and switch)
-        if agentProfile.isAuto {
-            activeProfile = .general
-        }
-        
         // Store user prompt for use in reflection/stuck detection
         let userRequest = userPrompt
+        
+        // Reset activeProfile for Auto mode and do initial profile analysis
+        if agentProfile.isAuto {
+            activeProfile = .general
+            
+            // Analyze the user's request to determine the best profile to start with
+            if let analysis = await analyzeProfileForTask(
+                currentTask: userRequest,
+                nextItems: [],
+                recentContext: ""
+            ) {
+                if analysis.confidence != "low" {
+                    switchProfileIfNeeded(to: analysis.profile, reason: analysis.reason)
+                    AgentDebugConfig.log("[Agent] Initial profile analysis: \(analysis.profile) (\(analysis.confidence) confidence) - \(analysis.reason)")
+                }
+            }
+        }
         
         // Observe terminal completion events targeted to this session
         if commandFinishedObserver == nil {
@@ -992,11 +1004,13 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                             options: .regularExpression
                         ).trimmingCharacters(in: .whitespacesAndNewlines)
                         
-                        // Add the cleaned response first
+                        // Update the existing streamed message with cleaned content (without BUILD_MODE tags)
                         if !cleanedResponse.isEmpty {
-                            messages.append(ChatMessage(role: "assistant", content: cleanedResponse))
+                            if let lastIdx = messages.lastIndex(where: { $0.role == "assistant" && $0.agentEvent == nil }) {
+                                messages[lastIdx].content = cleanedResponse
                             messages = messages
                             persistMessages()
+                            }
                         }
                         
                         // Switch to the requested mode and start building
@@ -1006,10 +1020,9 @@ final class ChatSession: ObservableObject, Identifiable, ShellCommandExecutor, P
                     }
                     
                     // Model provided a text response (completion or answer)
+                    // Note: The streaming code has already added/updated the assistant message,
+                    // so we don't need to append it again here
                     transitionToPhase(.summarizing)
-                    messages.append(ChatMessage(role: "assistant", content: response))
-                    messages = messages
-                    persistMessages()
                     transitionToPhase(.completed)
                     break stepLoop
                 } else if nativeResult.toolsExecuted.isEmpty {

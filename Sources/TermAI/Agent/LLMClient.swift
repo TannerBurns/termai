@@ -564,506 +564,6 @@ actor LLMClient {
     }
 }
 
-// MARK: - Tool Calling Support
-
-/// Result of a tool-enabled completion
-struct LLMToolCompletionResult {
-    let content: String?
-    let toolCalls: [ParsedToolCall]
-    let promptTokens: Int
-    let completionTokens: Int
-    let isEstimated: Bool
-    let stopReason: String?
-    
-    var totalTokens: Int { promptTokens + completionTokens }
-    var hasToolCalls: Bool { !toolCalls.isEmpty }
-}
-
-extension LLMClient {
-    /// Perform a completion with tool calling support
-    /// - Parameters:
-    ///   - systemPrompt: System prompt for the model
-    ///   - messages: Conversation history as array of [role, content] pairs
-    ///   - tools: Tool schemas in provider-specific format
-    ///   - provider: The provider type
-    ///   - modelId: Model identifier
-    ///   - maxTokens: Maximum tokens
-    ///   - timeout: Request timeout
-    /// - Returns: Result with content and/or tool calls
-    func completeWithTools(
-        systemPrompt: String,
-        messages: [[String: Any]],
-        tools: [[String: Any]],
-        provider: ProviderType,
-        modelId: String,
-        maxTokens: Int = 64000,
-        timeout: TimeInterval = 120
-    ) async throws -> LLMToolCompletionResult {
-        switch provider {
-        case .cloud(let cloudProvider):
-            switch cloudProvider {
-            case .openai:
-                return try await completeOpenAIWithTools(
-                    systemPrompt: systemPrompt,
-                    messages: messages,
-                    tools: tools,
-                    modelId: modelId,
-                    maxTokens: maxTokens,
-                    timeout: timeout
-                )
-            case .anthropic:
-                return try await completeAnthropicWithTools(
-                    systemPrompt: systemPrompt,
-                    messages: messages,
-                    tools: tools,
-                    modelId: modelId,
-                    maxTokens: maxTokens,
-                    timeout: timeout
-                )
-            case .google:
-                return try await completeGoogleWithTools(
-                    systemPrompt: systemPrompt,
-                    messages: messages,
-                    tools: tools,
-                    modelId: modelId,
-                    maxTokens: maxTokens,
-                    timeout: timeout
-                )
-            }
-        case .local(let localProvider):
-            return try await completeLocalWithTools(
-                systemPrompt: systemPrompt,
-                messages: messages,
-                tools: tools,
-                localProvider: localProvider,
-                modelId: modelId,
-                maxTokens: maxTokens,
-                timeout: timeout
-            )
-        }
-    }
-    
-    // MARK: - OpenAI with Tools
-    
-    private func completeOpenAIWithTools(
-        systemPrompt: String,
-        messages: [[String: Any]],
-        tools: [[String: Any]],
-        modelId: String,
-        maxTokens: Int,
-        timeout: TimeInterval
-    ) async throws -> LLMToolCompletionResult {
-        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = timeout
-        
-        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .openai) else {
-            throw LLMClientError.missingAPIKey(provider: "OpenAI")
-        }
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        
-        // Build messages array with system prompt
-        var allMessages: [[String: Any]] = [
-            ["role": "system", "content": systemPrompt]
-        ]
-        allMessages.append(contentsOf: messages)
-        
-        var bodyDict: [String: Any] = [
-            "model": modelId,
-            "messages": allMessages,
-            "stream": false
-        ]
-        
-        // Add tools if provided
-        if !tools.isEmpty {
-            bodyDict["tools"] = tools
-            bodyDict["tool_choice"] = "auto"
-        }
-        
-        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
-        
-        llmLogger.debug("OpenAI tool request: model=\(modelId), tools=\(tools.count)")
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let http = response as? HTTPURLResponse else {
-            throw LLMClientError.invalidResponse
-        }
-        
-        guard (200..<300).contains(http.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            llmLogger.error("OpenAI tool call failed (\(http.statusCode)): \(errorBody)")
-            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .openai)
-            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
-        }
-        
-        // Parse response
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let firstChoice = choices.first,
-              let message = firstChoice["message"] as? [String: Any] else {
-            throw LLMClientError.emptyResponse
-        }
-        
-        let content = message["content"] as? String
-        let toolCalls = ToolCallParser.parseOpenAI(from: message)
-        let finishReason = firstChoice["finish_reason"] as? String
-        
-        // Parse usage
-        let usage = json["usage"] as? [String: Any]
-        let promptTokens = usage?["prompt_tokens"] as? Int ?? 0
-        let completionTokens = usage?["completion_tokens"] as? Int ?? 0
-        
-        return LLMToolCompletionResult(
-            content: content,
-            toolCalls: toolCalls,
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-            isEstimated: usage == nil,
-            stopReason: finishReason
-        )
-    }
-    
-    // MARK: - Anthropic with Tools
-    
-    private func completeAnthropicWithTools(
-        systemPrompt: String,
-        messages: [[String: Any]],
-        tools: [[String: Any]],
-        modelId: String,
-        maxTokens: Int,
-        timeout: TimeInterval
-    ) async throws -> LLMToolCompletionResult {
-        let url = URL(string: "https://api.anthropic.com/v1/messages")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.timeoutInterval = timeout
-        
-        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .anthropic) else {
-            throw LLMClientError.missingAPIKey(provider: "Anthropic")
-        }
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        
-        var bodyDict: [String: Any] = [
-            "model": modelId,
-            "system": systemPrompt,
-            "messages": messages,
-            "max_tokens": maxTokens
-        ]
-        
-        // Add tools if provided
-        if !tools.isEmpty {
-            bodyDict["tools"] = tools
-        }
-        
-        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
-        
-        llmLogger.debug("Anthropic tool request: model=\(modelId), tools=\(tools.count)")
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let http = response as? HTTPURLResponse else {
-            throw LLMClientError.invalidResponse
-        }
-        
-        guard (200..<300).contains(http.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .anthropic)
-            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
-        }
-        
-        // Parse response
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let contentArray = json["content"] as? [[String: Any]] else {
-            throw LLMClientError.emptyResponse
-        }
-        
-        // Extract text content
-        var textContent: String? = nil
-        for block in contentArray {
-            if block["type"] as? String == "text",
-               let text = block["text"] as? String {
-                textContent = text
-                break
-            }
-        }
-        
-        let toolCalls = ToolCallParser.parseAnthropic(from: contentArray)
-        let stopReason = json["stop_reason"] as? String
-        
-        // Parse usage
-        let usage = json["usage"] as? [String: Any]
-        let promptTokens = usage?["input_tokens"] as? Int ?? 0
-        let completionTokens = usage?["output_tokens"] as? Int ?? 0
-        
-        return LLMToolCompletionResult(
-            content: textContent,
-            toolCalls: toolCalls,
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-            isEstimated: usage == nil,
-            stopReason: stopReason
-        )
-    }
-    
-    // MARK: - Google with Tools
-    
-    private func completeGoogleWithTools(
-        systemPrompt: String,
-        messages: [[String: Any]],
-        tools: [[String: Any]],
-        modelId: String,
-        maxTokens: Int,
-        timeout: TimeInterval
-    ) async throws -> LLMToolCompletionResult {
-        let baseURL = CloudProvider.google.baseURL
-        let url = baseURL.appendingPathComponent("models/\(modelId):generateContent")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = timeout
-        
-        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .google) else {
-            throw LLMClientError.missingAPIKey(provider: "Google")
-        }
-        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        
-        // Convert messages to Google format
-        // Google expects: user, model, and function roles with appropriate parts
-        var contents: [[String: Any]] = []
-        for msg in messages {
-            guard let role = msg["role"] as? String else { continue }
-            
-            // Handle function response messages (from ToolResultFormatter.functionResponseMessageGoogle)
-            if role == "function" {
-                if let parts = msg["parts"] as? [[String: Any]] {
-                    contents.append(["role": "function", "parts": parts])
-                }
-                continue
-            }
-            
-            // Handle OpenAI-format tool responses
-            if role == "tool" {
-                if let toolCallId = msg["tool_call_id"] as? String,
-                   let content = msg["content"] as? String {
-                    // Convert to Google function response format
-                    // Group with previous function responses if possible
-                    let functionResponse: [String: Any] = [
-                        "functionResponse": [
-                            "name": toolCallId, // Use tool_call_id as name fallback
-                            "response": ["output": content]
-                        ]
-                    ]
-                    contents.append(["role": "function", "parts": [functionResponse]])
-                }
-                continue
-            }
-            
-            // Handle assistant messages with tool calls (convert to model with functionCall parts)
-            if role == "assistant" {
-                var parts: [[String: Any]] = []
-                
-                // Add text content if present
-                if let content = msg["content"] as? String, !content.isEmpty {
-                    parts.append(["text": content])
-                }
-                
-                // Convert tool_calls to functionCall parts
-                if let toolCalls = msg["tool_calls"] as? [[String: Any]] {
-                    for call in toolCalls {
-                        if let function = call["function"] as? [String: Any],
-                           let name = function["name"] as? String {
-                            var functionCall: [String: Any] = ["name": name]
-                            
-                            // Parse arguments from JSON string
-                            if let argsStr = function["arguments"] as? String,
-                               let argsData = argsStr.data(using: .utf8),
-                               let args = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any] {
-                                functionCall["args"] = args
-                            }
-                            
-                            parts.append(["functionCall": functionCall])
-                        }
-                    }
-                }
-                
-                if !parts.isEmpty {
-                    contents.append(["role": "model", "parts": parts])
-                }
-                continue
-            }
-            
-            // Handle simple text content (user messages)
-            if let content = msg["content"] as? String {
-                let googleRole = role == "assistant" ? "model" : "user"
-                contents.append(["role": googleRole, "parts": [["text": content]]])
-            }
-        }
-        
-        var bodyDict: [String: Any] = [
-            "contents": contents,
-            "generationConfig": [
-                "maxOutputTokens": maxTokens
-            ]
-        ]
-        
-        // Add system instruction
-        if !systemPrompt.isEmpty {
-            bodyDict["systemInstruction"] = [
-                "parts": [["text": systemPrompt]]
-            ]
-        }
-        
-        // Add tools if provided (Google format: [{functionDeclarations: [...]}])
-        if !tools.isEmpty {
-            bodyDict["tools"] = [["functionDeclarations": tools]]
-        }
-        
-        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
-        
-        llmLogger.debug("Google tool request: model=\(modelId), tools=\(tools.count)")
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let http = response as? HTTPURLResponse else {
-            throw LLMClientError.invalidResponse
-        }
-        
-        guard (200..<300).contains(http.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .google)
-            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
-        }
-        
-        // Parse response
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let candidates = json["candidates"] as? [[String: Any]],
-              let firstCandidate = candidates.first,
-              let content = firstCandidate["content"] as? [String: Any],
-              let parts = content["parts"] as? [[String: Any]] else {
-            throw LLMClientError.emptyResponse
-        }
-        
-        // Extract text content
-        var textContent: String? = nil
-        for part in parts {
-            if let text = part["text"] as? String {
-                textContent = text
-                break
-            }
-        }
-        
-        let toolCalls = ToolCallParser.parseGoogle(from: parts)
-        let finishReason = firstCandidate["finishReason"] as? String
-        
-        // Parse usage
-        let usageMetadata = json["usageMetadata"] as? [String: Any]
-        let promptTokens = usageMetadata?["promptTokenCount"] as? Int ?? 0
-        let completionTokens = usageMetadata?["candidatesTokenCount"] as? Int ?? 0
-        
-        return LLMToolCompletionResult(
-            content: textContent,
-            toolCalls: toolCalls,
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-            isEstimated: usageMetadata == nil,
-            stopReason: finishReason
-        )
-    }
-    
-    // MARK: - Local with Tools
-    
-    private func completeLocalWithTools(
-        systemPrompt: String,
-        messages: [[String: Any]],
-        tools: [[String: Any]],
-        localProvider: LocalLLMProvider,
-        modelId: String,
-        maxTokens: Int,
-        timeout: TimeInterval
-    ) async throws -> LLMToolCompletionResult {
-        let baseURL = AgentSettings.shared.baseURL(for: localProvider)
-        let url = baseURL.appendingPathComponent("chat/completions")
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = timeout
-        
-        // Build messages with system prompt
-        var allMessages: [[String: Any]] = [
-            ["role": "system", "content": systemPrompt]
-        ]
-        allMessages.append(contentsOf: messages)
-        
-        var bodyDict: [String: Any] = [
-            "model": modelId,
-            "messages": allMessages,
-            "stream": false
-        ]
-        
-        // Add tools if provided (OpenAI-compatible format)
-        if !tools.isEmpty {
-            bodyDict["tools"] = tools
-            bodyDict["tool_choice"] = "auto"
-        }
-        
-        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
-        
-        llmLogger.debug("Local tool request: provider=\(localProvider.rawValue), model=\(modelId), tools=\(tools.count)")
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let http = response as? HTTPURLResponse else {
-            throw LLMClientError.invalidResponse
-        }
-        
-        // Check for tool calling not supported error
-        if http.statusCode == 400 || http.statusCode == 422 {
-            let errorBody = String(data: data, encoding: .utf8) ?? ""
-            if errorBody.lowercased().contains("tool") || 
-               errorBody.lowercased().contains("function") ||
-               errorBody.lowercased().contains("not supported") {
-                throw LLMClientError.toolsNotSupported(model: modelId)
-            }
-        }
-        
-        guard (200..<300).contains(http.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw LLMClientError.apiError(statusCode: http.statusCode, message: errorBody)
-        }
-        
-        // Parse OpenAI-compatible response
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let firstChoice = choices.first,
-              let message = firstChoice["message"] as? [String: Any] else {
-            throw LLMClientError.emptyResponse
-        }
-        
-        let content = message["content"] as? String
-        let toolCalls = ToolCallParser.parseOpenAI(from: message)
-        let finishReason = firstChoice["finish_reason"] as? String
-        
-        // Parse usage
-        let usage = json["usage"] as? [String: Any]
-        let promptTokens = usage?["prompt_tokens"] as? Int ?? 0
-        let completionTokens = usage?["completion_tokens"] as? Int ?? 0
-        
-        return LLMToolCompletionResult(
-            content: content,
-            toolCalls: toolCalls,
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-            isEstimated: usage == nil,
-            stopReason: finishReason
-        )
-    }
-}
-
 // MARK: - Errors
 
 enum LLMClientError: LocalizedError {
@@ -1086,7 +586,7 @@ enum LLMClientError: LocalizedError {
         case .toolsNotSupported(let model):
             return "Agent mode is not available with '\(model)'. This model does not support tool/function calling. Please select a different model or use chat mode instead."
         }
-    }
+}
 }
 
 // MARK: - Tool Support Checking
@@ -1099,6 +599,625 @@ extension LLMClient {
         // Don't try to detect tool support - assume the user knows their model
         // Runtime errors will be caught and reported if the model doesn't support tools
         return nil
+    }
+}
+
+// MARK: - Streaming Tool Calling Support
+
+extension LLMClient {
+    
+    /// Perform a streaming completion with tool calling support
+    /// Returns an AsyncThrowingStream of LLMStreamEvent for real-time updates
+    nonisolated func completeWithToolsStream(
+        systemPrompt: String,
+        messages: [[String: Any]],
+        tools: [[String: Any]],
+        provider: ProviderType,
+        modelId: String,
+        maxTokens: Int = 64000,
+        timeout: TimeInterval = 120
+    ) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            Task { [self] in
+                do {
+        switch provider {
+        case .cloud(let cloudProvider):
+            switch cloudProvider {
+            case .openai:
+                            try await streamOpenAICompatibleWithTools(
+                    systemPrompt: systemPrompt,
+                    messages: messages,
+                    tools: tools,
+                    modelId: modelId,
+                    maxTokens: maxTokens,
+                                timeout: timeout,
+                                baseURL: URL(string: "https://api.openai.com/v1")!,
+                                apiKey: CloudAPIKeyManager.shared.getAPIKey(for: .openai),
+                                provider: .openai,
+                                continuation: continuation
+                )
+            case .anthropic:
+                            try await streamAnthropicWithTools(
+                    systemPrompt: systemPrompt,
+                    messages: messages,
+                    tools: tools,
+                    modelId: modelId,
+                    maxTokens: maxTokens,
+                                timeout: timeout,
+                                continuation: continuation
+                )
+            case .google:
+                            try await streamGoogleWithTools(
+                    systemPrompt: systemPrompt,
+                    messages: messages,
+                    tools: tools,
+                    modelId: modelId,
+                    maxTokens: maxTokens,
+                                timeout: timeout,
+                                continuation: continuation
+                )
+            }
+        case .local(let localProvider):
+                        let baseURL = AgentSettings.shared.baseURL(for: localProvider)
+                        try await streamOpenAICompatibleWithTools(
+                systemPrompt: systemPrompt,
+                messages: messages,
+                tools: tools,
+                modelId: modelId,
+                maxTokens: maxTokens,
+                            timeout: timeout,
+                            baseURL: baseURL,
+                            apiKey: nil,
+                            provider: nil,
+                            continuation: continuation
+                        )
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+        }
+    }
+    
+    // MARK: - OpenAI-Compatible Streaming (OpenAI + Local providers)
+    
+    private func streamOpenAICompatibleWithTools(
+        systemPrompt: String,
+        messages: [[String: Any]],
+        tools: [[String: Any]],
+        modelId: String,
+        maxTokens: Int,
+        timeout: TimeInterval,
+        baseURL: URL,
+        apiKey: String?,
+        provider: CloudProvider?,
+        continuation: AsyncThrowingStream<LLMStreamEvent, Error>.Continuation
+    ) async throws {
+        let url = baseURL.appendingPathComponent("chat/completions")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = timeout
+        
+        if let apiKey = apiKey {
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        
+        // Build messages array with system prompt
+        var allMessages: [[String: Any]] = [
+            ["role": "system", "content": systemPrompt]
+        ]
+        allMessages.append(contentsOf: messages)
+        
+        var bodyDict: [String: Any] = [
+            "model": modelId,
+            "messages": allMessages,
+            "stream": true,
+            "stream_options": ["include_usage": true]
+        ]
+        
+        // Add tools if provided
+        if !tools.isEmpty {
+            bodyDict["tools"] = tools
+            bodyDict["tool_choice"] = "auto"
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+        
+        llmLogger.debug("OpenAI-compatible streaming tool request: model=\(modelId), tools=\(tools.count)")
+        
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        
+        guard let http = response as? HTTPURLResponse else {
+            throw LLMClientError.invalidResponse
+        }
+        
+        if !(200..<300).contains(http.statusCode) {
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+            }
+            if let cloudProvider = provider {
+                let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: cloudProvider)
+            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
+        }
+            throw LLMClientError.apiError(statusCode: http.statusCode, message: errorBody)
+        }
+        
+        // Track tool calls being accumulated
+        var toolCallAccumulators: [Int: (id: String, name: String, arguments: String)] = [:]
+        var finishReason: String? = nil
+        
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            if payload == "[DONE]" { break }
+            guard let data = payload.data(using: .utf8) else { continue }
+            
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]] else {
+                continue
+            }
+            
+            // Check for usage in the chunk
+            if let usage = json["usage"] as? [String: Any] {
+                let promptTokens = usage["prompt_tokens"] as? Int ?? 0
+                let completionTokens = usage["completion_tokens"] as? Int ?? 0
+                continuation.yield(.usage(prompt: promptTokens, completion: completionTokens))
+            }
+            
+            guard let firstChoice = choices.first else { continue }
+            
+            // Check for finish reason
+            if let reason = firstChoice["finish_reason"] as? String {
+                finishReason = reason
+            }
+            
+            guard let delta = firstChoice["delta"] as? [String: Any] else { continue }
+            
+            // Handle text content delta
+            if let content = delta["content"] as? String, !content.isEmpty {
+                continuation.yield(.textDelta(content))
+            }
+            
+            // Handle tool call deltas
+            if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
+                for toolCall in toolCalls {
+                    guard let index = toolCall["index"] as? Int else { continue }
+                    
+                    // Initialize new tool call
+                    if let id = toolCall["id"] as? String {
+                        let function = toolCall["function"] as? [String: Any]
+                        let name = function?["name"] as? String ?? ""
+                        toolCallAccumulators[index] = (id: id, name: name, arguments: "")
+                        
+                        if !name.isEmpty {
+                            continuation.yield(.toolCallStart(id: id, name: name))
+                        }
+                    }
+                    
+                    // Accumulate function arguments
+                    if let function = toolCall["function"] as? [String: Any],
+                       let argsDelta = function["arguments"] as? String,
+                       !argsDelta.isEmpty {
+                        if var accumulator = toolCallAccumulators[index] {
+                            accumulator.arguments += argsDelta
+                            toolCallAccumulators[index] = accumulator
+                            continuation.yield(.toolCallArgumentDelta(id: accumulator.id, delta: argsDelta))
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Emit completed tool calls
+        for (_, accumulator) in toolCallAccumulators.sorted(by: { $0.key < $1.key }) {
+            var arguments: [String: Any] = [:]
+            if let argsData = accumulator.arguments.data(using: .utf8),
+               let argsDict = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any] {
+                arguments = argsDict
+            }
+            
+            let parsedCall = ParsedToolCall(
+                id: accumulator.id,
+                name: accumulator.name,
+                arguments: arguments
+            )
+            continuation.yield(.toolCallComplete(parsedCall))
+        }
+        
+        // Emit stop reason if available
+        if let reason = finishReason {
+            continuation.yield(.stopReason(reason))
+        }
+        
+        continuation.yield(.done)
+    }
+    
+    // MARK: - Anthropic Streaming with Tools
+    
+    private func streamAnthropicWithTools(
+        systemPrompt: String,
+        messages: [[String: Any]],
+        tools: [[String: Any]],
+        modelId: String,
+        maxTokens: Int,
+        timeout: TimeInterval,
+        continuation: AsyncThrowingStream<LLMStreamEvent, Error>.Continuation
+    ) async throws {
+        let url = URL(string: "https://api.anthropic.com/v1/messages")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.timeoutInterval = timeout
+        
+        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .anthropic) else {
+            throw LLMClientError.missingAPIKey(provider: "Anthropic")
+        }
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        
+        var bodyDict: [String: Any] = [
+            "model": modelId,
+            "system": systemPrompt,
+            "messages": messages,
+            "max_tokens": maxTokens,
+            "stream": true
+        ]
+        
+        // Add tools if provided
+        if !tools.isEmpty {
+            bodyDict["tools"] = tools
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+        
+        llmLogger.debug("Anthropic streaming tool request: model=\(modelId), tools=\(tools.count)")
+        
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        
+        guard let http = response as? HTTPURLResponse else {
+            throw LLMClientError.invalidResponse
+        }
+        
+        if !(200..<300).contains(http.statusCode) {
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+            }
+            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .anthropic)
+            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
+        }
+        
+        // Track content blocks being accumulated
+        var currentBlockIndex: Int = -1
+        var currentBlockType: String = ""
+        var currentToolUseId: String = ""
+        var currentToolName: String = ""
+        var currentToolArguments: String = ""
+        var stopReason: String? = nil
+        
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard let data = payload.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            
+            let eventType = json["type"] as? String ?? ""
+            
+            switch eventType {
+            case "message_start":
+                // Extract input tokens from message usage
+                if let message = json["message"] as? [String: Any],
+                   let usage = message["usage"] as? [String: Any],
+                   let inputTokens = usage["input_tokens"] as? Int {
+                    // We'll get output tokens at the end
+                    continuation.yield(.usage(prompt: inputTokens, completion: 0))
+                }
+                
+            case "content_block_start":
+                currentBlockIndex = json["index"] as? Int ?? -1
+                if let contentBlock = json["content_block"] as? [String: Any] {
+                    currentBlockType = contentBlock["type"] as? String ?? ""
+                    
+                    if currentBlockType == "tool_use" {
+                        currentToolUseId = contentBlock["id"] as? String ?? ""
+                        currentToolName = contentBlock["name"] as? String ?? ""
+                        currentToolArguments = ""
+                        continuation.yield(.toolCallStart(id: currentToolUseId, name: currentToolName))
+                    }
+                }
+                
+            case "content_block_delta":
+                if let delta = json["delta"] as? [String: Any] {
+                    let deltaType = delta["type"] as? String ?? ""
+                    
+                    if deltaType == "text_delta", let text = delta["text"] as? String {
+                        continuation.yield(.textDelta(text))
+                    } else if deltaType == "input_json_delta", let partialJson = delta["partial_json"] as? String {
+                        currentToolArguments += partialJson
+                        continuation.yield(.toolCallArgumentDelta(id: currentToolUseId, delta: partialJson))
+                    }
+                }
+                
+            case "content_block_stop":
+                // If we just finished a tool_use block, emit the complete tool call
+                if currentBlockType == "tool_use" {
+                    var arguments: [String: Any] = [:]
+                    if let argsData = currentToolArguments.data(using: .utf8),
+                       let argsDict = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any] {
+                        arguments = argsDict
+                    }
+                    
+                    let parsedCall = ParsedToolCall(
+                        id: currentToolUseId,
+                        name: currentToolName,
+                        arguments: arguments
+                    )
+                    continuation.yield(.toolCallComplete(parsedCall))
+                }
+                currentBlockType = ""
+                
+            case "message_delta":
+                if let delta = json["delta"] as? [String: Any] {
+                    if let reason = delta["stop_reason"] as? String {
+                        stopReason = reason
+                    }
+                }
+                // Extract output tokens
+                if let usage = json["usage"] as? [String: Any],
+                   let outputTokens = usage["output_tokens"] as? Int {
+                    continuation.yield(.usage(prompt: 0, completion: outputTokens))
+                }
+                
+            case "message_stop":
+                if let reason = stopReason {
+                    continuation.yield(.stopReason(reason))
+                }
+                
+            default:
+                break
+            }
+        }
+        
+        continuation.yield(.done)
+    }
+    
+    // MARK: - Google Streaming with Tools
+    
+    private func streamGoogleWithTools(
+        systemPrompt: String,
+        messages: [[String: Any]],
+        tools: [[String: Any]],
+        modelId: String,
+        maxTokens: Int,
+        timeout: TimeInterval,
+        continuation: AsyncThrowingStream<LLMStreamEvent, Error>.Continuation
+    ) async throws {
+        let baseURL = CloudProvider.google.baseURL
+        guard var urlComponents = URLComponents(
+            url: baseURL.appendingPathComponent("models/\(modelId):streamGenerateContent"),
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw LLMClientError.invalidResponse
+        }
+        urlComponents.queryItems = [URLQueryItem(name: "alt", value: "sse")]
+        
+        guard let url = urlComponents.url else {
+            throw LLMClientError.invalidResponse
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = timeout
+        
+        guard let apiKey = CloudAPIKeyManager.shared.getAPIKey(for: .google) else {
+            throw LLMClientError.missingAPIKey(provider: "Google")
+        }
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        
+        // Convert messages to Google format
+        var contents: [[String: Any]] = []
+        for msg in messages {
+            guard let role = msg["role"] as? String else { continue }
+            
+            // Handle function response messages
+            if role == "function" {
+                if let parts = msg["parts"] as? [[String: Any]] {
+                    contents.append(["role": "function", "parts": parts])
+                }
+                continue
+            }
+            
+            // Handle tool responses
+            if role == "tool" {
+                if let toolCallId = msg["tool_call_id"] as? String,
+                   let content = msg["content"] as? String {
+                    let functionResponse: [String: Any] = [
+                        "functionResponse": [
+                            "name": toolCallId,
+                            "response": ["output": content]
+                        ]
+                    ]
+                    contents.append(["role": "function", "parts": [functionResponse]])
+                }
+                continue
+            }
+            
+            // Handle assistant messages with tool calls
+            if role == "assistant" {
+                var parts: [[String: Any]] = []
+                
+                if let content = msg["content"] as? String, !content.isEmpty {
+                    parts.append(["text": content])
+                }
+                
+                if let toolCalls = msg["tool_calls"] as? [[String: Any]] {
+                    for call in toolCalls {
+                        if let function = call["function"] as? [String: Any],
+                           let name = function["name"] as? String {
+                            var functionCall: [String: Any] = ["name": name]
+                            
+                            if let argsStr = function["arguments"] as? String,
+                               let argsData = argsStr.data(using: .utf8),
+                               let args = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any] {
+                                functionCall["args"] = args
+                            }
+                            
+                            parts.append(["functionCall": functionCall])
+                        }
+                    }
+                }
+                
+                if !parts.isEmpty {
+                    contents.append(["role": "model", "parts": parts])
+                }
+                continue
+            }
+            
+            // Handle user messages
+            if let content = msg["content"] as? String {
+                let googleRole = role == "assistant" ? "model" : "user"
+                contents.append(["role": googleRole, "parts": [["text": content]]])
+            }
+        }
+        
+        var bodyDict: [String: Any] = [
+            "contents": contents,
+            "generationConfig": [
+                "maxOutputTokens": maxTokens
+            ]
+        ]
+        
+        if !systemPrompt.isEmpty {
+            bodyDict["systemInstruction"] = [
+                "parts": [["text": systemPrompt]]
+            ]
+        }
+        
+        if !tools.isEmpty {
+            bodyDict["tools"] = [["functionDeclarations": tools]]
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: bodyDict)
+        
+        llmLogger.debug("Google streaming tool request: model=\(modelId), tools=\(tools.count)")
+        
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        
+        guard let http = response as? HTTPURLResponse else {
+            throw LLMClientError.invalidResponse
+        }
+        
+        if !(200..<300).contains(http.statusCode) {
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+            }
+            let apiError = ChatAPIError.from(statusCode: http.statusCode, errorBody: errorBody, provider: .google)
+            throw LLMClientError.apiError(statusCode: http.statusCode, message: apiError.friendlyMessage)
+        }
+        
+        var toolCallIndex = 0
+        var finishReason: String? = nil
+        
+        for try await line in bytes.lines {
+            guard line.hasPrefix("data:") else { continue }
+            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard let data = payload.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            
+            // Handle usage metadata
+            if let usageMetadata = json["usageMetadata"] as? [String: Any] {
+                let promptTokens = usageMetadata["promptTokenCount"] as? Int ?? 0
+                let completionTokens = usageMetadata["candidatesTokenCount"] as? Int ?? 0
+                continuation.yield(.usage(prompt: promptTokens, completion: completionTokens))
+            }
+            
+            guard let candidates = json["candidates"] as? [[String: Any]],
+              let firstCandidate = candidates.first,
+              let content = firstCandidate["content"] as? [String: Any],
+              let parts = content["parts"] as? [[String: Any]] else {
+                continue
+        }
+        
+            // Check for finish reason
+            if let reason = firstCandidate["finishReason"] as? String {
+                finishReason = reason
+            }
+            
+            for part in parts {
+                // Handle text content
+                if let text = part["text"] as? String, !text.isEmpty {
+                    continuation.yield(.textDelta(text))
+    }
+    
+                // Handle function calls
+                if let functionCall = part["functionCall"] as? [String: Any],
+                   let name = functionCall["name"] as? String {
+                    let id = "google_call_\(toolCallIndex)"
+                    toolCallIndex += 1
+                    
+                    continuation.yield(.toolCallStart(id: id, name: name))
+                    
+                    let arguments = functionCall["args"] as? [String: Any] ?? [:]
+                    
+                    // For Google, we get complete function calls, so emit the args as one delta
+                    if let argsData = try? JSONSerialization.data(withJSONObject: arguments),
+                       let argsString = String(data: argsData, encoding: .utf8) {
+                        continuation.yield(.toolCallArgumentDelta(id: id, delta: argsString))
+                    }
+                    
+                    let parsedCall = ParsedToolCall(id: id, name: name, arguments: arguments)
+                    continuation.yield(.toolCallComplete(parsedCall))
+            }
+        }
+        }
+        
+        if let reason = finishReason {
+            continuation.yield(.stopReason(reason))
+        }
+        
+        continuation.yield(.done)
+    }
+}
+
+// MARK: - Simple Streaming (No Tools)
+
+extension LLMClient {
+    
+    /// Perform a simple streaming completion without tool support
+    /// Useful for one-shot completions where you want streaming feedback
+    nonisolated func completeStream(
+        systemPrompt: String,
+        userPrompt: String,
+        provider: ProviderType,
+        modelId: String,
+        temperature: Double = 0.3,
+        maxTokens: Int = 500,
+        timeout: TimeInterval = 30
+    ) -> AsyncThrowingStream<LLMStreamEvent, Error> {
+        // Use the tool-enabled stream with empty tools array
+        // This gives us consistent streaming behavior
+        let messages: [[String: Any]] = [
+            ["role": "user", "content": userPrompt]
+        ]
+        
+        return completeWithToolsStream(
+            systemPrompt: systemPrompt,
+            messages: messages,
+            tools: [],
+            provider: provider,
+            modelId: modelId,
+            maxTokens: maxTokens,
+            timeout: timeout
+        )
     }
 }
 

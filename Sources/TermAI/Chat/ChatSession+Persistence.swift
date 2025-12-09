@@ -68,10 +68,27 @@ extension ChatSession {
         }
         // Also load checkpoints alongside messages
         loadCheckpoints()
+        
+        // Recalculate context usage from loaded messages
+        // This ensures the context indicator reflects the actual conversation state
+        updateContextUsage(persist: false)
     }
     
     func persistSettings() {
-        let settings = SessionSettings(
+        let settings = buildSessionSettings()
+        // Use background save for settings (not critical path)
+        PersistenceService.saveJSONInBackground(settings, to: "session-settings-\(id.uuidString).json")
+    }
+    
+    /// Persist settings synchronously - for app quit scenarios
+    func persistSettingsImmediately() {
+        let settings = buildSessionSettings()
+        try? PersistenceService.saveJSON(settings, to: "session-settings-\(id.uuidString).json")
+    }
+    
+    /// Build the settings object for persistence
+    private func buildSessionSettings() -> SessionSettings {
+        SessionSettings(
             apiBaseURL: apiBaseURL.absoluteString,
             apiKey: apiKey,
             model: model,
@@ -92,8 +109,6 @@ extension ChatSession {
             summarizationCount: summarizationCount,
             currentPlanId: currentPlanId
         )
-        // Use background save for settings (not critical path)
-        PersistenceService.saveJSONInBackground(settings, to: "session-settings-\(id.uuidString).json")
     }
     
     func loadSettings() {
@@ -210,18 +225,40 @@ extension ChatSession {
         
         var totalTokens = 0
         
+        // Estimate from visible messages (user/assistant text)
+        let messageArray = buildMessageArray()
+        let messageText = messageArray.map { $0.content }.joined(separator: "\n")
+        totalTokens = TokenEstimator.estimateTokens(messageText, model: model)
+        
+        // Include in-memory agent context log if present
         if !agentContextLog.isEmpty {
-            // Agent mode but not actively running - show combined estimate
-            let messageArray = buildMessageArray()
-            let messageText = messageArray.map { $0.content }.joined(separator: "\n")
-            totalTokens = TokenEstimator.estimateTokens(messageText, model: model)
             let agentContext = agentContextLog.joined(separator: "\n")
             totalTokens += TokenEstimator.estimateTokens(agentContext, model: model)
         } else {
-            // Estimate from messages
-            let messageArray = buildMessageArray()
-            let messageText = messageArray.map { $0.content }.joined(separator: "\n")
-            totalTokens = TokenEstimator.estimateTokens(messageText, model: model)
+            // When agent context log is empty (e.g., after reload), estimate from stored agent events
+            // This includes tool outputs, file contents, etc. that were part of the conversation
+            for msg in messages {
+                if let event = msg.agentEvent {
+                    // Include tool outputs
+                    if let output = event.output, !output.isEmpty {
+                        totalTokens += TokenEstimator.estimateTokens(output, model: model)
+                    }
+                    // Include tool details/arguments
+                    if let details = event.details, !details.isEmpty {
+                        totalTokens += TokenEstimator.estimateTokens(details, model: model)
+                    }
+                }
+                // Include attached contexts (files, terminal output, etc.)
+                if let contexts = msg.attachedContexts {
+                    for context in contexts {
+                        totalTokens += TokenEstimator.estimateTokens(context.content, model: model)
+                    }
+                }
+                // Include terminal context
+                if let termCtx = msg.terminalContext, !termCtx.isEmpty {
+                    totalTokens += TokenEstimator.estimateTokens(termCtx, model: model)
+                }
+            }
         }
         
         // Only update and notify if the value has actually changed

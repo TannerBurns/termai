@@ -166,13 +166,13 @@ final class ChatTabsManager: ObservableObject {
             sessionIds: sessions.map { $0.id },
             selectedSessionId: selectedSessionId
         )
-        // Use background save for manifest to avoid blocking main thread
-        PersistenceService.saveJSONInBackground(sessionData, to: manifestFileName)
-        
-        // Also make sure each session saves its settings
-        // Use immediate persist to ensure data is written before app quit
+        // Use synchronous save for manifest to ensure data is written before app quit
+        try? PersistenceService.saveJSON(sessionData, to: manifestFileName)
+
+        // Also make sure each session saves its settings synchronously
+        // This ensures data is written before app quit
         for session in sessions {
-            session.persistSettings()
+            session.persistSettingsImmediately()
             session.persistMessagesImmediately()
         }
     }

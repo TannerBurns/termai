@@ -67,8 +67,8 @@ enum AgentProfile: String, Codable, CaseIterable {
         switch self {
         case .auto: return "Automatically adapts profile based on task"
         case .general: return "Balanced general-purpose assistant"
-        case .coding: return "Code quality, architecture & SOLID principles"
-        case .codeReview: return "PR feedback, bug detection & style consistency"
+        case .coding: return "Writing & implementing new code, architecture design"
+        case .codeReview: return "Reviewing existing code, quality assessment & feedback"
         case .testing: return "Test coverage, TDD & quality assurance"
         case .debugging: return "Root cause analysis & systematic bug hunting"
         case .security: return "Vulnerability analysis & secure coding"
@@ -87,9 +87,9 @@ enum AgentProfile: String, Codable, CaseIterable {
         case .general:
             return "Standard task breakdown with progress tracking. Good for mixed or unknown task types."
         case .coding:
-            return "SOLID principles, modular design, testable chunks. Emphasizes clean architecture and error handling."
+            return "For WRITING and IMPLEMENTING new code. SOLID principles, modular design, testable chunks. Emphasizes clean architecture and error handling."
         case .codeReview:
-            return "Thorough code review with focus on bugs, security issues, style consistency, and constructive feedback."
+            return "For REVIEWING and ASSESSING existing code. Thorough analysis of code quality, bugs, security issues, style consistency, and constructive feedback."
         case .testing:
             return "Test-first and test-after approaches. Focuses on coverage, edge cases, and test maintainability."
         case .debugging:
